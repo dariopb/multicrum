@@ -40,8 +40,9 @@ type state struct {
 	selectCursor int
 	exitPromptID int    // session index waiting for user decision (in exit prompt)
 	exitChoice   int    // 0 = respawn, 1 = remove
-	mouseCapture bool   // when true, terminal mouse events go to viewport instead of native select+copy
-	onMetaChange func() // called when sessions are added/removed/focused
+	mouseCapture bool      // when true, mouse events are forwarded to the child PTY (app-mode)
+	sel          selection // in-progress / completed mouse selection over the focused buffer
+	onMetaChange func()    // called when sessions are added/removed/focused
 }
 
 // Model is the top-level Bubble Tea model.
@@ -239,38 +240,84 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		ev := tea.MouseEvent(msg)
-		// Translate from whole-window coords into the focused pane's frame:
-		// row 0 is the tab bar, the pane starts at row 1.
+		debugMouse(ev)
 		_, paneRows := paneSize(s.width, s.height)
+		// Translate from whole-window coords to pane-relative coords. The
+		// pane starts at row 1 (row 0 is the tab bar). The status bar is
+		// the row just past paneRows.
 		ev.Y -= 1
-		if ev.Y < 0 || ev.Y >= paneRows {
-			return m, nil // tab bar or status bar; don't forward
-		}
-		if ev.X < 0 || ev.X >= s.width {
-			return m, nil
-		}
+		inPane := ev.Y >= 0 && ev.Y < paneRows && ev.X >= 0 && ev.X < s.width
 		sess := s.manager.Focused()
 		if sess == nil {
 			return m, nil
 		}
-		// Only forward when the child app has requested mouse reporting,
-		// otherwise the SGR sequences get printed as text in plain shells.
-		anyButton, motion, anyMotion := sess.Screen().MouseMode()
-		if !anyButton {
+		// Mouse-capture mode: forward to the child PTY for apps like btop,
+		// htop, vim, lazygit. Otherwise we own the mouse for select+copy.
+		if s.mouseCapture {
+			if !inPane {
+				return m, nil
+			}
+			anyButton, motion, anyMotion := sess.Screen().MouseMode()
+			if !anyButton {
+				return m, nil
+			}
+			if ev.Action == tea.MouseActionMotion {
+				if ev.Button == tea.MouseButtonNone {
+					if !anyMotion {
+						return m, nil
+					}
+				} else if !motion && !anyMotion {
+					return m, nil
+				}
+			}
+			if seq := encodeMouseSGR(ev); seq != nil {
+				_, _ = sess.Write(seq)
+			}
+			return m, nil
+		}
+		// Native selection mode. Clamp X/Y so events that drift outside the
+		// pane (e.g. mouse moves into the status bar mid-drag, or release
+		// fires below the pane) still update / finish the selection.
+		clampX := ev.X
+		if clampX < 0 {
+			clampX = 0
+		}
+		if clampX >= s.width {
+			clampX = s.width - 1
+		}
+		clampY := ev.Y
+		if clampY < 0 {
+			clampY = 0
+		}
+		if clampY >= paneRows {
+			clampY = paneRows - 1
+		}
+		switch ev.Button {
+		case tea.MouseButtonWheelUp:
+			if inPane {
+				s.scrollFocused(-3)
+			}
+			return m, nil
+		case tea.MouseButtonWheelDown:
+			if inPane {
+				s.scrollFocused(3)
+			}
 			return m, nil
 		}
 		switch ev.Action {
-		case tea.MouseActionMotion:
-			if ev.Button == tea.MouseButtonNone {
-				if !anyMotion {
-					return m, nil
-				}
-			} else if !motion && !anyMotion {
-				return m, nil
+		case tea.MouseActionPress:
+			if ev.Button == tea.MouseButtonLeft && inPane {
+				s.startSelection(clampX, clampY)
 			}
-		}
-		if seq := encodeMouseSGR(ev); seq != nil {
-			_, _ = sess.Write(seq)
+		case tea.MouseActionMotion:
+			if s.sel.active {
+				s.updateSelection(clampX, clampY)
+			}
+		case tea.MouseActionRelease:
+			if s.sel.active {
+				s.updateSelection(clampX, clampY)
+				return m, s.finishSelection()
+			}
 		}
 		return m, nil
 
@@ -480,10 +527,8 @@ func (s *state) handleShortcut(m Model, msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, nil
 	case shortcutMouse:
 		s.mouseCapture = !s.mouseCapture
-		if s.mouseCapture {
-			return true, tea.EnableMouseAllMotion
-		}
-		return true, tea.DisableMouse
+		s.clearSelection()
+		return true, nil
 	case shortcutNext:
 		s.manager.Focus((s.manager.FocusedIndex() + 1) % s.manager.Len())
 		s.refreshFocused()
@@ -702,6 +747,10 @@ func (m Model) renderPane() string {
 		blank := viewport.New(cols, rows)
 		pane = blank.View()
 	}
+	if !s.mouseCapture {
+		paneCols, paneRows := paneSize(s.width, s.height)
+		pane = s.overlaySelection(pane, paneCols, paneRows)
+	}
 	switch s.mode {
 	case modeHelp:
 		return m.overlayBox(pane, m.renderHelpModal())
@@ -829,7 +878,7 @@ func (m Model) renderHelpModal() string {
 		"Ctrl+Alt+PgUp/PgDown page scrollback",
 		"Ctrl+Alt+Up/Down     line scrollback",
 		"Ctrl+Alt+Home/End    top/bottom of scrollback",
-		"Ctrl+Alt+M           toggle mouse capture",
+		"Ctrl+Alt+M           toggle mouse mode (select ↔ app)",
 		"Ctrl+Alt+Q           quit",
 		"",
 		"Esc or Enter closes this help",
@@ -933,9 +982,9 @@ func (m Model) renderStatusBar() string {
 				state = "exited"
 			}
 			cols, rows := paneSize(s.width, s.height)
-			mouseTag := "mouse:off"
+			mouseTag := "mouse:select"
 			if s.mouseCapture {
-				mouseTag = "mouse:on"
+				mouseTag = "mouse:app"
 			}
 			status = fmt.Sprintf(" session %d │ %s │ %dx%d │ %s ", focused+1, state, cols, rows, mouseTag)
 			break

@@ -22,9 +22,18 @@ type VTScreen struct {
 	cols       int
 	rows       int
 	dirty      bool
-	rawHistory []byte   // raw PTY bytes capped at maxScrollback, for WS replay
-	scrollback []string // pre-rendered (with SGR) lines that scrolled off the top
+	rawHistory []byte       // raw PTY bytes capped at maxScrollback, for WS replay
+	scrollback []string     // pre-rendered (with SGR) lines that scrolled off the top
+	plainSB    []BufferLine // plain-text + soft-wrap flag, parallel to scrollback
 	reply      atomic.Pointer[io.Writer]
+}
+
+// BufferLine is one physical row of the terminal as plain text plus whether
+// the row is soft-wrapped (its last cell carries vt10x's attrWrap bit). The
+// UI uses these to extract selection text with correct line breaks.
+type BufferLine struct {
+	Text     string
+	SoftWrap bool
 }
 
 // replyWriter is a thin shim that forwards vt10x replies (CPR, DSR, etc.)
@@ -95,9 +104,12 @@ func (s *VTScreen) writeChunkLocked(p []byte) {
 	}
 	canScroll := s.term.Mode()&vt10x.ModeAltScreen == 0
 	var beforeTop string
+	var beforeTopPlain string
+	var beforeTopSoftWrap bool
 	var beforeTopValid bool
 	if canScroll && containsScrollTrigger(p) {
 		beforeTop = s.renderRowAtLocked(0, -1)
+		beforeTopPlain, beforeTopSoftWrap = s.plainRowAtLocked(0)
 		beforeTopValid = true
 	}
 
@@ -118,6 +130,14 @@ func (s *VTScreen) writeChunkLocked(p []byte) {
 	if len(s.scrollback) > maxScrollbackLines {
 		s.scrollback = s.scrollback[len(s.scrollback)-maxScrollbackLines:]
 	}
+	plain := beforeTopPlain
+	if !beforeTopSoftWrap {
+		plain = strings.TrimRight(plain, " ")
+	}
+	s.plainSB = append(s.plainSB, BufferLine{Text: plain, SoftWrap: beforeTopSoftWrap})
+	if len(s.plainSB) > maxScrollbackLines {
+		s.plainSB = s.plainSB[len(s.plainSB)-maxScrollbackLines:]
+	}
 }
 
 // trimTrailingSpaces removes trailing spaces from a line that may end with an
@@ -137,17 +157,49 @@ func trimTrailingSpaces(s string) string {
 
 // topRowPlainLocked returns the plain-text contents of row 0. O(cols), no SGR.
 func (s *VTScreen) topRowPlainLocked() string {
+	text, _ := s.plainRowAtLocked(0)
+	return text
+}
+
+// plainRowAtLocked returns the plain-text contents of row y plus the
+// soft-wrap flag of its last cell.
+func (s *VTScreen) plainRowAtLocked(y int) (string, bool) {
 	var b strings.Builder
 	b.Grow(s.cols)
+	var lastMode int16
 	for x := 0; x < s.cols; x++ {
-		cell := s.term.Cell(x, 0)
+		cell := s.term.Cell(x, y)
 		ch := cell.Char
 		if ch == 0 {
 			ch = ' '
 		}
 		b.WriteRune(ch)
+		if x == s.cols-1 {
+			lastMode = cell.Mode
+		}
 	}
-	return b.String()
+	return b.String(), lastMode&attrWrap != 0
+}
+
+// BufferLines returns the full scrollback plus the current screen rows as
+// plain-text BufferLine entries in top-to-bottom order. Designed for mouse
+// selection text extraction.
+func (s *VTScreen) BufferLines() []BufferLine {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]BufferLine, 0, len(s.plainSB)+s.rows)
+	out = append(out, s.plainSB...)
+	for y := 0; y < s.rows; y++ {
+		text, soft := s.plainRowAtLocked(y)
+		if !soft {
+			text = strings.TrimRight(text, " ")
+		}
+		out = append(out, BufferLine{Text: text, SoftWrap: soft})
+	}
+	if n := len(out); n > 0 {
+		out[n-1].SoftWrap = false
+	}
+	return out
 }
 
 // splitScrollChunks splits p into segments that each end immediately after a
@@ -280,6 +332,7 @@ const (
 	attrBold      int16 = 1 << 2
 	attrItalic    int16 = 1 << 4
 	attrBlink     int16 = 1 << 5
+	attrWrap      int16 = 1 << 6
 )
 
 // containsScrollTrigger reports whether the byte stream can plausibly cause

@@ -1,0 +1,40 @@
+# Binaries
+/multiagent
+/multiAgent
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Go test / coverage
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Debug / runtime artifacts
+/tmp/
+debug.log
+*.log
+multiagent-debug.log
+
+# Local env / secrets
+.env
+.env.*
+!.env.example

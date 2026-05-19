@@ -52,7 +52,7 @@ func run(_ context.Context, c *cli.Command) error {
 
 	model := ui.NewModel(agentCmd, cols, rows)
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	model.SetProgram(p)
 
 	wsAddr := c.String("ws")
