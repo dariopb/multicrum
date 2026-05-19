@@ -1,0 +1,162 @@
+package session
+
+import (
+	"fmt"
+	"io"
+	"sync"
+)
+
+// OutputMsg is sent to the Bubble Tea program whenever the session produces output.
+type OutputMsg struct {
+	Index int
+	Data  []byte
+}
+
+// ExitMsg is sent once when the child process inside a session exits.
+type ExitMsg struct {
+	Index int
+}
+
+// Session owns a PTY/ConPTY and the process running inside it.
+type Session struct {
+	mu     sync.Mutex
+	index  int
+	cmd    []string
+	title  string
+	screen *VTScreen
+	exited bool
+
+	// rw is the bidirectional channel to the child process (unix pty master or
+	// Windows ConPTY pipe pair). Set by platform-specific Start().
+	rw       io.ReadWriteCloser
+	resizeFn func(cols, rows int) error
+
+	// SendOutput is injected by SessionManager to route output into the TUI.
+	SendOutput func(msg OutputMsg)
+	// SendExit is injected by SessionManager and fires once when the child
+	// process exits so the UI can prompt the user.
+	SendExit func(msg ExitMsg)
+}
+
+func newSession(index int, cmd []string, cols, rows int) (*Session, error) {
+	s := &Session{
+		index:  index,
+		cmd:    cmd,
+		screen: NewVTScreen(cols, rows),
+	}
+	return s, nil
+}
+
+func (s *Session) readLoop() {
+	buf := make([]byte, 4096)
+	for {
+		n, err := s.rw.Read(buf)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			s.screen.Write(chunk)
+			if s.SendOutput != nil {
+				s.SendOutput(OutputMsg{Index: s.index, Data: chunk})
+			}
+		}
+		if err != nil {
+			s.mu.Lock()
+			already := s.exited
+			s.exited = true
+			s.mu.Unlock()
+			if !already && s.SendExit != nil {
+				s.SendExit(ExitMsg{Index: s.index})
+			}
+			return
+		}
+	}
+}
+
+// Write sends bytes into the child process (keyboard input).
+func (s *Session) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rw == nil {
+		return 0, fmt.Errorf("session not started")
+	}
+	return s.rw.Write(p)
+}
+
+// Resize notifies the child process of a new terminal size.
+func (s *Session) Resize(cols, rows int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.screen.Resize(cols, rows)
+	if s.resizeFn != nil {
+		return s.resizeFn(cols, rows)
+	}
+	return nil
+}
+
+// Close kills the child process.
+func (s *Session) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exited = true
+	if s.rw != nil {
+		return s.rw.Close()
+	}
+	return nil
+}
+
+// Index returns the session's slot in the manager.
+func (s *Session) Index() int { return s.index }
+
+// Title returns a short label for the tab bar.
+func (s *Session) Title() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.title != "" {
+		return s.title
+	}
+	if len(s.cmd) == 0 {
+		return "?"
+	}
+	return s.cmd[0]
+}
+
+// SetTitle overrides the tab label for this session.
+func (s *Session) SetTitle(title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.title = title
+}
+
+// Exited reports whether the child process has terminated.
+func (s *Session) Exited() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exited
+}
+
+// Screen returns the VT screen buffer for this session.
+func (s *Session) Screen() *VTScreen { return s.screen }
+
+// Cmd returns the command the session was started with.
+func (s *Session) Cmd() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.cmd))
+	copy(out, s.cmd)
+	return out
+}
+
+// Respawn relaunches the original command inside this session, reusing the
+// existing index, title, and screen size. The old VT screen is cleared.
+func (s *Session) Respawn(cols, rows int) error {
+	s.mu.Lock()
+	if s.rw != nil {
+		_ = s.rw.Close()
+	}
+	s.rw = nil
+	s.resizeFn = nil
+	s.exited = false
+	s.screen = NewVTScreen(cols, rows)
+	s.mu.Unlock()
+	return s.Start(cols, rows)
+}
