@@ -3,6 +3,8 @@ package session
 import (
 	"fmt"
 	"sync"
+
+	"multiagent/ssh_client"
 )
 
 // SessionManager holds all active sessions.
@@ -16,15 +18,24 @@ type SessionManager struct {
 	SendOutput func(msg OutputMsg)
 	// SendExit is called once when a session's child process exits.
 	SendExit func(msg ExitMsg)
+
+	sshClient *ssh_client.Client
 }
 
 // NewManager creates a SessionManager with initial terminal dimensions.
 func NewManager(cols, rows int, sendOutput func(OutputMsg), sendExit func(ExitMsg)) *SessionManager {
+	return NewManagerWithSSH(cols, rows, sendOutput, sendExit, nil)
+}
+
+// NewManagerWithSSH creates a SessionManager that starts SSH-backed sessions
+// when sshClient is non-nil, otherwise local PTY/ConPTY sessions.
+func NewManagerWithSSH(cols, rows int, sendOutput func(OutputMsg), sendExit func(ExitMsg), sshClient *ssh_client.Client) *SessionManager {
 	return &SessionManager{
 		cols:       cols,
 		rows:       rows,
 		SendOutput: sendOutput,
 		SendExit:   sendExit,
+		sshClient:  sshClient,
 	}
 }
 
@@ -47,9 +58,15 @@ func (m *SessionManager) SetSendOutput(fn func(OutputMsg)) {
 
 // New creates, starts, and appends a new session.
 func (m *SessionManager) New(cmd []string) (*Session, error) {
+	return m.NewWithSSH(cmd, m.sshClient)
+}
+
+// NewWithSSH creates, starts, and appends a new session using sshClient when
+// non-nil, otherwise using the local PTY/ConPTY backend.
+func (m *SessionManager) NewWithSSH(cmd []string, sshClient *ssh_client.Client) (*Session, error) {
 	m.mu.Lock()
 	idx := len(m.sessions)
-	s, err := newSession(idx, cmd, m.cols, m.rows)
+	s, err := newSession(idx, cmd, m.cols, m.rows, sshClient)
 	if err != nil {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("new session: %w", err)
@@ -61,6 +78,25 @@ func (m *SessionManager) New(cmd []string) (*Session, error) {
 	m.mu.Unlock()
 
 	if err := s.Start(m.cols, m.rows); err != nil {
+		m.mu.Lock()
+		for i, existing := range m.sessions {
+			if existing == s {
+				m.sessions = append(m.sessions[:i], m.sessions[i+1:]...)
+				break
+			}
+		}
+		for i, existing := range m.sessions {
+			existing.index = i
+		}
+		if len(m.sessions) == 0 {
+			m.focused = 0
+		} else if idx > 0 {
+			m.focused = idx - 1
+		} else {
+			m.focused = 0
+		}
+		m.mu.Unlock()
+		_ = s.Close()
 		return nil, fmt.Errorf("start session: %w", err)
 	}
 	return s, nil

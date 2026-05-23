@@ -8,8 +8,12 @@ import (
 	"multiagent/console"
 )
 
-// Start forks the process into a Unix PTY.
+// Start opens the configured backend: SSH remote PTY when configured,
+// otherwise a local Unix PTY.
 func (s *Session) Start(cols, rows int) error {
+	if s.sshClient != nil {
+		return s.startSSH(cols, rows)
+	}
 	uc, err := console.NewUnixConsole(s.cmd, cols, rows)
 	if err != nil {
 		return fmt.Errorf("Unix PTY start: %w", err)

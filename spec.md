@@ -54,7 +54,14 @@ C:\go124\go\bin\go.exe run . --cmd "bash" --ws :9999 --token mytoken
 
 | Flag | Default | Purpose |
 |---|---:|---|
-| `--cmd` | `bash` | Command to run for each new session; parsed with `strings.Fields` |
+| `--cmd` | `bash` | Command to run for each local session, or remote command when `--ssh` is set; parsed with `strings.Fields` |
+| `--ssh` | empty | SSH target for remote-backed sessions, e.g. `user@host` or `user@host:2222` |
+| `-i`, `--ssh-key` | empty | Explicit SSH identity file; overrides config/default identities |
+| `--ssh-passwd` | empty | Explicit password / keyboard-interactive password; overrides config/default identities |
+| `--ssh-use-default-keys` | false | Try standard `~/.ssh/id_*` identity files |
+| `--ssh-agent` | true | Use `SSH_AUTH_SOCK` when no explicit password/key is provided |
+| `--ssh-known-hosts` | empty | Override known_hosts path |
+| `--ssh-insecure-ignore-host-key` | false | Disable host key verification; unsafe testing-only escape hatch |
 | `--ws` | empty | If set, starts the Echo/xterm.js web UI on this address |
 | `--token` | empty | Optional token required on `/ws?token=...` |
 
@@ -91,6 +98,12 @@ multiAgent/
 ├── console/
 │   ├── console_unix.go      # Unix PTY wrapper, implements io.ReadWriteCloser + Resize + Done
 │   └── console_windows.go   # Windows ConPTY wrapper, implements io.ReadWriteCloser + Resize + Done
+├── ssh_client/              # reusable SSH client/session backend
+│   ├── config.go            # target/config/auth/known_hosts resolution
+│   ├── parse.go             # OpenSSH-like [user@]host[:port] parsing
+│   ├── auth.go              # key/password/agent auth methods
+│   ├── client.go            # reusable Client factory
+│   └── session.go           # interactive SSH PTY Read/Write/Resize/Close adapter
 ├── session/
 │   ├── session.go           # Session lifecycle, read loop, rename state
 │   ├── manager.go           # SessionManager create/focus/kill/rename/resize
@@ -122,11 +135,11 @@ multiAgent/
 
 Current responsibilities:
 
-- Store command args, display title override, exited state, PTY read/write handle, resize callback.
-- Start through platform-specific `Start(cols, rows)` implementation.
-- `Write(p []byte)` forwards keyboard bytes to PTY/ConPTY.
-- `Resize(cols, rows)` resizes both `VTScreen` and underlying PTY/ConPTY.
-- `Close()` kills/closes the process backend.
+- Store command args, display title override, exited state, PTY/SSH read-write handle, resize callback, and optional `ssh_client.Client`.
+- Start through platform-specific `Start(cols, rows)` implementation; when `sshClient` is non-nil, `Start` delegates to `startSSH` instead of local PTY/ConPTY.
+- `Write(p []byte)` forwards keyboard bytes to PTY/ConPTY or SSH remote stdin.
+- `Resize(cols, rows)` resizes both `VTScreen` and underlying PTY/ConPTY or sends SSH `WindowChange`.
+- `Close()` kills/closes the process backend or SSH remote session.
 - `readLoop()` reads raw bytes, updates `VTScreen`, and emits `OutputMsg`.
 - `Title()` returns renamed title if set, otherwise command name.
 
@@ -151,19 +164,40 @@ Windows backend implemented in `console/console_windows.go`:
 - Implements `Read`, `Write`, `Resize`, `Close`, and `Done`.
 - Used by `session/start_windows.go`.
 
+### `ssh_client`
+
+Top-level package `ssh_client/` is a reusable library for opening interactive SSH PTY sessions.
+
+Implemented behavior:
+
+- `ParseTarget` accepts OpenSSH-like targets: `host`, `user@host`, `host:port`, `user@host:port`, bracketed IPv6, and unbracketed IPv6 host-only forms.
+- `Resolve` combines explicit options, `~/.ssh/config` / `/etc/ssh/ssh_config`, default username/port, auth methods, and known-host verification into a concrete `ResolvedConfig`.
+- Auth precedence is explicit and intentional:
+  - `--ssh-key` / `Options.IdentityFile` uses only that explicit key.
+  - `--ssh-passwd` / `Options.Password` uses only password and keyboard-interactive password auth.
+  - Config `IdentityFile`, `--ssh-use-default-keys`, and `SSH_AUTH_SOCK` are considered only when no explicit password/key is supplied.
+- Default keys, when enabled, are tried in this order: `id_ed25519`, `id_ecdsa`, `id_rsa`, `id_dsa`.
+- Host keys are verified with `github.com/skeema/knownhosts`; insecure ignore is only available via explicit option.
+- `Client.Start(cols, rows)` opens a fresh SSH connection and remote PTY; `RemoteSession` implements `io.ReadWriteCloser` plus `Resize` and `Done`.
+- SSH remote sessions support OpenSSH-style escapes at line start: `~.` disconnects, `~~` sends a literal `~`.
+
 ### `VTScreen`
 
-`VTScreen` keeps two representations:
+`VTScreen` keeps three representations:
 
 - `vt10x.Terminal` for current visible screen state.
 - `rawHistory` capped at 256 KiB for xterm.js replay snapshots.
+- ANSI-rendered scrollback plus plain `BufferLine` scrollback for local rendering and mouse copy extraction.
 
 Important behavior:
 
 - `Write(p)` feeds vt10x and appends to replay history.
+- Bulk output is split at scroll-trigger bytes so scrollback captures large outputs reliably.
 - `Render()` walks vt10x cells and emits ANSI SGR sequences so the Bubble Tea viewport can show colors.
-- `Render()` also draws the cursor as an explicit black-on-white cell when vt10x reports it visible.
+- Reverse-video rendering handles vt10x default color sentinels so reverse search highlights show correctly.
+- `BufferLines()` returns plain text rows plus a soft-wrap flag; mouse selection uses this to avoid inserting newlines inside soft-wrapped logical lines.
 - `RawSnapshot()` returns a copy of replay bytes for browser clients.
+- `SetReplyWriter()` forwards vt10x CPR/DSR replies to the PTY/SSH backend so remote TUIs that query cursor position work.
 
 ### `SessionManager`
 
@@ -171,7 +205,8 @@ Important behavior:
 
 Implemented operations:
 
-- `New(cmd []string)` creates and focuses a new session.
+- `New(cmd []string)` creates and focuses a new session using the manager's default backend.
+- `NewWithSSH(cmd []string, sshClient *ssh_client.Client)` creates a one-off local or SSH-backed session. If start fails, it rolls back the half-created session and restores focus.
 - `Focus(index int)` changes focus.
 - `Rename(index, title)` updates a session title override.
 - `Kill(index)` closes and removes a session, but refuses to remove the final remaining session.
@@ -193,19 +228,44 @@ The Bubble Tea model stores mutable data in a pointer `*state` to avoid losing m
 | `modeNormal` | PTY forwarding + global shortcuts |
 | `modeRenaming` | Inline rename prompt in status bar |
 | `modeSelecting` | Filterable session selector |
+| `modeHelp` | Centered help modal |
+| `modeExitPrompt` | Centered modal for respawn/remove after a session exits |
+| `modeNewSession` | Centered modal opened by Ctrl+Alt+T for choosing same/local/remote session creation |
 
 ### TUI Key Bindings
 
 | Key | Action |
 |---|---|
-| `Ctrl+T` | New session |
-| `Ctrl+W` | Kill focused session, except final remaining session |
-| `Ctrl+R` | Rename focused session |
-| `Ctrl+S` | Open filtered session selector |
-| `Alt+Left` / `Alt+Right` | Previous / next session |
+| `Ctrl+Alt+T` | Open new-session modal; Enter defaults to same current/default session, or choose typed local command / remote SSH target |
+| `Ctrl+Alt+W` | Kill focused session, except final remaining session |
+| `Ctrl+Alt+R` | Rename focused session |
+| `Ctrl+Alt+S` | Open filtered session selector |
+| `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Previous / next session |
 | `Alt+1..9` | Jump to session N |
-| `Ctrl+Q` | Close all sessions and quit |
+| `Ctrl+Alt+M` | Toggle mouse mode between select/copy and app forwarding |
+| `Ctrl+Alt+Q` | Close all sessions and quit |
 | Other handled keys | Converted by `keyToBytes()` and forwarded to focused PTY |
+
+### New-session Modal
+
+`Ctrl+Alt+T` opens `modeNewSession` instead of immediately creating a tab.
+
+Options:
+
+1. **Same as current/default** — default selection; pressing Enter preserves the old behavior and starts another session using the model's default local command or default SSH client factory.
+2. **Local command** — user types a free-form local command. It is parsed with `strings.Fields` and started through the local PTY/ConPTY backend.
+3. **Remote SSH** — user enters `user@host[:port]`, optional password, optional key file, and optional remote command. This creates a one-off `ssh_client.Client` and starts the new tab through the SSH PTY backend.
+
+If the new command/SSH connection fails to start, the half-created session is rolled back by `SessionManager.NewWithSSH`, focus returns to the previous session, and the modal remains open with a wrapped inline error block (at least four lines) instead of setting global `errMsg`.
+
+### Mouse Modes and Selection
+
+Bubble Tea mouse tracking is enabled at startup. The status bar shows:
+
+- `mouse:select` — app-owned selection mode. Left-drag selects text from the focused viewport; release copies through available clipboard transports (native helpers, tmux paste buffer, then OSC 52). Soft-wrapped rows are joined without spurious newlines by using `VTScreen.BufferLines()` and vt10x's wrap flag.
+- `mouse:app` — mouse events are forwarded to the child process only when the child has enabled terminal mouse reporting.
+
+`Ctrl+Alt+M` toggles between these modes.
 
 ### Layout
 

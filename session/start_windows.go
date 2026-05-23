@@ -9,8 +9,12 @@ import (
 	"multiagent/console"
 )
 
-// Start launches the process inside a Windows ConPTY.
+// Start opens the configured backend: SSH remote PTY when configured,
+// otherwise a local Windows ConPTY.
 func (s *Session) Start(cols, rows int) error {
+	if s.sshClient != nil {
+		return s.startSSH(cols, rows)
+	}
 	cmd := strings.Join(s.cmd, " ")
 	wc, err := console.NewWinConsole(cmd, cols, rows)
 	if err != nil {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"multiagent/ssh_client"
 )
 
 // OutputMsg is sent to the Bubble Tea program whenever the session produces output.
@@ -26,10 +28,11 @@ type Session struct {
 	screen *VTScreen
 	exited bool
 
-	// rw is the bidirectional channel to the child process (unix pty master or
-	// Windows ConPTY pipe pair). Set by platform-specific Start().
-	rw       io.ReadWriteCloser
-	resizeFn func(cols, rows int) error
+	// rw is the bidirectional channel to the child process (unix pty master,
+	// Windows ConPTY pipe pair, or SSH remote PTY). Set by Start().
+	rw        io.ReadWriteCloser
+	resizeFn  func(cols, rows int) error
+	sshClient *ssh_client.Client
 
 	// SendOutput is injected by SessionManager to route output into the TUI.
 	SendOutput func(msg OutputMsg)
@@ -38,11 +41,12 @@ type Session struct {
 	SendExit func(msg ExitMsg)
 }
 
-func newSession(index int, cmd []string, cols, rows int) (*Session, error) {
+func newSession(index int, cmd []string, cols, rows int, sshClient *ssh_client.Client) (*Session, error) {
 	s := &Session{
-		index:  index,
-		cmd:    cmd,
-		screen: NewVTScreen(cols, rows),
+		index:     index,
+		cmd:       cmd,
+		screen:    NewVTScreen(cols, rows),
+		sshClient: sshClient,
 	}
 	return s, nil
 }
@@ -159,4 +163,20 @@ func (s *Session) Respawn(cols, rows int) error {
 	s.screen = NewVTScreen(cols, rows)
 	s.mu.Unlock()
 	return s.Start(cols, rows)
+}
+
+func (s *Session) startSSH(cols, rows int) error {
+	rs, err := s.sshClient.Start(cols, rows)
+	if err != nil {
+		return fmt.Errorf("SSH start: %w", err)
+	}
+	s.mu.Lock()
+	s.rw = rs
+	s.resizeFn = func(cols, rows int) error {
+		return rs.Resize(cols, rows)
+	}
+	s.mu.Unlock()
+	s.screen.SetReplyWriter(rs)
+	go s.readLoop()
+	return nil
 }

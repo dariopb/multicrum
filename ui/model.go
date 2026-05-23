@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"multiagent/session"
+	"multiagent/ssh_client"
 	"multiagent/transport"
 )
 
@@ -25,6 +26,7 @@ const (
 	modeSelecting
 	modeHelp
 	modeExitPrompt
+	modeNewSession
 )
 
 type state struct {
@@ -38,11 +40,13 @@ type state struct {
 	renameText   string
 	selectFilter string
 	selectCursor int
-	exitPromptID int    // session index waiting for user decision (in exit prompt)
-	exitChoice   int    // 0 = respawn, 1 = remove
-	mouseCapture bool      // when true, mouse events are forwarded to the child PTY (app-mode)
-	sel          selection // in-progress / completed mouse selection over the focused buffer
-	onMetaChange func()    // called when sessions are added/removed/focused
+	exitPromptID int                // session index waiting for user decision (in exit prompt)
+	exitChoice   int                // 0 = respawn, 1 = remove
+	newSession   newSessionState    // state for the new-session modal
+	mouseCapture bool               // when true, mouse events are forwarded to the child PTY (app-mode)
+	sel          selection          // in-progress / completed mouse selection over the focused buffer
+	sshClient    *ssh_client.Client // non-nil starts SSH-backed sessions
+	onMetaChange func()             // called when sessions are added/removed/focused
 }
 
 // Model is the top-level Bubble Tea model.
@@ -53,12 +57,19 @@ type Model struct {
 
 // NewModel constructs the model. agentCmd is the command to run per session.
 func NewModel(agentCmd []string, cols, rows int) *Model {
+	return NewModelWithSSH(agentCmd, cols, rows, nil)
+}
+
+// NewModelWithSSH constructs a model that starts SSH-backed sessions when
+// sshClient is non-nil.
+func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Client) *Model {
 	return &Model{
 		agentCmd: agentCmd,
 		s: &state{
 			viewports: make(map[int]*viewport.Model),
 			width:     cols,
 			height:    rows,
+			sshClient: sshClient,
 		},
 	}
 }
@@ -70,7 +81,7 @@ func (m *Model) SetProgram(p *tea.Program) {
 	sendOutput := func(msg session.OutputMsg) { p.Send(msg) }
 	sendExit := func(msg session.ExitMsg) { p.Send(msg) }
 	cols, rows := paneSize(m.s.width, m.s.height)
-	m.s.manager = session.NewManager(cols, rows, sendOutput, sendExit)
+	m.s.manager = session.NewManagerWithSSH(cols, rows, sendOutput, sendExit, m.s.sshClient)
 }
 
 // StartWSTransport starts the WebSocket transport wired to the session manager.
@@ -338,6 +349,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := s.handleExitPromptKey(m, msg)
 			return m, cmd
 		}
+		if s.mode == modeNewSession {
+			cmd := s.handleNewSessionKey(m, msg)
+			return m, cmd
+		}
 		if handled, cmd := s.handleShortcut(m, msg); handled {
 			return m, cmd
 		}
@@ -458,13 +473,13 @@ func (s *state) refreshFocused() {
 // forwarded into the child PTY. Digit shortcuts also accept the bare Alt+<n>
 // form because not every terminal emits a distinct sequence for Ctrl+Alt+<n>.
 const (
-	shortcutHelp     = "alt+`"
-	shortcutNew      = "alt+ctrl+t"
-	shortcutKill     = "alt+ctrl+w"
-	shortcutRename   = "alt+ctrl+r"
-	shortcutSessions = "alt+ctrl+s"
-	shortcutPrev     = "alt+ctrl+left"
-	shortcutNext     = "alt+ctrl+right"
+	shortcutHelp         = "alt+`"
+	shortcutNew          = "alt+ctrl+t"
+	shortcutKill         = "alt+ctrl+w"
+	shortcutRename       = "alt+ctrl+r"
+	shortcutSessions     = "alt+ctrl+s"
+	shortcutPrev         = "alt+ctrl+left"
+	shortcutNext         = "alt+ctrl+right"
 	shortcutScrollUp     = "alt+ctrl+up"
 	shortcutScrollDown   = "alt+ctrl+down"
 	shortcutPageUp       = "alt+ctrl+pgup"
@@ -481,11 +496,7 @@ func (s *state) handleShortcut(m Model, msg tea.KeyMsg) (bool, tea.Cmd) {
 		s.mode = modeHelp
 		return true, nil
 	case shortcutNew:
-		_, err := s.manager.New(m.agentCmd)
-		if err == nil {
-			s.resetViewport(s.manager.FocusedIndex(), s.width, s.height)
-			s.notifyMeta()
-		}
+		s.openNewSessionModal(m.agentCmd)
 		return true, nil
 	case shortcutKill:
 		if s.manager.Len() > 1 {
@@ -758,6 +769,8 @@ func (m Model) renderPane() string {
 		return m.overlayBox(pane, m.renderRenameModal())
 	case modeExitPrompt:
 		return m.overlayBox(pane, m.renderExitModal())
+	case modeNewSession:
+		return m.overlayBox(pane, m.renderNewSessionModal())
 	}
 	return pane
 }

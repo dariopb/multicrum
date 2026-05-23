@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/urfave/cli/v3"
+	"multiagent/ssh_client"
 	"multiagent/ui"
 )
 
@@ -20,6 +21,36 @@ func main() {
 				Name:  "cmd",
 				Value: "bash",
 				Usage: "command to run in each session (space-separated)",
+			},
+			&cli.StringFlag{
+				Name:  "ssh",
+				Usage: "SSH target for remote sessions, e.g. user@host or user@host:2222",
+			},
+			&cli.StringFlag{
+				Name:    "ssh-key",
+				Aliases: []string{"i"},
+				Usage:   "SSH identity file (OpenSSH -i equivalent)",
+			},
+			&cli.StringFlag{
+				Name:  "ssh-passwd",
+				Usage: "SSH password for password/keyboard-interactive authentication",
+			},
+			&cli.BoolFlag{
+				Name:  "ssh-use-default-keys",
+				Usage: "try standard keys from ~/.ssh (id_ed25519, id_ecdsa, id_rsa, id_dsa)",
+			},
+			&cli.BoolFlag{
+				Name:  "ssh-agent",
+				Usage: "use SSH agent authentication when SSH_AUTH_SOCK is available",
+				Value: true,
+			},
+			&cli.StringFlag{
+				Name:  "ssh-known-hosts",
+				Usage: "known_hosts file path override",
+			},
+			&cli.BoolFlag{
+				Name:  "ssh-insecure-ignore-host-key",
+				Usage: "disable SSH host key verification (unsafe; testing only)",
 			},
 			&cli.StringFlag{
 				Name:  "ws",
@@ -50,7 +81,25 @@ func run(_ context.Context, c *cli.Command) error {
 		cols, rows = w, h
 	}
 
-	model := ui.NewModel(agentCmd, cols, rows)
+	var sshClient *ssh_client.Client
+	if target := c.String("ssh"); target != "" {
+		client, err := ssh_client.New(ssh_client.Options{
+			Target:                target,
+			IdentityFile:          c.String("ssh-key"),
+			Password:              c.String("ssh-passwd"),
+			UseDefaultKeys:        c.Bool("ssh-use-default-keys"),
+			UseAgent:              c.Bool("ssh-agent"),
+			KnownHosts:            c.String("ssh-known-hosts"),
+			InsecureIgnoreHostKey: c.Bool("ssh-insecure-ignore-host-key"),
+			Command:               agentCmd,
+		})
+		if err != nil {
+			return fmt.Errorf("ssh config: %w", err)
+		}
+		sshClient = client
+	}
+
+	model := ui.NewModelWithSSH(agentCmd, cols, rows, sshClient)
 
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	model.SetProgram(p)
