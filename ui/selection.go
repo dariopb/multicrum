@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // selection tracks an in-progress or completed mouse selection over the
@@ -37,7 +37,7 @@ func (s *state) bufferRowFromMouse(yInPane int) int {
 	if !ok {
 		return -1
 	}
-	return vp.YOffset + yInPane
+	return vp.YOffset() + yInPane
 }
 
 // startSelection begins a fresh selection at the given mouse coordinates
@@ -166,7 +166,7 @@ func (s *state) overlaySelection(pane string, paneCols, paneRows int) string {
 	if !ok {
 		return pane
 	}
-	yoff := vp.YOffset
+	yoff := vp.YOffset()
 	paneLines := strings.Split(pane, "\n")
 	for i := 0; i < len(paneLines) && i < paneRows; i++ {
 		row := yoff + i

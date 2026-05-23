@@ -1,144 +1,174 @@
 package ui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
-// isCtrlAlt returns true when msg is Ctrl+Alt+<letter>. We detect this via
-// Bubble Tea's KeyCtrlX types combined with the Alt flag, which is set when
-// the terminal prefixes the control byte with ESC.
-func isCtrlAlt(msg tea.KeyMsg, t tea.KeyType) bool {
-	return msg.Alt && msg.Type == t
+// isCtrlAlt returns true when msg is Ctrl+Alt+<key>. Bubble Tea v2 represents
+// modifiers in Key.Mod and the base key in Key.Code.
+func isCtrlAlt(msg tea.KeyPressMsg, code rune) bool {
+	k := msg.Key()
+	return k.Code == code && k.Mod.Contains(tea.ModCtrl|tea.ModAlt)
 }
 
-// keyToBytes converts a Bubble Tea KeyMsg to the byte sequence that should
-// be written to the PTY. Bubble Tea gives us semantic names ("enter",
+// keyToBytes converts a Bubble Tea KeyPressMsg to the byte sequence that should
+// be written to the PTY. Bubble Tea gives us semantic keys ("enter",
 // "backspace", …) but the PTY needs real terminal escape sequences.
-//
-// Every printable rune, every named special key, every Ctrl+letter and every
-// Alt-prefixed variant must be forwarded so child TUIs see exactly what the
-// user typed.
-func keyToBytes(msg tea.KeyMsg, appCursor bool) []byte {
-	// For regular rune input (including Alt+rune sequences Bubble Tea decodes),
-	// use the raw bytes that Bubble Tea already has.
-	if msg.Type == tea.KeyRunes {
-		if msg.Alt {
+func keyToBytes(msg tea.KeyPressMsg, appCursor bool) []byte {
+	k := msg.Key()
+	if k.Text != "" && !k.Mod.Contains(tea.ModCtrl) {
+		if k.Mod.Contains(tea.ModAlt) {
 			b := []byte{0x1b}
-			return append(b, []byte(string(msg.Runes))...)
+			return append(b, []byte(k.Text)...)
 		}
-		return []byte(string(msg.Runes))
+		return []byte(k.Text)
 	}
-
-	// Space is sometimes delivered as KeySpace with msg.Runes empty.
-	if msg.Type == tea.KeySpace {
-		if msg.Alt {
-			return []byte{0x1b, ' '}
-		}
-		return []byte{' '}
-	}
-
 	prefix := ""
-	if msg.Alt {
+	if k.Mod.Contains(tea.ModAlt) && !k.Mod.Contains(tea.ModCtrl) {
 		prefix = "\x1b"
 	}
-	if seq, ok := keySequences[msg.Type]; ok {
-		if appCursor {
-			if appSeq, ok := appCursorKeySequences[msg.Type]; ok {
-				seq = appSeq
+	if k.Mod.Contains(tea.ModCtrl) {
+		if b, ok := ctrlByte(k.Code); ok {
+			if k.Mod.Contains(tea.ModAlt) {
+				return []byte{0x1b, b}
 			}
+			return []byte{b}
 		}
+	}
+	if seq, ok := keySequence(k, appCursor); ok {
 		return []byte(prefix + seq)
 	}
 	return nil
 }
 
-var appCursorKeySequences = map[tea.KeyType]string{
-	tea.KeyUp:    "\x1bOA",
-	tea.KeyDown:  "\x1bOB",
-	tea.KeyRight: "\x1bOC",
-	tea.KeyLeft:  "\x1bOD",
+func keySequence(k tea.Key, appCursor bool) (string, bool) {
+	if appCursor {
+		switch k.Code {
+		case tea.KeyUp:
+			return "\x1bOA", true
+		case tea.KeyDown:
+			return "\x1bOB", true
+		case tea.KeyRight:
+			return "\x1bOC", true
+		case tea.KeyLeft:
+			return "\x1bOD", true
+		}
+	}
+	switch k.Code {
+	case tea.KeyEnter, tea.KeyKpEnter:
+		return "\r", true
+	case tea.KeyBackspace:
+		return "\x7f", true
+	case tea.KeyDelete, tea.KeyKpDelete:
+		return "\x1b[3~", true
+	case tea.KeyTab:
+		if k.Mod.Contains(tea.ModShift) {
+			return "\x1b[Z", true
+		}
+		return "\t", true
+	case tea.KeySpace:
+		return " ", true
+	case tea.KeyEscape:
+		return "\x1b", true
+	case tea.KeyUp, tea.KeyKpUp:
+		return arrowSeq("A", k.Mod), true
+	case tea.KeyDown, tea.KeyKpDown:
+		return arrowSeq("B", k.Mod), true
+	case tea.KeyRight, tea.KeyKpRight:
+		return arrowSeq("C", k.Mod), true
+	case tea.KeyLeft, tea.KeyKpLeft:
+		return arrowSeq("D", k.Mod), true
+	case tea.KeyHome, tea.KeyKpHome:
+		return homeEndSeq("H", k.Mod), true
+	case tea.KeyEnd, tea.KeyKpEnd:
+		return homeEndSeq("F", k.Mod), true
+	case tea.KeyPgUp, tea.KeyKpPgUp:
+		return modTildeSeq(5, k.Mod), true
+	case tea.KeyPgDown, tea.KeyKpPgDown:
+		return modTildeSeq(6, k.Mod), true
+	case tea.KeyInsert, tea.KeyKpInsert:
+		return "\x1b[2~", true
+	case tea.KeyF1:
+		return "\x1bOP", true
+	case tea.KeyF2:
+		return "\x1bOQ", true
+	case tea.KeyF3:
+		return "\x1bOR", true
+	case tea.KeyF4:
+		return "\x1bOS", true
+	case tea.KeyF5:
+		return "\x1b[15~", true
+	case tea.KeyF6:
+		return "\x1b[17~", true
+	case tea.KeyF7:
+		return "\x1b[18~", true
+	case tea.KeyF8:
+		return "\x1b[19~", true
+	case tea.KeyF9:
+		return "\x1b[20~", true
+	case tea.KeyF10:
+		return "\x1b[21~", true
+	case tea.KeyF11:
+		return "\x1b[23~", true
+	case tea.KeyF12:
+		return "\x1b[24~", true
+	}
+	return "", false
 }
 
-// keySequences maps Bubble Tea KeyType values to VT100/xterm byte sequences.
-var keySequences = map[tea.KeyType]string{
-	tea.KeyEnter:     "\r",
-	tea.KeyBackspace: "\x7f",
-	tea.KeyDelete:    "\x1b[3~",
-	tea.KeyTab:       "\t",
-	tea.KeyShiftTab:  "\x1b[Z",
-	tea.KeySpace:     " ",
-	tea.KeyEscape:    "\x1b",
-	tea.KeyUp:        "\x1b[A",
-	tea.KeyDown:      "\x1b[B",
-	tea.KeyRight:     "\x1b[C",
-	tea.KeyLeft:      "\x1b[D",
-	tea.KeyShiftUp:    "\x1b[1;2A",
-	tea.KeyShiftDown:  "\x1b[1;2B",
-	tea.KeyShiftRight: "\x1b[1;2C",
-	tea.KeyShiftLeft:  "\x1b[1;2D",
-	tea.KeyCtrlUp:     "\x1b[1;5A",
-	tea.KeyCtrlDown:   "\x1b[1;5B",
-	tea.KeyCtrlRight:  "\x1b[1;5C",
-	tea.KeyCtrlLeft:   "\x1b[1;5D",
-	tea.KeyCtrlShiftUp:    "\x1b[1;6A",
-	tea.KeyCtrlShiftDown:  "\x1b[1;6B",
-	tea.KeyCtrlShiftRight: "\x1b[1;6C",
-	tea.KeyCtrlShiftLeft:  "\x1b[1;6D",
-	tea.KeyHome:      "\x1b[H",
-	tea.KeyEnd:       "\x1b[F",
-	tea.KeyCtrlHome:  "\x1b[1;5H",
-	tea.KeyCtrlEnd:   "\x1b[1;5F",
-	tea.KeyShiftHome: "\x1b[1;2H",
-	tea.KeyShiftEnd:  "\x1b[1;2F",
-	tea.KeyCtrlShiftHome: "\x1b[1;6H",
-	tea.KeyCtrlShiftEnd:  "\x1b[1;6F",
-	tea.KeyPgUp:      "\x1b[5~",
-	tea.KeyPgDown:    "\x1b[6~",
-	tea.KeyCtrlPgUp:  "\x1b[5;5~",
-	tea.KeyCtrlPgDown: "\x1b[6;5~",
-	tea.KeyInsert:    "\x1b[2~",
-	tea.KeyF1:        "\x1bOP",
-	tea.KeyF2:        "\x1bOQ",
-	tea.KeyF3:        "\x1bOR",
-	tea.KeyF4:        "\x1bOS",
-	tea.KeyF5:        "\x1b[15~",
-	tea.KeyF6:        "\x1b[17~",
-	tea.KeyF7:        "\x1b[18~",
-	tea.KeyF8:        "\x1b[19~",
-	tea.KeyF9:        "\x1b[20~",
-	tea.KeyF10:       "\x1b[21~",
-	tea.KeyF11:       "\x1b[23~",
-	tea.KeyF12:       "\x1b[24~",
-	// Ctrl keys that Bubble Tea decodes as named types — these MUST forward
-	// to the PTY so apps like vim, emacs, htop, fzf, lazygit etc. see Ctrl+X.
-	tea.KeyCtrlAt: "\x00",
-	tea.KeyCtrlA:  "\x01",
-	tea.KeyCtrlB:  "\x02",
-	tea.KeyCtrlC:  "\x03",
-	tea.KeyCtrlD:  "\x04",
-	tea.KeyCtrlE:  "\x05",
-	tea.KeyCtrlF:  "\x06",
-	tea.KeyCtrlG:  "\x07",
-	tea.KeyCtrlH:  "\x08",
-	// KeyCtrlI == KeyTab (9), KeyCtrlM == KeyEnter (13) — skip to avoid dup
-	tea.KeyCtrlJ: "\x0a",
-	tea.KeyCtrlK: "\x0b",
-	tea.KeyCtrlL: "\x0c",
-	tea.KeyCtrlN: "\x0e",
-	tea.KeyCtrlO: "\x0f",
-	tea.KeyCtrlP: "\x10",
-	tea.KeyCtrlQ: "\x11",
-	tea.KeyCtrlR: "\x12",
-	tea.KeyCtrlS: "\x13",
-	tea.KeyCtrlT: "\x14",
-	tea.KeyCtrlU: "\x15",
-	tea.KeyCtrlV: "\x16",
-	tea.KeyCtrlW: "\x17",
-	tea.KeyCtrlX: "\x18",
-	tea.KeyCtrlY: "\x19",
-	tea.KeyCtrlZ: "\x1a",
-	tea.KeyCtrlBackslash:    "\x1c",
-	tea.KeyCtrlCloseBracket: "\x1d",
-	tea.KeyCtrlCaret:        "\x1e",
-	tea.KeyCtrlUnderscore:   "\x1f",
+func arrowSeq(final string, mod tea.KeyMod) string {
+	if mod.Contains(tea.ModCtrl) && mod.Contains(tea.ModShift) {
+		return "\x1b[1;6" + final
+	}
+	if mod.Contains(tea.ModCtrl) {
+		return "\x1b[1;5" + final
+	}
+	if mod.Contains(tea.ModShift) {
+		return "\x1b[1;2" + final
+	}
+	return "\x1b[" + final
+}
+
+func homeEndSeq(final string, mod tea.KeyMod) string {
+	if mod.Contains(tea.ModCtrl) && mod.Contains(tea.ModShift) {
+		return "\x1b[1;6" + final
+	}
+	if mod.Contains(tea.ModCtrl) {
+		return "\x1b[1;5" + final
+	}
+	if mod.Contains(tea.ModShift) {
+		return "\x1b[1;2" + final
+	}
+	return "\x1b[" + final
+}
+
+func modTildeSeq(code int, mod tea.KeyMod) string {
+	if mod.Contains(tea.ModCtrl) {
+		return "\x1b[" + string(rune('0'+code)) + ";5~"
+	}
+	return "\x1b[" + string(rune('0'+code)) + "~"
+}
+
+func ctrlByte(code rune) (byte, bool) {
+	if code >= 'a' && code <= 'z' {
+		return byte(code - 'a' + 1), true
+	}
+	if code >= 'A' && code <= 'Z' {
+		return byte(code - 'A' + 1), true
+	}
+	switch code {
+	case '@':
+		return 0x00, true
+	case '[':
+		return 0x1b, true
+	case '\\':
+		return 0x1c, true
+	case ']':
+		return 0x1d, true
+	case '^':
+		return 0x1e, true
+	case '_':
+		return 0x1f, true
+	}
+	return 0, false
 }

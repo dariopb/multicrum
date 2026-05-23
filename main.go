@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/urfave/cli/v3"
 	"multiagent/ssh_client"
 	"multiagent/ui"
@@ -101,7 +101,7 @@ func run(_ context.Context, c *cli.Command) error {
 
 	model := ui.NewModelWithSSH(agentCmd, cols, rows, sshClient)
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	p := tea.NewProgram(model)
 	model.SetProgram(p)
 
 	wsAddr := c.String("ws")

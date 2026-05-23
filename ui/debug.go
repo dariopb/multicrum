@@ -5,8 +5,6 @@ import (
 	"os"
 	"sync"
 	"time"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 var (
@@ -30,7 +28,7 @@ func debugLog(format string, args ...any) {
 	_ = dbgF.Sync()
 }
 
-func debugMouse(ev tea.MouseEvent) {
+func debugMouse(ev mouseEvent) {
 	if os.Getenv("MULTIAGENT_DEBUG") == "" {
 		return
 	}
@@ -40,7 +38,7 @@ func debugMouse(ev tea.MouseEvent) {
 	if dbgF == nil {
 		return
 	}
-	fmt.Fprintf(dbgF, "%s action=%d button=%d x=%d y=%d shift=%v alt=%v ctrl=%v\n",
-		time.Now().Format("15:04:05.000"), ev.Action, ev.Button, ev.X, ev.Y, ev.Shift, ev.Alt, ev.Ctrl)
+	fmt.Fprintf(dbgF, "%s action=%d button=%d x=%d y=%d mod=%v\n",
+		time.Now().Format("15:04:05.000"), ev.Action, ev.Button, ev.X, ev.Y, ev.Mod)
 	_ = dbgF.Sync()
 }

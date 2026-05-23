@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"multiagent/session"
 	"multiagent/ssh_client"
 	"multiagent/transport"
@@ -182,8 +182,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cols, rows := paneSize(s.width, s.height)
 		s.manager.ResizeAll(cols, rows)
 		for idx, vp := range s.viewports {
-			vp.Width = cols
-			vp.Height = rows
+			vp.SetWidth(cols)
+			vp.SetHeight(rows)
 			s.viewports[idx] = vp
 		}
 		return m, nil
@@ -250,7 +250,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.mode != modeNormal {
 			return m, nil
 		}
-		ev := tea.MouseEvent(msg)
+		ev := mouseEventFromMsg(msg)
 		debugMouse(ev)
 		_, paneRows := paneSize(s.width, s.height)
 		// Translate from whole-window coords to pane-relative coords. The
@@ -272,8 +272,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !anyButton {
 				return m, nil
 			}
-			if ev.Action == tea.MouseActionMotion {
-				if ev.Button == tea.MouseButtonNone {
+			if ev.Action == mouseMotion {
+				if ev.Button == tea.MouseNone {
 					if !anyMotion {
 						return m, nil
 					}
@@ -304,27 +304,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			clampY = paneRows - 1
 		}
 		switch ev.Button {
-		case tea.MouseButtonWheelUp:
+		case tea.MouseWheelUp:
 			if inPane {
 				s.scrollFocused(-3)
 			}
 			return m, nil
-		case tea.MouseButtonWheelDown:
+		case tea.MouseWheelDown:
 			if inPane {
 				s.scrollFocused(3)
 			}
 			return m, nil
 		}
 		switch ev.Action {
-		case tea.MouseActionPress:
-			if ev.Button == tea.MouseButtonLeft && inPane {
+		case mousePress:
+			if ev.Button == tea.MouseLeft && inPane {
 				s.startSelection(clampX, clampY)
 			}
-		case tea.MouseActionMotion:
+		case mouseMotion:
 			if s.sel.active {
 				s.updateSelection(clampX, clampY)
 			}
-		case tea.MouseActionRelease:
+		case mouseRelease:
 			if s.sel.active {
 				s.updateSelection(clampX, clampY)
 				return m, s.finishSelection()
@@ -332,7 +332,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if s.mode == modeHelp {
 			s.handleHelpKey(msg)
 			return m, nil
@@ -356,7 +356,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if handled, cmd := s.handleShortcut(m, msg); handled {
 			return m, cmd
 		}
-		if msg.Type == tea.KeyEnter {
+		if msg.Key().Code == tea.KeyEnter {
 			idx := s.manager.FocusedIndex()
 			if vp, ok := s.viewports[idx]; ok && !vp.AtBottom() {
 				vp.GotoBottom()
@@ -376,7 +376,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the full TUI.
-func (m Model) View() string {
+func (m Model) View() tea.View {
+	view := tea.NewView(m.viewString())
+	view.AltScreen = true
+	view.MouseMode = tea.MouseModeAllMotion
+	return view
+}
+
+func (m Model) viewString() string {
 	s := m.s
 	if s.errMsg != "" {
 		return s.errMsg + "\n\nPress Ctrl+Alt+Q to quit."
@@ -407,7 +414,7 @@ func (s *state) ensureViewport(idx, w, h int) {
 
 func (s *state) resetViewport(idx, w, h int) {
 	cols, rows := paneSize(w, h)
-	vp := viewport.New(cols, rows)
+	vp := viewport.New(viewport.WithWidth(cols), viewport.WithHeight(rows))
 	vp.SetContent("")
 	s.viewports[idx] = &vp
 }
@@ -474,24 +481,25 @@ func (s *state) refreshFocused() {
 // form because not every terminal emits a distinct sequence for Ctrl+Alt+<n>.
 const (
 	shortcutHelp         = "alt+`"
-	shortcutNew          = "alt+ctrl+t"
-	shortcutKill         = "alt+ctrl+w"
-	shortcutRename       = "alt+ctrl+r"
-	shortcutSessions     = "alt+ctrl+s"
-	shortcutPrev         = "alt+ctrl+left"
-	shortcutNext         = "alt+ctrl+right"
-	shortcutScrollUp     = "alt+ctrl+up"
-	shortcutScrollDown   = "alt+ctrl+down"
-	shortcutPageUp       = "alt+ctrl+pgup"
-	shortcutPageDown     = "alt+ctrl+pgdown"
-	shortcutScrollTop    = "alt+ctrl+home"
-	shortcutScrollBottom = "alt+ctrl+end"
+	shortcutNew          = "ctrl+alt+t"
+	shortcutKill         = "ctrl+alt+w"
+	shortcutRename       = "ctrl+alt+r"
+	shortcutSessions     = "ctrl+alt+s"
+	shortcutPrev         = "ctrl+alt+left"
+	shortcutNext         = "ctrl+alt+right"
+	shortcutScrollUp     = "ctrl+alt+up"
+	shortcutScrollDown   = "ctrl+alt+down"
+	shortcutPageUp       = "ctrl+alt+pgup"
+	shortcutPageDown     = "ctrl+alt+pgdown"
+	shortcutScrollTop    = "ctrl+alt+home"
+	shortcutScrollBottom = "ctrl+alt+end"
 	shortcutMouse        = "alt+enter" // Ctrl+Alt+M; terminals encode Ctrl+M as Enter
-	shortcutQuit         = "alt+ctrl+q"
+	shortcutQuit         = "ctrl+alt+q"
 )
 
-func (s *state) handleShortcut(m Model, msg tea.KeyMsg) (bool, tea.Cmd) {
-	switch msg.String() {
+func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
+	key := msg.Keystroke()
+	switch key {
 	case shortcutHelp:
 		s.mode = modeHelp
 		return true, nil
@@ -557,7 +565,7 @@ func (s *state) handleShortcut(m Model, msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, tea.Quit
 	}
 	// Ctrl+Alt+<digit> (or the more portable Alt+<digit>): jump to session.
-	if n, ok := digitShortcut(msg.String()); ok {
+	if n, ok := digitShortcut(key); ok {
 		if n >= 0 && n < s.manager.Len() {
 			s.manager.Focus(n)
 			s.refreshFocused()
@@ -580,20 +588,21 @@ func digitShortcut(s string) (int, bool) {
 	return 0, false
 }
 
-func (s *state) handleHelpKey(msg tea.KeyMsg) {
-	switch msg.Type {
-	case tea.KeyEscape, tea.KeyEnter, tea.KeyCtrlC:
+func (s *state) handleHelpKey(msg tea.KeyPressMsg) {
+	key := msg.Key()
+	switch key.Code {
+	case tea.KeyEscape, tea.KeyEnter:
 		s.mode = modeNormal
 	default:
-		if msg.String() == shortcutHelp {
+		if msg.Keystroke() == shortcutHelp || (key.Code == 'c' && key.Mod.Contains(tea.ModCtrl)) {
 			s.mode = modeNormal
 		}
 	}
 }
 
-func (s *state) handleExitPromptKey(m Model, msg tea.KeyMsg) tea.Cmd {
-	switch msg.Type {
-	case tea.KeyLeft, tea.KeyRight, tea.KeyTab, tea.KeyShiftTab:
+func (s *state) handleExitPromptKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.Key().Code {
+	case tea.KeyLeft, tea.KeyRight, tea.KeyTab:
 		s.exitChoice = 1 - s.exitChoice
 		return nil
 	case tea.KeyEnter:
@@ -646,8 +655,26 @@ func (s *state) resolveExitPrompt(m Model) tea.Cmd {
 	return nil
 }
 
-func (s *state) handleRenameKey(msg tea.KeyMsg) {
-	switch msg.Type {
+func (s *state) handleRenameKey(msg tea.KeyPressMsg) {
+	key := msg.Key()
+	if key.Mod.Contains(tea.ModCtrl) {
+		switch key.Code {
+		case 'h':
+			r := []rune(s.renameText)
+			if len(r) > 0 {
+				s.renameText = string(r[:len(r)-1])
+			}
+			return
+		case 'u':
+			s.renameText = ""
+			return
+		}
+	}
+	if key.Text != "" {
+		s.renameText += key.Text
+		return
+	}
+	switch key.Code {
 	case tea.KeyEnter:
 		s.manager.Rename(s.manager.FocusedIndex(), strings.TrimSpace(s.renameText))
 		s.mode = modeNormal
@@ -656,21 +683,38 @@ func (s *state) handleRenameKey(msg tea.KeyMsg) {
 	case tea.KeyEscape:
 		s.mode = modeNormal
 		s.renameText = ""
-	case tea.KeyBackspace, tea.KeyCtrlH:
+	case tea.KeyBackspace:
 		r := []rune(s.renameText)
 		if len(r) > 0 {
 			s.renameText = string(r[:len(r)-1])
 		}
-	case tea.KeyCtrlU:
-		s.renameText = ""
-	case tea.KeyRunes:
-		s.renameText += string(msg.Runes)
 	}
 }
 
-func (s *state) handleSelectKey(msg tea.KeyMsg) {
+func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 	matches := s.filteredSessions()
-	switch msg.Type {
+	key := msg.Key()
+	if key.Mod.Contains(tea.ModCtrl) {
+		switch key.Code {
+		case 'h':
+			r := []rune(s.selectFilter)
+			if len(r) > 0 {
+				s.selectFilter = string(r[:len(r)-1])
+				s.selectCursor = 0
+			}
+			return
+		case 'u':
+			s.selectFilter = ""
+			s.selectCursor = 0
+			return
+		}
+	}
+	if key.Text != "" {
+		s.selectFilter += key.Text
+		s.selectCursor = 0
+		return
+	}
+	switch key.Code {
 	case tea.KeyEnter:
 		if len(matches) > 0 {
 			if s.selectCursor >= len(matches) {
@@ -695,18 +739,12 @@ func (s *state) handleSelectKey(msg tea.KeyMsg) {
 		if len(matches) > 0 {
 			s.selectCursor = (s.selectCursor + 1) % len(matches)
 		}
-	case tea.KeyBackspace, tea.KeyCtrlH:
+	case tea.KeyBackspace:
 		r := []rune(s.selectFilter)
 		if len(r) > 0 {
 			s.selectFilter = string(r[:len(r)-1])
 			s.selectCursor = 0
 		}
-	case tea.KeyCtrlU:
-		s.selectFilter = ""
-		s.selectCursor = 0
-	case tea.KeyRunes:
-		s.selectFilter += string(msg.Runes)
-		s.selectCursor = 0
 	}
 }
 
@@ -755,7 +793,7 @@ func (m Model) renderPane() string {
 		pane = vp.View()
 	} else {
 		cols, rows := paneSize(s.width, s.height)
-		blank := viewport.New(cols, rows)
+		blank := viewport.New(viewport.WithWidth(cols), viewport.WithHeight(rows))
 		pane = blank.View()
 	}
 	if !s.mouseCapture {

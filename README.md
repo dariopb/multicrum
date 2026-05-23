@@ -261,9 +261,11 @@ func runParentMux(ctx context.Context) error {
     // Bootstrap the real app into a local PTY by running the same binary in
     // child mode. From this point on, the child handles stdin/stdout normally.
     childCmd := []string{os.Args[0], "--child", "--mux-control", sockPath}
-    if _, err := manager.New(childCmd); err != nil {
+    mainSession, err := manager.New(childCmd)
+    if err != nil {
         return err
     }
+    mainSession.SetTitle("main")
 
     // Parent now runs its own event loop/UI. It creates more sessions only when
     // child control messages arrive; it does not inject app data by hand.
@@ -300,7 +302,10 @@ func serveControl(listener net.Listener, manager *session.SessionManager) {
                 if len(msg.Cmd) == 0 {
                     msg.Cmd = []string{"bash"}
                 }
-                _, _ = manager.NewWithSSH(msg.Cmd, nil)
+                sess, err := manager.NewWithSSH(msg.Cmd, nil)
+                if err == nil {
+                    sess.SetTitle("secondary")
+                }
             case "new-ssh":
                 sshClient, err := ssh_client.New(ssh_client.Options{
                     Target:       msg.Target,
@@ -311,7 +316,10 @@ func serveControl(listener net.Listener, manager *session.SessionManager) {
                 if err != nil {
                     return
                 }
-                _, _ = manager.NewWithSSH(msg.Cmd, sshClient)
+                sess, err := manager.NewWithSSH(msg.Cmd, sshClient)
+                if err == nil {
+                    sess.SetTitle("secondary")
+                }
             }
         }()
     }
@@ -366,8 +374,35 @@ Resize(cols, rows int) error
 Done() <-chan struct{}
 ```
 
+## Discovering the library shape
+
+For Go-native discovery:
+
+```bash
+go doc multiagent/session
+go doc multiagent/ssh_client
+go doc -all multiagent/session
+go doc -all multiagent/ssh_client
+```
+
+Compileable examples live in:
+
+```text
+examples/parent_child/  # parent/child app bootstrap with side-channel control
+examples/ssh_client/    # direct ssh_client.RemoteSession usage
+```
+
+Run them with:
+
+```bash
+go run ./examples/parent_child
+go run ./examples/ssh_client user@host
+```
+
 ## Documentation
 
 - `spec.md` records the current app architecture and behavior.
 - `spec-ssh-client.md` records the SSH client design, library research, and implementation details.
+- `session/doc.go` and `ssh_client/doc.go` provide GoDoc package overviews.
+- `examples/` contains compileable copy-paste starting points for embedders and coding agents.
 - `AGENTS.md` contains development notes and project-specific gotchas.

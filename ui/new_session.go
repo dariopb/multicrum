@@ -3,7 +3,7 @@ package ui
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"multiagent/ssh_client"
 )
 
@@ -58,9 +58,24 @@ func (s *state) openNewSessionModal(defaultCmd []string) {
 	s.mode = modeNewSession
 }
 
-func (s *state) handleNewSessionKey(m Model, msg tea.KeyMsg) tea.Cmd {
+func (s *state) handleNewSessionKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 	ns := &s.newSession
-	switch msg.Type {
+	key := msg.Key()
+	if key.Mod.Contains(tea.ModCtrl) {
+		switch key.Code {
+		case 'h':
+			s.backspaceNewSessionField()
+			return nil
+		case 'u':
+			s.clearNewSessionField()
+			return nil
+		}
+	}
+	if key.Text != "" {
+		s.appendNewSessionField(key.Text)
+		return nil
+	}
+	switch key.Code {
 	case tea.KeyEscape:
 		s.mode = modeNormal
 		return nil
@@ -86,17 +101,11 @@ func (s *state) handleNewSessionKey(m Model, msg tea.KeyMsg) tea.Cmd {
 			ns.choice++
 		}
 		return nil
-	case tea.KeyTab, tea.KeyShiftTab:
-		s.advanceNewSessionField(msg.Type == tea.KeyShiftTab)
+	case tea.KeyTab:
+		s.advanceNewSessionField(msg.Key().Mod.Contains(tea.ModShift))
 		return nil
-	case tea.KeyBackspace, tea.KeyCtrlH:
+	case tea.KeyBackspace:
 		s.backspaceNewSessionField()
-		return nil
-	case tea.KeyCtrlU:
-		s.clearNewSessionField()
-		return nil
-	case tea.KeyRunes:
-		s.appendNewSessionField(string(msg.Runes))
 		return nil
 	case tea.KeySpace:
 		s.appendNewSessionField(" ")
