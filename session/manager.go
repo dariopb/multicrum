@@ -75,6 +75,7 @@ func (m *SessionManager) NewWithSSH(cmd []string, sshClient *ssh_client.Client) 
 	s.SendExit = m.SendExit
 	m.sessions = append(m.sessions, s)
 	m.focused = idx
+	m.updateTerminalRepliesLocked()
 	m.mu.Unlock()
 
 	if err := s.Start(m.cols, m.rows); err != nil {
@@ -95,6 +96,7 @@ func (m *SessionManager) NewWithSSH(cmd []string, sshClient *ssh_client.Client) 
 		} else {
 			m.focused = 0
 		}
+		m.updateTerminalRepliesLocked()
 		m.mu.Unlock()
 		_ = s.Close()
 		return nil, fmt.Errorf("start session: %w", err)
@@ -108,6 +110,13 @@ func (m *SessionManager) Focus(index int) {
 	defer m.mu.Unlock()
 	if index >= 0 && index < len(m.sessions) {
 		m.focused = index
+		m.updateTerminalRepliesLocked()
+	}
+}
+
+func (m *SessionManager) updateTerminalRepliesLocked() {
+	for _, s := range m.sessions {
+		s.Screen().SetTerminalReplies(s.index == m.focused)
 	}
 }
 
@@ -143,6 +152,7 @@ func (m *SessionManager) Kill(index int) {
 	if m.focused >= len(m.sessions) && m.focused > 0 {
 		m.focused = len(m.sessions) - 1
 	}
+	m.updateTerminalRepliesLocked()
 }
 
 // Sessions returns a snapshot of all sessions.

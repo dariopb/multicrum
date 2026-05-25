@@ -26,6 +26,7 @@ type VTScreen struct {
 	scrollback []string     // pre-rendered (with SGR) lines that scrolled off the top
 	plainSB    []BufferLine // plain-text + soft-wrap flag, parallel to scrollback
 	reply      atomic.Pointer[io.Writer]
+	replies    bool
 }
 
 // BufferLine is one physical row of the terminal as plain text plus whether
@@ -73,6 +74,12 @@ func (s *VTScreen) SetReplyWriter(w io.Writer) {
 	s.reply.Store(&w)
 }
 
+func (s *VTScreen) SetTerminalReplies(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replies = enabled
+}
+
 // Write feeds raw PTY bytes into the VT parser. If the write produced a true
 // upward scroll (new line entered from the bottom while the top line dropped
 // off), the dropped line is captured into scrollback. In-place screen updates
@@ -88,6 +95,11 @@ func (s *VTScreen) Write(p []byte) {
 		s.rawHistory = s.rawHistory[len(s.rawHistory)-maxScrollback:]
 	}
 
+	p = s.filterTerminalQueriesLocked(p)
+	if len(p) == 0 {
+		return
+	}
+
 	// Bulk writes from commands like `ls -l /usr/bin` can scroll many rows
 	// within a single Write. Diffing only the final before/after state would
 	// miss everything except the last few rows. Split the input at scroll
@@ -95,6 +107,68 @@ func (s *VTScreen) Write(p []byte) {
 	// reliably capture each dropped row.
 	for _, chunk := range splitScrollChunks(p) {
 		s.writeChunkLocked(chunk)
+	}
+}
+
+func (s *VTScreen) filterTerminalQueriesLocked(p []byte) []byte {
+	out := make([]byte, 0, len(p))
+	for i := 0; i < len(p); {
+		if i+5 <= len(p) && p[i] == 0x1b && p[i+1] == ']' && p[i+2] == '1' && (p[i+3] == '0' || p[i+3] == '1') && p[i+4] == ';' {
+			cmd := p[i+3]
+			if end, ok := oscEnd(p, i+5); ok {
+				payload := string(p[i+5 : end])
+				if payload == "?" {
+					s.replyOSCColorLocked(cmd)
+					i = oscAfter(p, end)
+					continue
+				}
+			}
+		}
+		if i+7 <= len(p) && p[i] == 0x1b && p[i+1] == '[' && p[i+2] == '?' && p[i+3] == '2' && p[i+4] == '0' && p[i+5] == '2' && p[i+6] == '6' {
+			j := i + 7
+			if j < len(p) && (p[j] == 'h' || p[j] == 'l') {
+				i = j + 1
+				continue
+			}
+		}
+		out = append(out, p[i])
+		i++
+	}
+	return out
+}
+
+func oscEnd(p []byte, start int) (int, bool) {
+	for i := start; i < len(p); i++ {
+		if p[i] == 0x07 {
+			return i, true
+		}
+		if i+1 < len(p) && p[i] == 0x1b && p[i+1] == '\\' {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func oscAfter(p []byte, end int) int {
+	if end+1 < len(p) && p[end] == 0x1b && p[end+1] == '\\' {
+		return end + 2
+	}
+	return end + 1
+}
+
+func (s *VTScreen) replyOSCColorLocked(cmd byte) {
+	if wp := s.reply.Load(); wp != nil && *wp != nil {
+		response := ""
+		switch cmd {
+		case '0':
+			response = "\x1b]10;rgb:eeee/eeee/eeee\x1b\\"
+		case '1':
+			response = "\x1b]11;rgb:0000/0000/0000\x1b\\"
+		}
+		if response != "" {
+			w := *wp
+			go func() { _, _ = w.Write([]byte(response)) }()
+		}
 	}
 }
 
@@ -287,21 +361,15 @@ func (s *VTScreen) renderRowAtLocked(y, cursorX int) string {
 	var lastMode int16
 	for x := 0; x < s.cols; x++ {
 		cell := s.term.Cell(x, y)
-		// vt10x already swaps fg/bg in setChar() when attrReverse is set, so
-		// the stored cell colors are already inverted. We just need to drop
-		// the bit so we don't emit SGR 7 on top (which would un-invert it),
-		// and fill in concrete colors when one side is still "default".
+		// vt10x swaps fg/bg in setChar() when attrReverse is set but leaves
+		// attrReverse on the cell. Swap them back before emitting SGR 7 so the
+		// host terminal performs the reverse-video operation with its own palette.
 		if cell.Mode&attrReverse != 0 {
-			// vt10x's setChar swaps fg/bg, but if both were default sentinels
-			// they're still sentinels (just exchanged). Force concrete colors
-			// so the cell actually renders inverted instead of as default-on-default.
-			if cell.FG == vt10x.DefaultFG || cell.FG == vt10x.DefaultBG {
-				cell.FG = vt10x.Black
-			}
-			if cell.BG == vt10x.DefaultFG || cell.BG == vt10x.DefaultBG {
-				cell.BG = vt10x.White
-			}
-			cell.Mode &^= attrReverse
+			cell.FG, cell.BG = normalizeDefaultColor(cell.BG, true), normalizeDefaultColor(cell.FG, false)
+		} else if cell.FG == vt10x.DefaultBG {
+			cell.FG = vt10x.DefaultFG
+		} else if cell.BG == vt10x.DefaultFG {
+			cell.BG = vt10x.DefaultBG
 		}
 		if cursorX == x {
 			cell.FG = vt10x.Black
@@ -323,6 +391,16 @@ func (s *VTScreen) renderRowAtLocked(y, cursorX int) string {
 		b.WriteString("\x1b[0m")
 	}
 	return b.String()
+}
+
+func normalizeDefaultColor(c vt10x.Color, foreground bool) vt10x.Color {
+	if c == vt10x.DefaultFG || c == vt10x.DefaultBG {
+		if foreground {
+			return vt10x.DefaultFG
+		}
+		return vt10x.DefaultBG
+	}
+	return c
 }
 
 // vt10x glyph attribute bits (mirrored from the package's private constants).
