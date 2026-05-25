@@ -1,5 +1,5 @@
 // Package ssh_client provides a reusable SSH client and interactive remote PTY
-// backend for multiagent/session and other applications.
+// backend for multicrum/session and other applications.
 //
 // The package intentionally does not reimplement SSH. It builds on
 // golang.org/x/crypto/ssh, golang.org/x/crypto/ssh/agent,

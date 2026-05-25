@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**multiAgent** is a Go terminal multiplexer for multiple persistent CLI/agent sessions. It has two synchronized frontends:
+**multicrum** is a Go terminal multiplexer for multiple persistent CLI/agent sessions. It has two synchronized frontends:
 
 - A local Bubble Tea TUI.
 - An optional browser UI served over WebSocket with embedded xterm.js.
@@ -200,6 +200,6 @@ There are currently no committed tests, so these mainly verify compilation acros
 ## Known Not Implemented
 
 - Background-session activity indicator.
-- Config file such as `~/.multiagent.toml`.
+- Config file such as `~/.multicrum.toml`.
 - Session persistence / scrollback export.
 - Split-pane / tiling layout.

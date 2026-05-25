@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"multiagent/ssh_client"
+	"multicrum/ssh_client"
 )
 
 type newSessionField int

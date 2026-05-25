@@ -1,4 +1,4 @@
-module multiagent
+module multicrum
 
 go 1.25.0
 

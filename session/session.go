@@ -5,7 +5,7 @@ import (
 	"io"
 	"sync"
 
-	"multiagent/ssh_client"
+	"multicrum/ssh_client"
 )
 
 // OutputMsg is sent to the Bubble Tea program whenever the session produces output.

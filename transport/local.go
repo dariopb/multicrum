@@ -13,5 +13,5 @@ func NewLocalTransport() *LocalTransport {
 }
 
 func (t *LocalTransport) Send(_ int, _ []byte) error { return nil }
-func (t *LocalTransport) Recv() <-chan InputEvent     { return t.ch }
+func (t *LocalTransport) Recv() <-chan InputEvent    { return t.ch }
 func (t *LocalTransport) Close() error               { close(t.ch); return nil }

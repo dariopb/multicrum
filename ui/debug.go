@@ -13,11 +13,11 @@ var (
 )
 
 func debugLog(format string, args ...any) {
-	if os.Getenv("MULTIAGENT_DEBUG") == "" {
+	if os.Getenv("MULTICRUM_DEBUG") == "" {
 		return
 	}
 	dbgOnce.Do(func() {
-		dbgF, _ = os.OpenFile("/tmp/multiagent-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		dbgF, _ = os.OpenFile("/tmp/multicrum-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	})
 	if dbgF == nil {
 		return
@@ -29,11 +29,11 @@ func debugLog(format string, args ...any) {
 }
 
 func debugMouse(ev mouseEvent) {
-	if os.Getenv("MULTIAGENT_DEBUG") == "" {
+	if os.Getenv("MULTICRUM_DEBUG") == "" {
 		return
 	}
 	dbgOnce.Do(func() {
-		dbgF, _ = os.OpenFile("/tmp/multiagent-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		dbgF, _ = os.OpenFile("/tmp/multicrum-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	})
 	if dbgF == nil {
 		return

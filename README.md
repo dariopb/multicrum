@@ -1,6 +1,6 @@
-# multiAgent
+# multicrum
 
-`multiAgent` is a Go terminal multiplexer and reusable session library for running multiple persistent local or SSH-backed terminal sessions.
+`multicrum` is a Go terminal multiplexer and reusable session library for running multiple persistent local or SSH-backed terminal sessions.
 
 It provides:
 
@@ -34,7 +34,7 @@ go build ./...
 Build the runnable binary:
 
 ```bash
-go build -o multiagent .
+go build -o multicrum .
 ```
 
 Run tests:
@@ -48,49 +48,49 @@ go test ./...
 Local shell:
 
 ```bash
-./multiagent --cmd bash
+./multicrum --cmd bash
 ```
 
 Local command:
 
 ```bash
-./multiagent --cmd "python3"
+./multicrum --cmd "python3"
 ```
 
 SSH with password:
 
 ```bash
-./multiagent --ssh dario@localhost --ssh-passwd 'secret'
+./multicrum --ssh dario@localhost --ssh-passwd 'secret'
 ```
 
 SSH with explicit key:
 
 ```bash
-./multiagent --ssh user@example.com -i ~/.ssh/id_ed25519
+./multicrum --ssh user@example.com -i ~/.ssh/id_ed25519
 ```
 
 SSH using standard keys from `~/.ssh`:
 
 ```bash
-./multiagent --ssh user@example.com --ssh-use-default-keys
+./multicrum --ssh user@example.com --ssh-use-default-keys
 ```
 
 SSH using `~/.ssh/config` host aliases:
 
 ```bash
-./multiagent --ssh my-server
+./multicrum --ssh my-server
 ```
 
 Run a remote command instead of the remote login shell:
 
 ```bash
-./multiagent --ssh user@example.com --cmd "bash -l"
+./multicrum --ssh user@example.com --cmd "bash -l"
 ```
 
 Start local TUI plus browser UI:
 
 ```bash
-./multiagent --cmd bash --ws :9999 --token mytoken
+./multicrum --cmd bash --ws :9999 --token mytoken
 ```
 
 Then open:
@@ -191,8 +191,8 @@ import (
     "os"
 
     "github.com/urfave/cli/v3"
-    "multiagent/session"
-    "multiagent/ssh_client"
+    "multicrum/session"
+    "multicrum/ssh_client"
 )
 
 type ControlMsg struct {
@@ -379,10 +379,10 @@ Done() <-chan struct{}
 For Go-native discovery:
 
 ```bash
-go doc multiagent/session
-go doc multiagent/ssh_client
-go doc -all multiagent/session
-go doc -all multiagent/ssh_client
+go doc multicrum/session
+go doc multicrum/ssh_client
+go doc -all multicrum/session
+go doc -all multicrum/ssh_client
 ```
 
 Compileable examples live in:

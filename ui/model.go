@@ -7,9 +7,9 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"multiagent/session"
-	"multiagent/ssh_client"
-	"multiagent/transport"
+	"multicrum/session"
+	"multicrum/ssh_client"
+	"multicrum/transport"
 )
 
 // OutputMsg is re-exported here so main.go can use the same type.
@@ -201,11 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.refreshFocused()
 			s.notifyMeta()
 		case "new":
-			_, err := s.manager.New(m.agentCmd)
-			if err == nil {
-				s.resetViewport(s.manager.FocusedIndex(), s.width, s.height)
-				s.notifyMeta()
-			}
+			s.handleWSNew(m, transport.ControlMsg(msg))
 		case "kill":
 			if s.manager.Len() > 1 {
 				delete(s.viewports, msg.ID)
@@ -216,6 +212,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "rename":
 			s.manager.Rename(msg.ID, strings.TrimSpace(msg.Title))
 			s.notifyMeta()
+		case "exit":
+			s.handleWSExit(transport.ControlMsg(msg))
 		}
 		return m, nil
 
@@ -475,7 +473,7 @@ func (s *state) refreshFocused() {
 
 // ── shortcuts ─────────────────────────────────────────────────────────────────
 //
-// All multi-agent shortcuts use Ctrl+Alt+<key> so they don't clash with the
+// All multicrum shortcuts use Ctrl+Alt+<key> so they don't clash with the
 // regular terminal/CLI bindings (Ctrl+C, Ctrl+W, Ctrl+T, …) that have to be
 // forwarded into the child PTY. Digit shortcuts also accept the bare Alt+<n>
 // form because not every terminal emits a distinct sequence for Ctrl+Alt+<n>.

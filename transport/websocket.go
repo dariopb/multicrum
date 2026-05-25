@@ -28,9 +28,15 @@ type MetaMsg struct {
 
 // ControlMsg is received from the browser for session management.
 type ControlMsg struct {
-	Action string `json:"action"` // "focus" | "new" | "kill" | "rename"
-	ID     int    `json:"id"`
-	Title  string `json:"title,omitempty"`
+	Action   string `json:"action"` // "focus" | "new" | "kill" | "rename" | "exit"
+	ID       int    `json:"id"`
+	Title    string `json:"title,omitempty"`
+	Mode     string `json:"mode,omitempty"`     // new: "same" | "local" | "remote"
+	Cmd      string `json:"cmd,omitempty"`      // new local command or remote command
+	Target   string `json:"target,omitempty"`   // new remote SSH target
+	Password string `json:"password,omitempty"` // new remote SSH password
+	Key      string `json:"key,omitempty"`      // new remote SSH identity file
+	Choice   string `json:"choice,omitempty"`   // exit: "respawn" | "remove"
 }
 
 // ResizeMsg is received from the browser when xterm.js is resized.
@@ -67,9 +73,12 @@ func (c *wsClient) sendSnapshot(sessionID int) {
 
 // WSTransport serves raw PTY sessions to xterm.js browser clients.
 // Protocol (server→client):  0x01 + raw PTY bytes
-//                             0x02 + JSON SessionInfo array
+//
+//	0x02 + JSON SessionInfo array
+//
 // Protocol (client→server):  0x00 + raw keystrokes
-//                             0x01 + JSON ControlMsg
+//
+//	0x01 + JSON ControlMsg
 type WSTransport struct {
 	mu      sync.Mutex
 	clients []*wsClient
@@ -78,12 +87,12 @@ type WSTransport struct {
 	token   string
 
 	// Callbacks wired by the UI layer.
-	OnInput   func(sessionID int, data []byte)   // keystroke from browser
-	OnControl func(msg ControlMsg)                // session management from browser
-	OnResize  func(msg ResizeMsg)                 // terminal resize from browser
-	SnapOf    func(sessionID int) []byte          // raw PTY snapshot for new clients
-	Sessions  func() []SessionInfo               // current session list
-	FocusedID func() int                          // currently focused session
+	OnInput   func(sessionID int, data []byte) // keystroke from browser
+	OnControl func(msg ControlMsg)             // session management from browser
+	OnResize  func(msg ResizeMsg)              // terminal resize from browser
+	SnapOf    func(sessionID int) []byte       // raw PTY snapshot for new clients
+	Sessions  func() []SessionInfo             // current session list
+	FocusedID func() int                       // currently focused session
 }
 
 // NewWSTransport starts listening on addr.
@@ -220,7 +229,7 @@ func indexHTML(wsQuery string) string {
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>multiAgent</title>
+<title>multicrum</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5/css/xterm.css"/>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8/lib/xterm-addon-fit.js"></script>
@@ -245,7 +254,14 @@ body{display:flex;flex-direction:column;height:100vh;background:#17121f;font-fam
 #modal-overlay.open{display:flex}
 #modal{background:#252525;border:1px solid #555;border-radius:8px;padding:16px;min-width:320px;max-width:500px;width:90%;box-shadow:0 8px 32px #000a}
 #modal h2{font-size:13px;color:#aaa;margin-bottom:10px;font-weight:normal;text-transform:uppercase;letter-spacing:.08em}
-#session-filter,#rename-input{width:100%;background:#1b1b1b;border:1px solid #444;border-radius:5px;color:#ddd;padding:7px 9px;margin-bottom:10px;font-family:inherit;font-size:13px}
+#session-filter,#rename-input,.new-input{width:100%;background:#1b1b1b;border:1px solid #444;border-radius:5px;color:#ddd;padding:7px 9px;margin-bottom:10px;font-family:inherit;font-size:13px}
+.choice-row{display:block;padding:7px 9px;margin:4px 0;border:1px solid transparent;border-radius:5px;color:#ddd;cursor:pointer}
+.choice-row.selected{background:#0d3a6a;border-color:#2a6aaa;color:#fff}
+.choice-row:focus-within{outline:1px dashed #6af;outline-offset:2px}
+.choice-row input{margin-right:8px}
+#exit-form{display:flex;gap:10px;justify-content:center}
+#exit-form .btn.selected{outline:2px solid #6af;border-color:#9cf}
+#exit-form .btn:focus:not(.selected){outline:1px dashed #6af;outline-offset:2px}
 #session-list{display:flex;flex-direction:column;gap:4px;max-height:320px;overflow-y:auto}
 .sess-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:5px;cursor:pointer;border:1px solid transparent}
 .sess-item:hover{background:#333;border-color:#555}
@@ -261,12 +277,12 @@ body{display:flex;flex-direction:column;height:100vh;background:#17121f;font-fam
 </head>
 <body>
 <div id="tabbar">
-  <button id="btn-sessions" class="btn btn-blue" title="Switch session (Ctrl+Shift+S)">☰ Sessions</button>
+  <button id="btn-sessions" class="btn btn-blue" title="Switch session (Ctrl+Alt+S)">☰ Sessions</button>
   <span id="session-label">—</span>
   <span id="connection-state">connecting</span>
-  <button id="btn-new" class="btn btn-green" title="New session (Ctrl+Shift+T)">+ New</button>
-  <button id="btn-kill" class="btn btn-red" title="Kill session (Ctrl+Shift+W)">✕ Kill</button>
-  <span id="hint">Ctrl+←/→ switch &nbsp; Ctrl+Shift+S sessions &nbsp; Ctrl+Shift+R rename &nbsp; Ctrl+Shift+T new &nbsp; Ctrl+Shift+W kill</span>
+  <button id="btn-new" class="btn btn-green" title="New session (Ctrl+Alt+T)">+ New</button>
+  <button id="btn-kill" class="btn btn-red" title="Kill session (Ctrl+Alt+W)">✕ Kill</button>
+  <span id="hint">Ctrl+←/→ switch &nbsp; Ctrl+Alt+S sessions &nbsp; Ctrl+Alt+R rename &nbsp; Ctrl+Alt+T new &nbsp; Ctrl+Alt+W kill</span>
 </div>
 <div id="terminal"></div>
 
@@ -275,6 +291,20 @@ body{display:flex;flex-direction:column;height:100vh;background:#17121f;font-fam
     <h2 id="modal-title">Sessions</h2>
     <input id="session-filter" placeholder="Filter sessions..." autocomplete="off"/>
     <input id="rename-input" placeholder="Session name" autocomplete="off" style="display:none"/>
+    <div id="new-session-form" style="display:none">
+      <label class="choice-row selected"><input type="radio" name="new-mode" value="same" checked> Same as current/default</label>
+      <label class="choice-row"><input type="radio" name="new-mode" value="local"> Local command</label>
+      <input id="new-local-cmd" class="new-input" placeholder="Local command (optional)" autocomplete="off"/>
+      <label class="choice-row"><input type="radio" name="new-mode" value="remote"> Remote SSH</label>
+      <input id="new-ssh-target" class="new-input" placeholder="user@host[:port]" autocomplete="off"/>
+      <input id="new-ssh-passwd" class="new-input" placeholder="Password (optional)" autocomplete="off" type="password"/>
+      <input id="new-ssh-key" class="new-input" placeholder="Key file (optional)" autocomplete="off"/>
+      <input id="new-remote-cmd" class="new-input" placeholder="Remote command (optional)" autocomplete="off"/>
+    </div>
+    <div id="exit-form" style="display:none">
+      <button id="exit-respawn" class="btn btn-green selected">Respawn</button>
+      <button id="exit-remove" class="btn btn-red">Remove</button>
+    </div>
     <div id="session-list"></div>
     <div id="modal-footer">Type to filter &nbsp; ↑↓ navigate &nbsp; Enter select &nbsp; Esc close</div>
   </div>
@@ -301,6 +331,9 @@ let focusedID = 0;
 let modalOpen = false;
 let modalMode = 'sessions';
 let modalCursor = 0;
+let newChoice = 0;
+let exitChoice = 0;
+const newModes = ['same','local','remote'];
 
 function setConnectionState(state){
   const el = document.getElementById('connection-state');
@@ -343,6 +376,7 @@ ws.onmessage = e => {
 function updateLabel(){
   const s = sessions.find(s=>s.id===focusedID);
   document.getElementById('session-label').textContent = s ? '['+(s.id+1)+'] '+s.title : '—';
+  if(s && s.exited && !modalOpen) openExitModal(s.id);
 }
 
 function focusSession(id){
@@ -362,11 +396,49 @@ function switchSession(delta){
   if(next) focusSession(next.id);
 }
 
-function newSession(){
+function newSession(){ openNewSession(); }
+
+function updateNewChoice(){
+  document.querySelectorAll('.choice-row').forEach((row,i)=>row.classList.toggle('selected', i===newChoice));
+  document.querySelector('input[name="new-mode"][value="'+newModes[newChoice]+'"]').checked = true;
+}
+function setNewChoice(i){ newChoice = Math.max(0, Math.min(newModes.length-1, i)); updateNewChoice(); }
+
+function updateExitChoice(){
+  document.getElementById('exit-respawn').classList.toggle('selected', exitChoice===0);
+  document.getElementById('exit-remove').classList.toggle('selected', exitChoice===1);
+}
+function setExitChoice(i){ exitChoice = Math.max(0, Math.min(1, i)); updateExitChoice(); }
+
+function submitNewSession(){
   if(!connected) return;
+  const mode = newModes[newChoice];
+  control({
+    action:'new',
+    id:0,
+    mode,
+    cmd: mode === 'local' ? document.getElementById('new-local-cmd').value : document.getElementById('new-remote-cmd').value,
+    target: document.getElementById('new-ssh-target').value,
+    password: document.getElementById('new-ssh-passwd').value,
+    key: document.getElementById('new-ssh-key').value,
+  });
   term.clear();
-  control({action:'new',id:0});
-  term.focus();
+  closeModal();
+}
+
+function openNewSession(){
+  modalOpen = true;
+  modalMode = 'new';
+  document.getElementById('modal-title').textContent = 'New Session';
+  document.getElementById('session-filter').style.display = 'none';
+  document.getElementById('rename-input').style.display = 'none';
+  document.getElementById('session-list').style.display = 'none';
+  document.getElementById('new-session-form').style.display = '';
+  document.getElementById('exit-form').style.display = 'none';
+  document.getElementById('modal-footer').textContent = 'Enter start   Esc cancel   ↑/↓ choose   Tab fields';
+  setNewChoice(0);
+  document.getElementById('modal-overlay').classList.add('open');
+  document.querySelector('input[name="new-mode"][value="same"]').focus();
 }
 
 // ── Modal ────────────────────────────────────────────────────────────────────
@@ -377,6 +449,9 @@ function openModal(){
   document.getElementById('modal-title').textContent = 'Sessions';
   document.getElementById('session-filter').style.display = '';
   document.getElementById('rename-input').style.display = 'none';
+  document.getElementById('new-session-form').style.display = 'none';
+  document.getElementById('exit-form').style.display = 'none';
+  document.getElementById('session-list').style.display = '';
   document.getElementById('session-filter').value = '';
   filteredSessions = sessions;
   modalCursor = Math.max(0, sessions.findIndex(s=>s.id===focusedID));
@@ -392,12 +467,31 @@ function openRename(){
   document.getElementById('modal-title').textContent = 'Rename Session';
   document.getElementById('session-filter').style.display = 'none';
   document.getElementById('rename-input').style.display = '';
+  document.getElementById('new-session-form').style.display = 'none';
+  document.getElementById('exit-form').style.display = 'none';
+  document.getElementById('session-list').style.display = '';
   document.getElementById('session-list').innerHTML = '';
   document.getElementById('modal-footer').textContent = 'Enter save   Esc cancel';
   document.getElementById('rename-input').value = s ? s.title : '';
   document.getElementById('modal-overlay').classList.add('open');
   document.getElementById('rename-input').focus();
   document.getElementById('rename-input').select();
+}
+
+function openExitModal(sessionID){
+  modalOpen = true;
+  modalMode = 'exit';
+  focusedID = sessionID;
+  document.getElementById('modal-title').textContent = 'Session Exited';
+  document.getElementById('session-filter').style.display = 'none';
+  document.getElementById('rename-input').style.display = 'none';
+  document.getElementById('new-session-form').style.display = 'none';
+  document.getElementById('session-list').style.display = 'none';
+  document.getElementById('exit-form').style.display = '';
+  document.getElementById('modal-footer').textContent = 'Enter confirm   ←/→ choose   Esc close';
+  setExitChoice(0);
+  document.getElementById('modal-overlay').classList.add('open');
+  document.getElementById('exit-respawn').focus();
 }
 
 function closeModal(){
@@ -445,6 +539,19 @@ document.getElementById('modal-overlay').addEventListener('keydown', e => {
     }
     return;
   }
+  if(modalMode === 'new'){
+    if(e.key==='ArrowDown' || e.key==='ArrowRight'){ e.preventDefault(); setNewChoice(newChoice+1); return; }
+    if(e.key==='ArrowUp' || e.key==='ArrowLeft'){ e.preventDefault(); setNewChoice(newChoice-1); return; }
+    if(e.key==='Tab'){ return; }
+    if(e.key==='Enter'){ e.preventDefault(); submitNewSession(); return; }
+    return;
+  }
+  if(modalMode === 'exit'){
+    if(e.key==='ArrowRight' || e.key==='Tab'){ e.preventDefault(); setExitChoice(1-exitChoice); return; }
+    if(e.key==='ArrowLeft'){ e.preventDefault(); setExitChoice(1-exitChoice); return; }
+    if(e.key==='Enter'){ e.preventDefault(); control({action:'exit',id:focusedID,choice:exitChoice===0?'respawn':'remove'}); closeModal(); return; }
+    return;
+  }
   if(e.key==='ArrowDown' && filteredSessions.length){ e.preventDefault(); modalCursor=(modalCursor+1)%filteredSessions.length; renderModal(); return; }
   if(e.key==='ArrowUp' && filteredSessions.length){ e.preventDefault(); modalCursor=(modalCursor-1+filteredSessions.length)%filteredSessions.length; renderModal(); return; }
   if(e.key==='Enter'){ e.preventDefault(); if(filteredSessions[modalCursor]){ focusSession(filteredSessions[modalCursor].id); closeModal(); } return; }
@@ -457,6 +564,9 @@ document.getElementById('modal-overlay').addEventListener('click', e => {
   if(e.target === document.getElementById('modal-overlay')) closeModal();
 });
 
+document.querySelectorAll('input[name="new-mode"]').forEach((el,i)=>el.onchange=()=>setNewChoice(i));
+document.getElementById('exit-respawn').onclick = () => { setExitChoice(0); control({action:'exit',id:focusedID,choice:'respawn'}); closeModal(); };
+document.getElementById('exit-remove').onclick = () => { setExitChoice(1); control({action:'exit',id:focusedID,choice:'remove'}); closeModal(); };
 document.getElementById('btn-sessions').onclick = () => { openModal(); };
 document.getElementById('btn-new').onclick = ()=>{ newSession(); };
 document.getElementById('btn-kill').onclick = ()=>{ if(connected && sessions.length>1){ control({action:'kill',id:focusedID}); } term.focus(); };
@@ -467,24 +577,27 @@ renameBtn.onclick = () => { openRename(); };
 document.getElementById('btn-kill').after(renameBtn);
 
 // Intercept browser shortcuts before they're swallowed.
+function handleAppShortcut(e){
+  if(e.ctrlKey && !e.shiftKey && e.key==='ArrowLeft'){ e.preventDefault(); e.stopPropagation(); switchSession(-1); return true; }
+  if(e.ctrlKey && !e.shiftKey && e.key==='ArrowRight'){ e.preventDefault(); e.stopPropagation(); switchSession(1); return true; }
+  if(e.ctrlKey && e.altKey && !e.shiftKey){
+    const k = e.key.toLowerCase();
+    if(k==='s'){ e.preventDefault(); e.stopPropagation(); openModal(); return true; }
+    if(k==='r'){ e.preventDefault(); e.stopPropagation(); openRename(); return true; }
+    if(k==='t'){ e.preventDefault(); e.stopPropagation(); newSession(); return true; }
+    if(k==='w'){ e.preventDefault(); e.stopPropagation(); if(sessions.length>1) control({action:'kill',id:focusedID}); return true; }
+  }
+  return false;
+}
+
 term.attachCustomKeyEventHandler(e=>{
   if(e.type!=='keydown') return true;
-  if(e.ctrlKey && !e.shiftKey && e.key==='ArrowLeft'){ e.preventDefault(); e.stopPropagation(); switchSession(-1); return false; }
-  if(e.ctrlKey && !e.shiftKey && e.key==='ArrowRight'){ e.preventDefault(); e.stopPropagation(); switchSession(1); return false; }
-  if(e.ctrlKey && e.shiftKey){
-    if(e.key==='S'){ openModal(); return false; }
-    if(e.key==='R'){ openRename(); return false; }
-    if(e.key==='T'){ newSession(); return false; }
-    if(e.key==='W'){ if(sessions.length>1) control({action:'kill',id:focusedID}); return false; }
-  }
+  if(handleAppShortcut(e)) return false;
   return true;
 });
 
 term.onData(d=>keystroke(d));
-window.addEventListener('keydown',e=>{
-  if(e.ctrlKey && !e.shiftKey && e.key==='ArrowLeft'){ e.preventDefault(); e.stopPropagation(); switchSession(-1); }
-  if(e.ctrlKey && !e.shiftKey && e.key==='ArrowRight'){ e.preventDefault(); e.stopPropagation(); switchSession(1); }
-},{capture:true});
+window.addEventListener('keydown',e=>{ handleAppShortcut(e); },{capture:true});
 window.addEventListener('resize',()=>{fitAddon.fit(); sendResize();});
 
 function sendResize(){

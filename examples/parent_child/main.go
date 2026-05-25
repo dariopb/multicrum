@@ -8,8 +8,8 @@ import (
 	"os"
 
 	"github.com/urfave/cli/v3"
-	"multiagent/session"
-	"multiagent/ssh_client"
+	"multicrum/session"
+	"multicrum/ssh_client"
 )
 
 type controlMsg struct {
@@ -23,7 +23,7 @@ type controlMsg struct {
 func main() {
 	cmd := &cli.Command{
 		Name:  "parent-child-example",
-		Usage: "demonstrates parent/child bootstrapping with multiagent/session",
+		Usage: "demonstrates parent/child bootstrapping with multicrum/session",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "child"},
 			&cli.StringFlag{Name: "mux-control"},
@@ -55,7 +55,7 @@ func runParent(ctx context.Context) error {
 		},
 	)
 
-	sockPath := os.TempDir() + "/multiagent-parent-child-example.sock"
+	sockPath := os.TempDir() + "/multicrum-parent-child-example.sock"
 	_ = os.Remove(sockPath)
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {

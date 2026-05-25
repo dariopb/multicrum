@@ -11,13 +11,13 @@ The implementation must not reimplement SSH protocol handling from scratch. It s
 Initial CLI shape:
 
 ```bash
-multiagent --ssh user@host
-multiagent --ssh host
-multiagent --ssh user@host:2222
-multiagent --ssh user@host --ssh-key ~/.ssh/id_ed25519
-multiagent --ssh user@host --ssh-passwd 'secret'
-multiagent --ssh user@host --ssh-use-default-keys
-multiagent --ssh user@host --cmd bash
+multicrum --ssh user@host
+multicrum --ssh host
+multicrum --ssh user@host:2222
+multicrum --ssh user@host --ssh-key ~/.ssh/id_ed25519
+multicrum --ssh user@host --ssh-passwd 'secret'
+multicrum --ssh user@host --ssh-use-default-keys
+multicrum --ssh user@host --cmd bash
 ```
 
 Implemented new-session behavior reuses the same SSH client object/options by default, and the `Ctrl+Alt+T` modal can also create a one-off typed local command or one-off remote SSH session with its own target, password/key, and optional remote command.
@@ -369,9 +369,9 @@ Do not log passwords or private key material.
 
 ## Acceptance Criteria
 
-- `multiagent --ssh user@host --ssh-use-default-keys` opens an interactive remote shell.
-- `multiagent --ssh user@host -i ~/.ssh/id_ed25519` authenticates with the explicit key.
-- `multiagent --ssh user@host --ssh-passwd ...` authenticates with password where allowed by the server.
+- `multicrum --ssh user@host --ssh-use-default-keys` opens an interactive remote shell.
+- `multicrum --ssh user@host -i ~/.ssh/id_ed25519` authenticates with the explicit key.
+- `multicrum --ssh user@host --ssh-passwd ...` authenticates with password where allowed by the server.
 - `~/.ssh/config` aliases resolve user, host, port, and identity file.
 - Unknown/changed host keys fail safely with clear errors.
 - Remote terminal resizes when the local TUI is resized.
