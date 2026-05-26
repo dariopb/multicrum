@@ -21,8 +21,6 @@ require (
 	golang.org/x/term v0.42.0
 )
 
-replace charm.land/bubbletea/v2 => ./internal/charm.land/bubbletea-v2
-
 require (
 	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect

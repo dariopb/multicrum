@@ -167,6 +167,25 @@ Inbound PTY bytes pass through `translateSCORC` before reaching the emulator. An
 
   Reproduction / diagnosis tool: `cmd/ptyrec` records every byte a child PTY emits and can replay the capture through `vt.Emulator` at a chosen size, isolating emulator bugs from UI-layer bugs. Use it whenever a terminal app renders correctly in the browser/xterm but wrong in the local TUI.
 
+### Stripping bubbletea keyboard-enhancement escapes from stdout
+
+Bubble Tea v2 unconditionally emits `CSI > 4 ; 2 m` (modifyOtherKeys),
+`CSI ? u` (request Kitty keyboard), and `CSI = / > / < ... u` (Kitty
+keyboard set/push/pop) on program start, exit, and alt-screen
+transitions. In a multiplexer these bytes leak into child PTYs and
+break input handling for children that don't speak those protocols.
+
+`pkg/ui.NewKeyboardStripWriter` wraps an `io.Writer` and removes those
+specific CSI sequences while passing everything else through
+untouched, including CSI `u` reports without the `=`/`>`/`<`/`?`
+prefix (which are Kitty keyboard *reports* coming back the other way
+and must never be stripped). `cmd/multicrum/main.go` wraps `os.Stdout`
+with it via `tea.WithOutput(...)`.
+
+Library consumers should do the same when constructing their own
+`tea.Program`. This removes the need to maintain a patched bubbletea
+fork.
+
 ## Platform-specific PTY
 
 - Unix: `pkg/session/start_unix.go` uses `github.com/creack/pty` and sets `TERM=xterm-256color`.
