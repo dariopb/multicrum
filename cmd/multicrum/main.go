@@ -9,8 +9,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/urfave/cli/v3"
-	"multicrum/ssh_client"
-	"multicrum/ui"
+	"multicrum/pkg/ssh_client"
+	"multicrum/pkg/ui"
 )
 
 func main() {

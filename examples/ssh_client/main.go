@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"multicrum/ssh_client"
+	"multicrum/pkg/ssh_client"
 )
 
 func main() {

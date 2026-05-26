@@ -94,32 +94,35 @@ optional web path
 
 ```text
 multicrum/
-├── main.go                  # urfave/cli parsing, Bubble Tea startup, optional web startup
-├── console/
-│   ├── console_unix.go      # Unix PTY wrapper, implements io.ReadWriteCloser + Resize + Done
-│   └── console_windows.go   # Windows ConPTY wrapper, implements io.ReadWriteCloser + Resize + Done
-├── ssh_client/              # reusable SSH client/session backend
-│   ├── config.go            # target/config/auth/known_hosts resolution
-│   ├── parse.go             # OpenSSH-like [user@]host[:port] parsing
-│   ├── auth.go              # key/password/agent auth methods
-│   ├── client.go            # reusable Client factory
-│   └── session.go           # interactive SSH PTY Read/Write/Resize/Close adapter
-├── session/
-│   ├── session.go           # Session lifecycle, read loop, rename state
-│   ├── manager.go           # SessionManager create/focus/kill/rename/resize
-│   ├── start_unix.go        # wires Session.Start to console.NewUnixConsole
-│   ├── start_windows.go     # wires Session.Start to console.NewWinConsole
-│   └── vtscreen.go          # vt10x-backed screen, ANSI TUI render, raw replay buffer
-├── ui/
-│   ├── model.go             # Bubble Tea model, modes, session actions, WS callback integration
-│   ├── keys.go              # key constants and KeyMsg→PTY byte conversion
-│   ├── layout.go            # pane sizing
-│   └── styles.go            # lipgloss styles
-├── transport/
-│   ├── transport.go         # generic transport interface
-│   ├── local.go             # no-op local transport
-│   └── websocket.go         # Echo server, Gorilla WS protocol, embedded xterm.js HTML
-├── cmd/testconpty/          # Windows-only ConPTY smoke test behind build tag
+├── cmd/
+│   └── multicrum/           # urfave/cli parsing, Bubble Tea startup, optional web startup
+│       └── main.go
+├── pkg/
+│   ├── console/
+│   │   ├── console_unix.go      # Unix PTY wrapper, implements io.ReadWriteCloser + Resize + Done
+│   │   └── console_windows.go   # Windows ConPTY wrapper, implements io.ReadWriteCloser + Resize + Done
+│   ├── ssh_client/              # reusable SSH client/session backend
+│   │   ├── config.go            # target/config/auth/known_hosts resolution
+│   │   ├── parse.go             # OpenSSH-like [user@]host[:port] parsing
+│   │   ├── auth.go              # key/password/agent auth methods
+│   │   ├── client.go            # reusable Client factory
+│   │   └── session.go           # interactive SSH PTY Read/Write/Resize/Close adapter
+│   ├── session/
+│   │   ├── session.go           # Session lifecycle, read loop, rename state
+│   │   ├── manager.go           # SessionManager create/focus/kill/rename/resize
+│   │   ├── start_unix.go        # wires Session.Start to console.NewUnixConsole
+│   │   ├── start_windows.go     # wires Session.Start to console.NewWinConsole
+│   │   └── vtscreen.go          # vt10x-backed screen, ANSI TUI render, raw replay buffer
+│   ├── ui/
+│   │   ├── model.go             # Bubble Tea model, modes, session actions, WS callback integration
+│   │   ├── keys.go              # key constants and KeyMsg→PTY byte conversion
+│   │   ├── layout.go            # pane sizing
+│   │   └── styles.go            # lipgloss styles
+│   └── transport/
+│       ├── transport.go         # generic transport interface
+│       ├── local.go             # no-op local transport
+│       └── websocket.go         # Echo server, Gorilla WS protocol, embedded xterm.js HTML
+├── cmd/ptyrec/             # PTY recorder/replay diagnostic tool
 ├── AGENTS.md
 ├── spec.md
 └── go.mod
@@ -145,16 +148,16 @@ Current responsibilities:
 
 ### `console.UnixConsole`
 
-Unix backend implemented in `console/console_unix.go`:
+Unix backend implemented in `pkg/console/console_unix.go`:
 
 - Uses `creack/pty.StartWithSize`.
 - Sets `TERM=xterm-256color`.
 - Implements `Read`, `Write`, `Resize`, `Close`, and `Done`.
-- Used by `session/start_unix.go`.
+- Used by `pkg/session/start_unix.go`.
 
 ### `console.WinConsole`
 
-Windows backend implemented in `console/console_windows.go`:
+Windows backend implemented in `pkg/console/console_windows.go`:
 
 - Creates ConPTY pipes with `os.Pipe()`.
 - Calls `windows.CreatePseudoConsole`.
@@ -162,11 +165,11 @@ Windows backend implemented in `console/console_windows.go`:
 - Uses `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` (`0x00020016`).
 - Calls `windows.CreateProcess`.
 - Implements `Read`, `Write`, `Resize`, `Close`, and `Done`.
-- Used by `session/start_windows.go`.
+- Used by `pkg/session/start_windows.go`.
 
 ### `ssh_client`
 
-Top-level package `ssh_client/` is a reusable library for opening interactive SSH PTY sessions.
+Top-level package `pkg/ssh_client/` is a reusable library for opening interactive SSH PTY sessions.
 
 Implemented behavior:
 
@@ -287,7 +290,7 @@ Bubble Tea mouse tracking is enabled at startup. The status bar shows:
 
 ## Web UI
 
-The web UI is served from `transport/websocket.go`:
+The web UI is served from `pkg/transport/websocket.go`:
 
 - `GET /` serves embedded HTML generated by `indexHTML()`.
 - `GET /ws` upgrades to WebSocket using Gorilla.

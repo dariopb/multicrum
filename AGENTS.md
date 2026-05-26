@@ -34,7 +34,7 @@ C:\go124\go\bin\go.exe run . --cmd "bash" --ws :9999 --token mytoken
 ## Architecture & Data Flow
 
 ```text
-main.go
+cmd/multicrum/main.go
   └─ ui.NewModel(cmd, cols, rows)
        └─ session.SessionManager
             └─ session.Session (one per tab/session)
@@ -61,11 +61,13 @@ transport.WSTransport (--ws)
 
 | Package | Role |
 |---|---|
-| `main.go` | Entry point, flags, Bubble Tea program, optional WS startup |
-| `ui/` | Bubble Tea model, key routing, tab/status rendering, viewport lifecycle |
-| `session/` | Session lifecycle, manager, `VTScreen` rendering/replay buffer |
-| `console/` | Windows ConPTY implementation, build-tagged for Windows |
-| `transport/` | Local no-op transport interface and WebSocket/xterm.js transport |
+| `cmd/multicrum/` | CLI entry point, flags, Bubble Tea program, optional WS startup |
+| `cmd/ptyrec/` | Diagnostic PTY recorder/replay tool |
+| `pkg/ui/` | Bubble Tea model, key routing, tab/status rendering, viewport lifecycle |
+| `pkg/session/` | Session lifecycle, manager, `VTScreen` rendering/replay buffer |
+| `pkg/ssh_client/` | SSH client helpers |
+| `pkg/console/` | Windows ConPTY implementation, build-tagged for Windows |
+| `pkg/transport/` | Local no-op transport interface and WebSocket/xterm.js transport |
 
 ## Keyboard / UI Behavior
 
@@ -84,11 +86,11 @@ transport.WSTransport (--ws)
 - `Ctrl+Home` / `Ctrl+End`: jump to top/bottom of local TUI scrollback.
 - `Ctrl+Q`: quit and close sessions.
 
-Shortcut keys are consumed before the default key forwarding path. Do not add a TUI shortcut after the `default` PTY forwarding case in `ui/model.go`.
+Shortcut keys are consumed before the default key forwarding path. Do not add a TUI shortcut after the `default` PTY forwarding case in `pkg/ui/model.go`.
 
 ### Web UI
 
-- Browser UI is embedded inside `transport/websocket.go:indexHTML()`; there are no static assets in `web/`.
+- Browser UI is embedded inside `pkg/transport/websocket.go:indexHTML()`; there are no static assets in `web/`.
 - `Ctrl+Shift+S`: open sessions modal with type-to-filter.
 - `Ctrl+Shift+R`: rename focused session.
 - `Ctrl+Shift+T`: new session.
@@ -101,9 +103,9 @@ Ctrl-arrow handling uses both xterm's custom key handler and a capture-phase `wi
 
 `Session.Title()` returns a user override when set, otherwise the process command name. Rename support is implemented via:
 
-- `Session.title` and `Session.SetTitle()` in `session/session.go`.
-- `SessionManager.Rename()` in `session/manager.go`.
-- TUI `modeRenaming` state in `ui/model.go`.
+- `Session.title` and `Session.SetTitle()` in `pkg/session/session.go`.
+- `SessionManager.Rename()` in `pkg/session/manager.go`.
+- TUI `modeRenaming` state in `pkg/ui/model.go`.
 - Web control message `ControlMsg{Action:"rename", ID, Title}`.
 
 Metadata broadcasts are required after rename so both TUI and browser labels stay synchronized.
@@ -161,21 +163,21 @@ Important details:
 
 Inbound PTY bytes pass through `translateSCORC` before reaching the emulator. Any future emulator workaround should be added to the same helper (or alongside it) and documented in this section.
 
-- **Missing SCORC handler in `github.com/charmbracelet/x/vt`**. The emulator registers a handler for **DECRC** (`ESC 8`, Restore Cursor) but **not for SCORC** (`ESC[u`, the CSI form). Apps that draw popups with the `ESC[s` / `ESC[u` pair — notably **btop's kill/signal confirmation dialog** — would silently no-op on every restore, so each subsequent dialog line drifted right and down from where the previous one ended. `VTScreen.Write` translates the canonical 3-byte `ESC[u` to `ESC 8` before feeding the emulator (`translateSCORC` in `session/vtscreen.go`). The browser `rawHistory` keeps the original bytes because xterm.js handles SCORC natively. **Only the bare 3-byte form is rewritten** — `ESC[<params>u` is the kitty keyboard protocol report and must not be touched, or it will corrupt input replies.
+- **Missing SCORC handler in `github.com/charmbracelet/x/vt`**. The emulator registers a handler for **DECRC** (`ESC 8`, Restore Cursor) but **not for SCORC** (`ESC[u`, the CSI form). Apps that draw popups with the `ESC[s` / `ESC[u` pair — notably **btop's kill/signal confirmation dialog** — would silently no-op on every restore, so each subsequent dialog line drifted right and down from where the previous one ended. `VTScreen.Write` translates the canonical 3-byte `ESC[u` to `ESC 8` before feeding the emulator (`translateSCORC` in `pkg/session/vtscreen.go`). The browser `rawHistory` keeps the original bytes because xterm.js handles SCORC natively. **Only the bare 3-byte form is rewritten** — `ESC[<params>u` is the kitty keyboard protocol report and must not be touched, or it will corrupt input replies.
 
   Reproduction / diagnosis tool: `cmd/ptyrec` records every byte a child PTY emits and can replay the capture through `vt.Emulator` at a chosen size, isolating emulator bugs from UI-layer bugs. Use it whenever a terminal app renders correctly in the browser/xterm but wrong in the local TUI.
 
 ## Platform-specific PTY
 
-- Unix: `session/start_unix.go` uses `github.com/creack/pty` and sets `TERM=xterm-256color`.
-- Windows: `session/start_windows.go` uses `console.WinConsole`, which wraps ConPTY via `golang.org/x/sys/windows`.
+- Unix: `pkg/session/start_unix.go` uses `github.com/creack/pty` and sets `TERM=xterm-256color`.
+- Windows: `pkg/session/start_windows.go` uses `console.WinConsole`, which wraps ConPTY via `golang.org/x/sys/windows`.
 - Keep PTY-specific code in build-tagged files. Shared `session.Session` only assumes an `io.ReadWriteCloser` and resize callback.
 
 ## Bubble Tea State Pattern
 
 `Model` contains a pointer to `state`. This is intentional because Bubble Tea models are value-copied on `Update`/`View`. Put mutable state in `state`, not directly in `Model`, unless you are deliberately okay with value-copy behavior.
 
-Current modes in `ui/model.go`:
+Current modes in `pkg/ui/model.go`:
 
 - `modeNormal`
 - `modeRenaming`

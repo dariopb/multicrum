@@ -5,7 +5,7 @@ package session
 import (
 	"fmt"
 
-	"multicrum/console"
+	"multicrum/pkg/console"
 )
 
 // Start opens the configured backend: SSH remote PTY when configured,

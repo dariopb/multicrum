@@ -9,9 +9,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
-	"multicrum/session"
-	"multicrum/ssh_client"
-	"multicrum/transport"
+	"multicrum/pkg/session"
+	"multicrum/pkg/ssh_client"
+	"multicrum/pkg/transport"
 )
 
 // OutputMsg is re-exported here so main.go can use the same type.

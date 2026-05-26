@@ -8,8 +8,8 @@ import (
 	"os"
 
 	"github.com/urfave/cli/v3"
-	"multicrum/session"
-	"multicrum/ssh_client"
+	"multicrum/pkg/session"
+	"multicrum/pkg/ssh_client"
 )
 
 type controlMsg struct {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"multicrum/ssh_client"
+	"multicrum/pkg/ssh_client"
 )
 
 // SessionManager holds all active sessions.

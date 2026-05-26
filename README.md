@@ -34,7 +34,7 @@ go build ./...
 Build the runnable binary:
 
 ```bash
-go build -o multicrum .
+go build -o multicrum ./cmd/multicrum
 ```
 
 Run tests:
@@ -135,7 +135,7 @@ In SSH sessions, OpenSSH-style escapes are supported at line start:
 
 ## SSH behavior
 
-The SSH client lives in `ssh_client/` and is usable independently from the TUI.
+The SSH client lives in `pkg/ssh_client/` and is usable independently from the TUI.
 
 Resolution behavior:
 
@@ -191,8 +191,8 @@ import (
     "os"
 
     "github.com/urfave/cli/v3"
-    "multicrum/session"
-    "multicrum/ssh_client"
+    "multicrum/pkg/session"
+    "multicrum/pkg/ssh_client"
 )
 
 type ControlMsg struct {
@@ -379,10 +379,10 @@ Done() <-chan struct{}
 For Go-native discovery:
 
 ```bash
-go doc multicrum/session
-go doc multicrum/ssh_client
-go doc -all multicrum/session
-go doc -all multicrum/ssh_client
+go doc multicrum/pkg/session
+go doc multicrum/pkg/ssh_client
+go doc -all multicrum/pkg/session
+go doc -all multicrum/pkg/ssh_client
 ```
 
 Compileable examples live in:
@@ -403,6 +403,6 @@ go run ./examples/ssh_client user@host
 
 - `spec.md` records the current app architecture and behavior.
 - `spec-ssh-client.md` records the SSH client design, library research, and implementation details.
-- `session/doc.go` and `ssh_client/doc.go` provide GoDoc package overviews.
+- `pkg/session/doc.go` and `pkg/ssh_client/doc.go` provide GoDoc package overviews.
 - `examples/` contains compileable copy-paste starting points for embedders and coding agents.
 - `AGENTS.md` contains development notes and project-specific gotchas.

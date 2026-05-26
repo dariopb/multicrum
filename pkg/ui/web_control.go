@@ -3,8 +3,8 @@ package ui
 import (
 	"strings"
 
-	"multicrum/ssh_client"
-	"multicrum/transport"
+	"multicrum/pkg/ssh_client"
+	"multicrum/pkg/transport"
 )
 
 func (s *state) handleWSNew(m Model, msg transport.ControlMsg) {

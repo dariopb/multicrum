@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add a reusable SSH client package under top-level `ssh_client/` and expose it through the existing multiplexer as a future `--ssh` command option. The feature should let users open a session backed by a remote SSH connection instead of a local PTY command.
+Add a reusable SSH client package under `pkg/ssh_client/` and expose it through the existing multiplexer as a future `--ssh` command option. The feature should let users open a session backed by a remote SSH connection instead of a local PTY command.
 
 The implementation must not reimplement SSH protocol handling from scratch. It should compose established Go SSH libraries and only add project-specific parsing, option resolution, and session integration.
 
@@ -98,21 +98,21 @@ SSH remote sessions support OpenSSH-style escapes at line start: `~.` disconnect
 
 ## Current Implementation Status
 
-Implemented in `ssh_client/`:
+Implemented in `pkg/ssh_client/`:
 
 - `config.go`, `parse.go`, `auth.go`, `client.go`, and `session.go`.
-- Parser and escape-sequence tests in `ssh_client/*_test.go`.
+- Parser and escape-sequence tests in `pkg/ssh_client/*_test.go`.
 - `session.Session` can start local PTY/ConPTY or SSH remote PTY depending on whether a `*ssh_client.Client` is attached.
 - `SessionManager.NewWithSSH` supports one-off local/remote sessions and rolls back half-created sessions on start failure.
 - `main.go` exposes `--ssh`, `-i/--ssh-key`, `--ssh-passwd`, `--ssh-use-default-keys`, `--ssh-agent`, `--ssh-known-hosts`, and `--ssh-insecure-ignore-host-key`.
 - `ui.NewModelWithSSH` passes the default SSH client factory into `SessionManager`.
 - `Ctrl+Alt+T` opens `modeNewSession`, where Enter keeps the old/default behavior and the user can choose a typed local command or a remote SSH target/password/key/command. Errors remain inline in the modal and wrap across at least four lines.
-- Mouse selection/copy is implemented through `ui/selection.go` and `ui/clipboard.go`; `VTScreen.BufferLines()` is used to preserve soft-wrap semantics.
+- Mouse selection/copy is implemented through `pkg/ui/selection.go` and `pkg/ui/clipboard.go`; `VTScreen.BufferLines()` is used to preserve soft-wrap semantics.
 
 ## Proposed Package Layout
 
 ```text
-ssh_client/
+pkg/ssh_client/
 ├── config.go      # Options, resolved config, defaults
 ├── parse.go       # user@host[:port] parsing
 ├── auth.go        # auth method construction: key, password, agent, defaults
@@ -341,7 +341,7 @@ Do not log passwords or private key material.
 
 ### Phase 1: Standalone package
 
-- Create `ssh_client/` package.
+- Create `pkg/ssh_client/` package.
 - Implement target parsing.
 - Implement config resolution with explicit options and default keys.
 - Implement auth methods for password, explicit key, default keys, and agent.
