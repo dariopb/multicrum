@@ -52,6 +52,7 @@ func (s *state) startSelection(xInPane, yInPane int) {
 		endC:     xInPane,
 		hasRange: false,
 	}
+	debugLog("startSelection: line=%d col=%d", line, xInPane)
 }
 
 // updateSelection extends the current selection to the given mouse coords.
@@ -65,6 +66,7 @@ func (s *state) updateSelection(xInPane, yInPane int) {
 	if s.sel.endL != s.sel.startL || s.sel.endC != s.sel.startC {
 		s.sel.hasRange = true
 	}
+	debugLog("updateSelection: line=%d col=%d hasRange=%v", line, xInPane, s.sel.hasRange)
 }
 
 // finishSelection ends the drag, copies the selected text to the system
@@ -86,7 +88,7 @@ func (s *state) finishSelection() tea.Cmd {
 	}
 	copyToClipboard(text)
 	debugLog("copyToClipboard: done")
-	return nil
+	return tea.SetClipboard(text)
 }
 
 // clearSelection drops any current selection (e.g. after content changes).

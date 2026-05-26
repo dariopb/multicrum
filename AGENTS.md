@@ -157,6 +157,14 @@ Important details:
 - `Render()` emits ANSI foreground/background color sequences from vt10x cell attributes. If changing vt10x or rendering libraries, verify both local TUI colors and browser xterm colors.
 - `RenderWithScrollback()` prepends captured scrolled-off lines to the current vt10x screen for local TUI scrolling/copying. WebSocket replay remains raw xterm bytes.
 
+### Emulator quirks worked around in `VTScreen.Write`
+
+Inbound PTY bytes pass through `translateSCORC` before reaching the emulator. Any future emulator workaround should be added to the same helper (or alongside it) and documented in this section.
+
+- **Missing SCORC handler in `github.com/charmbracelet/x/vt`**. The emulator registers a handler for **DECRC** (`ESC 8`, Restore Cursor) but **not for SCORC** (`ESC[u`, the CSI form). Apps that draw popups with the `ESC[s` / `ESC[u` pair — notably **btop's kill/signal confirmation dialog** — would silently no-op on every restore, so each subsequent dialog line drifted right and down from where the previous one ended. `VTScreen.Write` translates the canonical 3-byte `ESC[u` to `ESC 8` before feeding the emulator (`translateSCORC` in `session/vtscreen.go`). The browser `rawHistory` keeps the original bytes because xterm.js handles SCORC natively. **Only the bare 3-byte form is rewritten** — `ESC[<params>u` is the kitty keyboard protocol report and must not be touched, or it will corrupt input replies.
+
+  Reproduction / diagnosis tool: `cmd/ptyrec` records every byte a child PTY emits and can replay the capture through `vt.Emulator` at a chosen size, isolating emulator bugs from UI-layer bugs. Use it whenever a terminal app renders correctly in the browser/xterm but wrong in the local TUI.
+
 ## Platform-specific PTY
 
 - Unix: `session/start_unix.go` uses `github.com/creack/pty` and sets `TERM=xterm-256color`.

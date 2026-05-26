@@ -7,6 +7,8 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 	"multicrum/session"
 	"multicrum/ssh_client"
 	"multicrum/transport"
@@ -32,6 +34,7 @@ const (
 type state struct {
 	manager      *session.SessionManager
 	viewports    map[int]*viewport.Model
+	altScreens   map[int]bool // last-seen alt-screen state per session index, for transition detection
 	program      *tea.Program
 	width        int
 	height       int
@@ -66,7 +69,8 @@ func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Cl
 	return &Model{
 		agentCmd: agentCmd,
 		s: &state{
-			viewports: make(map[int]*viewport.Model),
+			viewports:  make(map[int]*viewport.Model),
+			altScreens: make(map[int]bool),
 			width:     cols,
 			height:    rows,
 			sshClient: sshClient,
@@ -155,7 +159,18 @@ type wsControlMsg transport.ControlMsg
 
 // Init starts the first session.
 func (m Model) Init() tea.Cmd {
-	return func() tea.Msg { return startFirstSessionMsg{} }
+	return tea.Sequence(resetTerminalInputModes, func() tea.Msg { return startFirstSessionMsg{} })
+}
+
+func resetTerminalInputModes() tea.Msg {
+	return tea.RawMsg{Msg: ansi.ResetModeMouseX10 +
+		ansi.ResetModeMouseNormal +
+		ansi.ResetModeMouseButtonEvent +
+		ansi.ResetModeMouseAnyEvent +
+		ansi.ResetModeMouseExtSgr +
+		ansi.ResetModifyOtherKeys +
+		ansi.KittyKeyboard(0, 1) +
+		ansi.DisableKittyKeyboard}
 }
 
 type startFirstSessionMsg struct{}
@@ -223,8 +238,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, sess := range s.manager.Sessions() {
 			if sess.Index() == msg.Index {
 				wasAtBottom := vp.AtBottom()
+				alt := sess.Screen().IsAltScreen()
+				prev := s.altScreens[msg.Index]
 				vp.SetContent(sess.Screen().RenderWithScrollback())
-				if msg.Index == s.manager.FocusedIndex() && wasAtBottom {
+				if alt != prev {
+					// Alt-screen entry/exit: scrollback disappears or returns.
+					// Reset YOffset so popups/dialogs (e.g. btop's Yes/No)
+					// render against a fresh, full-pane grid and prior
+					// main-screen selections don't index into stale rows.
+					vp.GotoBottom()
+					s.clearSelection()
+					s.altScreens[msg.Index] = alt
+				} else if msg.Index == s.manager.FocusedIndex() && wasAtBottom {
 					vp.GotoBottom()
 				}
 				s.viewports[msg.Index] = vp
@@ -244,6 +269,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.notifyMeta()
 		return m, nil
 
+	case tea.PasteStartMsg, tea.PasteEndMsg:
+		// Swallow bracketed-paste boundary markers from the outer terminal so
+		// they never reach the child PTY as visible text. We re-wrap the
+		// payload ourselves in the PasteMsg handler when the child has
+		// bracketed paste enabled.
+		return m, nil
+
+	case tea.PasteMsg:
+		// The outer terminal delivered bracketed paste content. Forward it to
+		// the focused child PTY, wrapping in ESC[200~..ESC[201~ when the child
+		// itself has bracketed-paste mode on. This is what makes Ctrl+Shift+V,
+		// middle-click, and Shift+Insert "just work" inside multicrum, and —
+		// critically — prevents Bubble Tea from silently consuming the paste
+		// (which previously made keys appear "stuck" after a mouse selection
+		// followed by a paste).
+		if s.mode != modeNormal {
+			return m, nil
+		}
+		sess := s.manager.Focused()
+		if sess == nil {
+			return m, nil
+		}
+		data := []byte(msg.Content)
+		if sess.Screen().BracketedPasteMode() {
+			out := make([]byte, 0, len(data)+12)
+			out = append(out, "\x1b[200~"...)
+			out = append(out, data...)
+			out = append(out, "\x1b[201~"...)
+			_, _ = sess.Write(out)
+		} else {
+			_, _ = sess.Write(data)
+		}
+		return m, nil
+
 	case tea.MouseMsg:
 		if s.mode != modeNormal {
 			return m, nil
@@ -261,7 +320,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Mouse-capture mode: forward to the child PTY for apps like btop,
-		// htop, vim, lazygit. Otherwise we own the mouse for select+copy.
+		// htop, vim, lazygit. When disabled, Bubble Tea leaves mouse selection
+		// to the outer terminal by not enabling mouse reporting.
 		if s.mouseCapture {
 			if !inPane {
 				return m, nil
@@ -283,50 +343,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_, _ = sess.Write(seq)
 			}
 			return m, nil
-		}
-		// Native selection mode. Clamp X/Y so events that drift outside the
-		// pane (e.g. mouse moves into the status bar mid-drag, or release
-		// fires below the pane) still update / finish the selection.
-		clampX := ev.X
-		if clampX < 0 {
-			clampX = 0
-		}
-		if clampX >= s.width {
-			clampX = s.width - 1
-		}
-		clampY := ev.Y
-		if clampY < 0 {
-			clampY = 0
-		}
-		if clampY >= paneRows {
-			clampY = paneRows - 1
-		}
-		switch ev.Button {
-		case tea.MouseWheelUp:
-			if inPane {
-				s.scrollFocused(-3)
-			}
-			return m, nil
-		case tea.MouseWheelDown:
-			if inPane {
-				s.scrollFocused(3)
-			}
-			return m, nil
-		}
-		switch ev.Action {
-		case mousePress:
-			if ev.Button == tea.MouseLeft && inPane {
-				s.startSelection(clampX, clampY)
-			}
-		case mouseMotion:
-			if s.sel.active {
-				s.updateSelection(clampX, clampY)
-			}
-		case mouseRelease:
-			if s.sel.active {
-				s.updateSelection(clampX, clampY)
-				return m, s.finishSelection()
-			}
 		}
 		return m, nil
 
@@ -377,8 +393,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View {
 	view := tea.NewView(m.viewString())
 	view.AltScreen = true
-	view.MouseMode = tea.MouseModeAllMotion
+	if m.s.mouseCapture {
+		view.MouseMode = tea.MouseModeAllMotion
+	}
+	view.Cursor = m.cursor()
 	return view
+}
+
+func (m Model) cursor() *tea.Cursor {
+	s := m.s
+	if s.mode != modeNormal || s.manager == nil || s.manager.Len() == 0 {
+		return nil
+	}
+	sess := s.manager.Focused()
+	if sess == nil {
+		return nil
+	}
+	cur := sess.Screen().Cursor()
+	if !cur.Visible {
+		return nil
+	}
+	idx := s.manager.FocusedIndex()
+	vp, ok := s.viewports[idx]
+	if !ok {
+		return nil
+	}
+	_, rows := paneSize(s.width, s.height)
+	line := len(sess.Screen().BufferLines()) - rows + cur.Y
+	y := 1 + line - vp.YOffset()
+	if y < 1 || y > rows || cur.X < 0 || cur.X >= s.width {
+		return nil
+	}
+	cursor := tea.NewCursor(cur.X, y)
+	cursor.Shape = teaCursorShape(cur.Shape)
+	cursor.Blink = cur.Blink
+	return cursor
+}
+
+func teaCursorShape(shape vt.CursorStyle) tea.CursorShape {
+	switch shape {
+	case vt.CursorUnderline:
+		return tea.CursorUnderline
+	case vt.CursorBar:
+		return tea.CursorBar
+	default:
+		return tea.CursorBlock
+	}
 }
 
 func (m Model) viewString() string {
@@ -545,6 +605,9 @@ func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	case shortcutMouse:
 		s.mouseCapture = !s.mouseCapture
 		s.clearSelection()
+		if !s.mouseCapture {
+			return true, resetTerminalInputModes
+		}
 		return true, nil
 	case shortcutNext:
 		s.manager.Focus((s.manager.FocusedIndex() + 1) % s.manager.Len())
@@ -786,17 +849,12 @@ func (m Model) renderPane() string {
 		return m.renderSessionSelector()
 	}
 	idx := s.manager.FocusedIndex()
+	paneCols, paneRows := paneSize(s.width, s.height)
 	var pane string
 	if vp, ok := s.viewports[idx]; ok {
-		pane = vp.View()
+		pane = s.renderPaneContent(vp, paneCols, paneRows)
 	} else {
-		cols, rows := paneSize(s.width, s.height)
-		blank := viewport.New(viewport.WithWidth(cols), viewport.WithHeight(rows))
-		pane = blank.View()
-	}
-	if !s.mouseCapture {
-		paneCols, paneRows := paneSize(s.width, s.height)
-		pane = s.overlaySelection(pane, paneCols, paneRows)
+		pane = blankPane(paneCols, paneRows)
 	}
 	switch s.mode {
 	case modeHelp:
@@ -809,6 +867,64 @@ func (m Model) renderPane() string {
 		return m.overlayBox(pane, m.renderNewSessionModal())
 	}
 	return pane
+}
+
+// renderPaneContent builds the visible pane string directly from the focused
+// session's emulator output, bypassing viewport.View()'s lipgloss-based
+// wrap/pad pipeline. Going through lipgloss.Style.Width(...).Render(...) inside
+// viewport.View() applies ansi.Wrap to the content, and any disagreement
+// between the emulator's cell-accurate width and lipgloss's grapheme/width
+// measurement (e.g. on braille / box-drawing rows produced by btop) can soft
+// wrap one row and shift every subsequent row down by one — that's the
+// "dialog buttons are in the wrong place" bug. We pad/truncate to exactly
+// paneCols x paneRows ourselves so no wrapping is ever possible.
+func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int) string {
+	content := vp.GetContent()
+	if content == "" {
+		return blankPane(paneCols, paneRows)
+	}
+	all := strings.Split(content, "\n")
+	yoff := vp.YOffset()
+	if yoff < 0 {
+		yoff = 0
+	}
+	if yoff > len(all) {
+		yoff = len(all)
+	}
+	end := yoff + paneRows
+	if end > len(all) {
+		end = len(all)
+	}
+	out := make([]string, 0, paneRows)
+	for i := yoff; i < end; i++ {
+		out = append(out, padLine(all[i], paneCols))
+	}
+	for len(out) < paneRows {
+		out = append(out, strings.Repeat(" ", paneCols))
+	}
+	return strings.Join(out, "\n")
+}
+
+// padLine truncates or right-pads an ANSI-styled line to exactly width cells.
+func padLine(line string, width int) string {
+	w := ansi.StringWidth(line)
+	if w > width {
+		return ansi.Truncate(line, width, "")
+	}
+	if w < width {
+		return line + strings.Repeat(" ", width-w)
+	}
+	return line
+}
+
+// blankPane returns a paneRows-line string of paneCols spaces each.
+func blankPane(paneCols, paneRows int) string {
+	row := strings.Repeat(" ", paneCols)
+	out := make([]string, paneRows)
+	for i := range out {
+		out[i] = row
+	}
+	return strings.Join(out, "\n")
 }
 
 // overlayBox paints box centered over pane (both already ANSI-styled).
