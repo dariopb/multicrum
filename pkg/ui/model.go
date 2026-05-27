@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -41,8 +42,13 @@ type state struct {
 	errMsg       string
 	mode         mode
 	renameText   string
+	renameCursor int
 	selectFilter string
+	selectFilterCursor int
 	selectCursor int
+	selectScroll int // first visible row index when sessions overflow modal height
+	selectMoving bool // when true, Up/Down reorders the selected session instead of moving cursor
+	selectMoveStart int // original session index of the moving entry, so Esc can revert
 	exitPromptID int                // session index waiting for user decision (in exit prompt)
 	exitChoice   int                // 0 = respawn, 1 = remove
 	newSession   newSessionState    // state for the new-session modal
@@ -50,12 +56,29 @@ type state struct {
 	sel          selection          // in-progress / completed mouse selection over the focused buffer
 	sshClient    *ssh_client.Client // non-nil starts SSH-backed sessions
 	onMetaChange func()             // called when sessions are added/removed/focused
+	configPath   string             // path used by save/load layout shortcut
+	initialCfg   []startupSession   // sessions to spawn on Init (instead of agentCmd)
+	statusMsg    string             // transient status line (e.g. config save result)
+	renderPending bool              // a render tick is in flight (coalescing PTY bursts)
+	scrollbackMode map[int]bool     // sessions currently scrolled up (need full scrollback in viewport)
+}
+
+// startupSession is a session entry queued for startup, with its title and
+// command tokens. Empty Title means "use command name". CmdLine, when set,
+// is the original shell-syntax line and is remembered on the session so
+// layout save can round-trip it as-is.
+type startupSession struct {
+	Title   string
+	Cmd     []string
+	CmdLine string
 }
 
 // Model is the top-level Bubble Tea model.
+// Model is the top-level Bubble Tea model.
 type Model struct {
-	s        *state
-	agentCmd []string
+	s            *state
+	agentCmd     []string
+	agentCmdLine string // original shell line for --cmd, when shell-parsing was needed
 }
 
 // NewModel constructs the model. agentCmd is the command to run per session.
@@ -71,11 +94,50 @@ func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Cl
 		s: &state{
 			viewports:  make(map[int]*viewport.Model),
 			altScreens: make(map[int]bool),
+			scrollbackMode: make(map[int]bool),
 			width:     cols,
 			height:    rows,
 			sshClient: sshClient,
 		},
 	}
+}
+
+// SetAgentCmdLine records the original shell line for the default
+// agentCmd. Used so the layout-save shortcut round-trips the original
+// string instead of the "bash -c <line>" expansion.
+func (m *Model) SetAgentCmdLine(line string) { m.agentCmdLine = line }
+
+// SetConfigPath records the path the layout-save shortcut writes to.
+// Empty means "no config path", and the save shortcut becomes a no-op
+// with an error status.
+func (m *Model) SetConfigPath(path string) {
+	m.s.configPath = path
+}
+
+// SetInitialSessions queues a list of sessions to spawn at Init time
+// instead of the default single agentCmd session. Pass nil to keep the
+// default behavior.
+func (m *Model) SetInitialSessions(entries []startupSession) {
+	m.s.initialCfg = entries
+}
+
+// AddInitialSession appends one startup session entry. Useful for
+// callers that build the list incrementally.
+func (m *Model) AddInitialSession(title string, cmd []string) {
+	m.s.initialCfg = append(m.s.initialCfg, startupSession{Title: title, Cmd: cmd})
+}
+
+// AddInitialSessionLine appends one startup session entry whose command
+// is described by a shell-syntax line. The line is parsed with
+// ParseCmdLine and remembered verbatim on the session so subsequent
+// layout saves round-trip the original string.
+func (m *Model) AddInitialSessionLine(title, line string) {
+	cmd := ParseCmdLine(line)
+	m.s.initialCfg = append(m.s.initialCfg, startupSession{
+		Title:   title,
+		Cmd:     cmd,
+		CmdLine: line,
+	})
 }
 
 // SetProgram wires the tea.Program so sessions can send messages back into the
@@ -157,6 +219,16 @@ type wsInputMsg []byte
 // wsControlMsg carries a session-management command from a browser client.
 type wsControlMsg transport.ControlMsg
 
+// renderTickMsg is sent ~at renderInterval after an OutputMsg arrives so the
+// visible viewport gets refreshed once per frame rather than once per PTY
+// chunk. Coalescing avoids the per-keystroke lag that builds up when a busy
+// child (htop, btop, vim, fast-scrolling logs) generates many small writes:
+// re-rendering 60 times/s is plenty for visual fluidity, far cheaper than
+// running RenderWithScrollback + viewport.SetContent on every read.
+type renderTickMsg struct{}
+
+const renderInterval = 16 * time.Millisecond
+
 // Init starts the first session.
 func (m Model) Init() tea.Cmd {
 	return tea.Sequence(resetTerminalInputModes, func() tea.Msg { return startFirstSessionMsg{} })
@@ -181,12 +253,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case startFirstSessionMsg:
-		_, err := s.manager.New(m.agentCmd)
-		if err != nil {
-			s.errMsg = fmt.Sprintf("ERROR starting session: %v", err)
-			return m, nil
+		if len(s.initialCfg) > 0 {
+			var failed []string
+			for _, entry := range s.initialCfg {
+				cmd := entry.Cmd
+				if len(cmd) == 0 {
+					cmd = m.agentCmd
+				}
+				sess, err := s.manager.New(cmd)
+				if err != nil {
+					failed = append(failed, fmt.Sprintf("%v", err))
+					continue
+				}
+				if entry.Title != "" {
+					sess.SetTitle(entry.Title)
+				}
+				if entry.CmdLine != "" {
+					sess.SetCmdLine(entry.CmdLine)
+				}
+			}
+			if len(failed) > 0 {
+				s.errMsg = "ERROR starting some sessions: " + strings.Join(failed, "; ")
+			} else {
+				s.errMsg = ""
+			}
+			if s.manager.Len() == 0 {
+				// Fall back to default session so the UI is never empty.
+				sess, err := s.manager.New(m.agentCmd)
+				if err != nil {
+					s.errMsg = fmt.Sprintf("ERROR starting session: %v", err)
+					return m, nil
+				}
+				if m.agentCmdLine != "" {
+					sess.SetCmdLine(m.agentCmdLine)
+				}
+			}
+		} else {
+			sess, err := s.manager.New(m.agentCmd)
+			if err != nil {
+				s.errMsg = fmt.Sprintf("ERROR starting session: %v", err)
+				return m, nil
+			}
+			if m.agentCmdLine != "" {
+				sess.SetCmdLine(m.agentCmdLine)
+			}
+			s.errMsg = ""
 		}
-		s.errMsg = ""
 		s.ensureViewport(s.manager.FocusedIndex(), s.width, s.height)
 		s.notifyMeta()
 		return m, nil
@@ -233,26 +345,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case OutputMsg:
+		// Only the focused session has a visible viewport, so non-focused
+		// sessions don't need a re-render here — their VT state has already
+		// been updated by Session.readLoop. Avoiding a full
+		// RenderWithScrollback + SetContent per chunk for background tabs
+		// keeps the message loop responsive when a background TUI is busy.
+		if msg.Index != s.manager.FocusedIndex() {
+			return m, nil
+		}
 		s.ensureViewport(msg.Index, s.width, s.height)
-		vp := s.viewports[msg.Index]
+		if s.renderPending {
+			return m, nil
+		}
+		s.renderPending = true
+		return m, tea.Tick(renderInterval, func(time.Time) tea.Msg { return renderTickMsg{} })
+
+	case renderTickMsg:
+		s.renderPending = false
+		idx := s.manager.FocusedIndex()
+		s.ensureViewport(idx, s.width, s.height)
+		vp := s.viewports[idx]
 		for _, sess := range s.manager.Sessions() {
-			if sess.Index() == msg.Index {
-				wasAtBottom := vp.AtBottom()
+			if sess.Index() == idx {
 				alt := sess.Screen().IsAltScreen()
-				prev := s.altScreens[msg.Index]
-				vp.SetContent(sess.Screen().RenderWithScrollback())
+				prev := s.altScreens[idx]
 				if alt != prev {
-					// Alt-screen entry/exit: scrollback disappears or returns.
-					// Reset YOffset so popups/dialogs (e.g. btop's Yes/No)
-					// render against a fresh, full-pane grid and prior
-					// main-screen selections don't index into stale rows.
+					s.altScreens[idx] = alt
+					s.scrollbackMode[idx] = false
+					vp.SetContent(sess.Screen().Render())
 					vp.GotoBottom()
 					s.clearSelection()
-					s.altScreens[msg.Index] = alt
-				} else if msg.Index == s.manager.FocusedIndex() && wasAtBottom {
+				} else if s.scrollbackMode[idx] && !alt {
+					// User is browsing scrollback: keep the full content so
+					// YOffset stays meaningful relative to it.
+					wasAtBottom := vp.AtBottom()
+					vp.SetContent(sess.Screen().RenderWithScrollback())
+					if wasAtBottom {
+						// Caught back up to live tail — drop the heavy
+						// scrollback content and resume cheap rendering.
+						s.scrollbackMode[idx] = false
+						vp.SetContent(sess.Screen().Render())
+						vp.GotoBottom()
+					}
+				} else {
+					// Hot path: only the visible screen, bounded cols x rows
+					// of work per frame regardless of scrollback depth.
+					vp.SetContent(sess.Screen().Render())
 					vp.GotoBottom()
 				}
-				s.viewports[msg.Index] = vp
+				s.viewports[idx] = vp
 				break
 			}
 		}
@@ -277,14 +418,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.PasteMsg:
-		// The outer terminal delivered bracketed paste content. Forward it to
-		// the focused child PTY, wrapping in ESC[200~..ESC[201~ when the child
-		// itself has bracketed-paste mode on. This is what makes Ctrl+Shift+V,
-		// middle-click, and Shift+Insert "just work" inside multicrum, and —
-		// critically — prevents Bubble Tea from silently consuming the paste
-		// (which previously made keys appear "stuck" after a mouse selection
-		// followed by a paste).
-		if s.mode != modeNormal {
+		// The outer terminal delivered bracketed paste content.
+		// In editable modal modes, insert it into the focused field.
+		// In normal mode, forward it to the focused child PTY, wrapping
+		// in ESC[200~..ESC[201~ when the child itself has bracketed-
+		// paste mode on. This is what makes Ctrl+Shift+V, middle-click,
+		// and Shift+Insert "just work" inside multicrum, and —
+		// critically — prevents Bubble Tea from silently consuming the
+		// paste (which previously made keys appear "stuck" after a
+		// mouse selection followed by a paste).
+		text := sanitizePaste(msg.Content)
+		switch s.mode {
+		case modeRenaming:
+			s.renameText, s.renameCursor = insertAt(s.renameText, s.renameCursor, text)
+			return m, nil
+		case modeNewSession:
+			s.appendNewSessionField(text)
+			return m, nil
+		case modeSelecting:
+			s.selectFilter, s.selectFilterCursor = insertAt(s.selectFilter, s.selectFilterCursor, text)
+			s.selectCursor = 0
+			return m, nil
+		case modeNormal:
+			// fall through to PTY forwarding below
+		default:
 			return m, nil
 		}
 		sess := s.manager.Focused()
@@ -370,6 +527,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if handled, cmd := s.handleShortcut(m, msg); handled {
 			return m, cmd
 		}
+		// Any other keypress clears a stale transient status toast.
+		s.statusMsg = ""
 		if msg.Key().Code == tea.KeyEnter {
 			idx := s.manager.FocusedIndex()
 			if vp, ok := s.viewports[idx]; ok && !vp.AtBottom() {
@@ -477,9 +636,36 @@ func (s *state) resetViewport(idx, w, h int) {
 	s.viewports[idx] = &vp
 }
 
+// enterScrollback loads the full Render+scrollback content into the viewport
+// and positions YOffset at the bottom so subsequent ScrollUp moves into
+// scrolled-off history. Called lazily when the user actually scrolls; the
+// hot path (live tail) keeps only the visible-screen worth of content.
+func (s *state) enterScrollback(idx int) {
+	sess := s.manager.Focused()
+	if sess == nil || sess.Index() != idx {
+		for _, c := range s.manager.Sessions() {
+			if c.Index() == idx {
+				sess = c
+				break
+			}
+		}
+	}
+	if sess == nil || sess.Screen().IsAltScreen() {
+		return
+	}
+	vp := s.viewports[idx]
+	vp.SetContent(sess.Screen().RenderWithScrollback())
+	vp.GotoBottom()
+	s.scrollbackMode[idx] = true
+	s.viewports[idx] = vp
+}
+
 func (s *state) scrollFocused(delta int) {
 	idx := s.manager.FocusedIndex()
 	s.ensureViewport(idx, s.width, s.height)
+	if delta < 0 && !s.scrollbackMode[idx] {
+		s.enterScrollback(idx)
+	}
 	vp := s.viewports[idx]
 	if delta < 0 {
 		vp.ScrollUp(-delta)
@@ -492,6 +678,9 @@ func (s *state) scrollFocused(delta int) {
 func (s *state) pageFocused(delta int) {
 	idx := s.manager.FocusedIndex()
 	s.ensureViewport(idx, s.width, s.height)
+	if delta < 0 && !s.scrollbackMode[idx] {
+		s.enterScrollback(idx)
+	}
 	vp := s.viewports[idx]
 	if delta < 0 {
 		vp.PageUp()
@@ -504,6 +693,9 @@ func (s *state) pageFocused(delta int) {
 func (s *state) topFocused() {
 	idx := s.manager.FocusedIndex()
 	s.ensureViewport(idx, s.width, s.height)
+	if !s.scrollbackMode[idx] {
+		s.enterScrollback(idx)
+	}
 	vp := s.viewports[idx]
 	vp.GotoTop()
 	s.viewports[idx] = vp
@@ -514,6 +706,16 @@ func (s *state) bottomFocused() {
 	s.ensureViewport(idx, s.width, s.height)
 	vp := s.viewports[idx]
 	vp.GotoBottom()
+	if s.scrollbackMode[idx] {
+		// Drop the heavy scrollback content now that we're back at the tail.
+		for _, sess := range s.manager.Sessions() {
+			if sess.Index() == idx {
+				vp.SetContent(sess.Screen().Render())
+				break
+			}
+		}
+		s.scrollbackMode[idx] = false
+	}
 	s.viewports[idx] = vp
 }
 
@@ -523,8 +725,9 @@ func (s *state) refreshFocused() {
 	for _, sess := range s.manager.Sessions() {
 		if sess.Index() == idx {
 			vp := s.viewports[idx]
-			vp.SetContent(sess.Screen().RenderWithScrollback())
+			vp.SetContent(sess.Screen().Render())
 			vp.GotoBottom()
+			s.scrollbackMode[idx] = false
 			s.viewports[idx] = vp
 			return
 		}
@@ -543,6 +746,7 @@ const (
 	shortcutKill         = "ctrl+alt+w"
 	shortcutRename       = "ctrl+alt+r"
 	shortcutSessions     = "ctrl+alt+s"
+	shortcutSaveLayout   = "ctrl+alt+p"
 	shortcutPrev         = "ctrl+alt+left"
 	shortcutNext         = "ctrl+alt+right"
 	shortcutScrollUp     = "ctrl+alt+up"
@@ -578,11 +782,18 @@ func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		if sess := s.manager.Focused(); sess != nil {
 			s.renameText = sess.Title()
 		}
+		s.renameCursor = len([]rune(s.renameText))
 		return true, nil
 	case shortcutSessions:
 		s.mode = modeSelecting
 		s.selectFilter = ""
+		s.selectFilterCursor = 0
 		s.selectCursor = s.manager.FocusedIndex()
+		s.selectScroll = 0
+		s.selectMoving = false
+		return true, nil
+	case shortcutSaveLayout:
+		s.saveLayout()
 		return true, nil
 	case shortcutScrollUp:
 		s.scrollFocused(-1)
@@ -721,18 +932,22 @@ func (s *state) handleRenameKey(msg tea.KeyPressMsg) {
 	if key.Mod.Contains(tea.ModCtrl) {
 		switch key.Code {
 		case 'h':
-			r := []rune(s.renameText)
-			if len(r) > 0 {
-				s.renameText = string(r[:len(r)-1])
-			}
+			s.renameText, s.renameCursor = backspaceAt(s.renameText, s.renameCursor)
 			return
 		case 'u':
 			s.renameText = ""
+			s.renameCursor = 0
+			return
+		case 'a':
+			s.renameCursor = 0
+			return
+		case 'e':
+			s.renameCursor = len([]rune(s.renameText))
 			return
 		}
 	}
 	if key.Text != "" {
-		s.renameText += key.Text
+		s.renameText, s.renameCursor = insertAt(s.renameText, s.renameCursor, key.Text)
 		return
 	}
 	switch key.Code {
@@ -740,42 +955,125 @@ func (s *state) handleRenameKey(msg tea.KeyPressMsg) {
 		s.manager.Rename(s.manager.FocusedIndex(), strings.TrimSpace(s.renameText))
 		s.mode = modeNormal
 		s.renameText = ""
+		s.renameCursor = 0
 		s.notifyMeta()
 	case tea.KeyEscape:
 		s.mode = modeNormal
 		s.renameText = ""
+		s.renameCursor = 0
 	case tea.KeyBackspace:
-		r := []rune(s.renameText)
-		if len(r) > 0 {
-			s.renameText = string(r[:len(r)-1])
+		s.renameText, s.renameCursor = backspaceAt(s.renameText, s.renameCursor)
+	case tea.KeyDelete:
+		s.renameText, s.renameCursor = deleteAt(s.renameText, s.renameCursor)
+	case tea.KeyLeft:
+		if s.renameCursor > 0 {
+			s.renameCursor--
 		}
+	case tea.KeyRight:
+		if s.renameCursor < len([]rune(s.renameText)) {
+			s.renameCursor++
+		}
+	case tea.KeyHome:
+		s.renameCursor = 0
+	case tea.KeyEnd:
+		s.renameCursor = len([]rune(s.renameText))
 	}
 }
 
 func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 	matches := s.filteredSessions()
 	key := msg.Key()
+
+	// In moving sub-mode, only navigation and Space/Esc are honored; all
+	// other input (typing, ctrl shortcuts) is ignored so the user can't
+	// edit the filter mid-move and break the index correspondence.
+	if s.selectMoving {
+		switch key.Code {
+		case tea.KeyEscape:
+			// Revert: move the session back to its original index.
+			if len(matches) > 0 {
+				cur := matches[s.selectCursor]
+				s.manager.Move(cur.Index(), s.selectMoveStart)
+			}
+			s.selectMoving = false
+			s.selectCursor = s.selectMoveStart
+			s.notifyMeta()
+			return
+		case tea.KeySpace:
+			s.selectMoving = false
+			s.notifyMeta()
+			return
+		case tea.KeyEnter:
+			// Commit the move and select the session.
+			s.selectMoving = false
+			if len(matches) > 0 {
+				s.manager.Focus(matches[s.selectCursor].Index())
+				s.refreshFocused()
+			}
+			s.mode = modeNormal
+			s.selectFilter = ""
+			s.selectFilterCursor = 0
+			s.selectCursor = 0
+			s.notifyMeta()
+			return
+		case tea.KeyUp:
+			if s.selectCursor > 0 && len(matches) > 0 {
+				cur := matches[s.selectCursor]
+				prev := matches[s.selectCursor-1]
+				s.manager.Move(cur.Index(), prev.Index())
+				s.selectCursor--
+				s.notifyMeta()
+			}
+			return
+		case tea.KeyDown:
+			if s.selectCursor < len(matches)-1 {
+				cur := matches[s.selectCursor]
+				next := matches[s.selectCursor+1]
+				s.manager.Move(cur.Index(), next.Index())
+				s.selectCursor++
+				s.notifyMeta()
+			}
+			return
+		}
+		return
+	}
+
 	if key.Mod.Contains(tea.ModCtrl) {
 		switch key.Code {
 		case 'h':
-			r := []rune(s.selectFilter)
-			if len(r) > 0 {
-				s.selectFilter = string(r[:len(r)-1])
-				s.selectCursor = 0
-			}
+			s.selectFilter, s.selectFilterCursor = backspaceAt(s.selectFilter, s.selectFilterCursor)
+			s.selectCursor = 0
 			return
 		case 'u':
 			s.selectFilter = ""
+			s.selectFilterCursor = 0
 			s.selectCursor = 0
+			return
+		case 'a':
+			s.selectFilterCursor = 0
+			return
+		case 'e':
+			s.selectFilterCursor = len([]rune(s.selectFilter))
 			return
 		}
 	}
 	if key.Text != "" {
-		s.selectFilter += key.Text
+		s.selectFilter, s.selectFilterCursor = insertAt(s.selectFilter, s.selectFilterCursor, key.Text)
 		s.selectCursor = 0
 		return
 	}
 	switch key.Code {
+	case tea.KeySpace:
+		// Begin reordering the currently highlighted session. Only
+		// allowed with an empty filter so visible row indices match
+		// real session indices.
+		if strings.TrimSpace(s.selectFilter) == "" && len(matches) > 0 {
+			s.selectMoving = true
+			s.selectMoveStart = matches[s.selectCursor].Index()
+			return
+		}
+		s.selectFilter, s.selectFilterCursor = insertAt(s.selectFilter, s.selectFilterCursor, " ")
+		s.selectCursor = 0
 	case tea.KeyEnter:
 		if len(matches) > 0 {
 			if s.selectCursor >= len(matches) {
@@ -787,10 +1085,12 @@ func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 		}
 		s.mode = modeNormal
 		s.selectFilter = ""
+		s.selectFilterCursor = 0
 		s.selectCursor = 0
 	case tea.KeyEscape:
 		s.mode = modeNormal
 		s.selectFilter = ""
+		s.selectFilterCursor = 0
 		s.selectCursor = 0
 	case tea.KeyUp:
 		if len(matches) > 0 {
@@ -800,12 +1100,40 @@ func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 		if len(matches) > 0 {
 			s.selectCursor = (s.selectCursor + 1) % len(matches)
 		}
-	case tea.KeyBackspace:
-		r := []rune(s.selectFilter)
-		if len(r) > 0 {
-			s.selectFilter = string(r[:len(r)-1])
-			s.selectCursor = 0
+	case tea.KeyPgUp:
+		if len(matches) > 0 {
+			step := s.selectorPageStep()
+			s.selectCursor -= step
+			if s.selectCursor < 0 {
+				s.selectCursor = 0
+			}
 		}
+	case tea.KeyPgDown:
+		if len(matches) > 0 {
+			step := s.selectorPageStep()
+			s.selectCursor += step
+			if s.selectCursor >= len(matches) {
+				s.selectCursor = len(matches) - 1
+			}
+		}
+	case tea.KeyLeft:
+		if s.selectFilterCursor > 0 {
+			s.selectFilterCursor--
+		}
+	case tea.KeyRight:
+		if s.selectFilterCursor < len([]rune(s.selectFilter)) {
+			s.selectFilterCursor++
+		}
+	case tea.KeyHome:
+		s.selectFilterCursor = 0
+	case tea.KeyEnd:
+		s.selectFilterCursor = len([]rune(s.selectFilter))
+	case tea.KeyBackspace:
+		s.selectFilter, s.selectFilterCursor = backspaceAt(s.selectFilter, s.selectFilterCursor)
+		s.selectCursor = 0
+	case tea.KeyDelete:
+		s.selectFilter, s.selectFilterCursor = deleteAt(s.selectFilter, s.selectFilterCursor)
+		s.selectCursor = 0
 	}
 }
 
@@ -821,38 +1149,175 @@ func (s *state) filteredSessions() []*session.Session {
 	return out
 }
 
+// selectorPageStep returns the number of list rows the session-selector
+// modal can display, used as the PgUp/PgDown step size.
+func (s *state) selectorPageStep() int {
+	const chrome = 4
+	step := s.height*80/100 - chrome
+	if step < 1 {
+		step = 1
+	}
+	return step
+}
+
 func (m Model) renderTabBar() string {
 	s := m.s
 	focused := s.manager.FocusedIndex()
-	var tabs []string
-	for _, sess := range s.manager.Sessions() {
+	sessions := s.manager.Sessions()
+
+	// Build each tab as a styled string with its measured width.
+	tabs := make([]string, len(sessions))
+	widths := make([]int, len(sessions))
+	for i, sess := range sessions {
 		label := fmt.Sprintf("[%d] %s", sess.Index()+1, sess.Title())
-		if sess.Exited() {
-			tabs = append(tabs, tabExitedStyle.Render(label+" ✗"))
-		} else if sess.Index() == focused {
-			tabs = append(tabs, tabActiveStyle.Render(label))
-		} else {
-			tabs = append(tabs, tabInactiveStyle.Render(label))
+		var tab string
+		switch {
+		case sess.Exited():
+			tab = tabExitedStyle.Render(label + " ✗")
+		case sess.Index() == focused:
+			tab = tabActiveStyle.Render(label)
+		default:
+			tab = tabInactiveStyle.Render(label)
+		}
+		tabs[i] = tab
+		widths[i] = lipgloss.Width(tab)
+	}
+
+	newTab := tabInactiveStyle.Render("[+] Ctrl+Alt+T")
+	newTabW := lipgloss.Width(newTab)
+
+	// If the screen is wide enough to show all tabs + the new-tab button,
+	// no scrolling needed.
+	total := newTabW
+	for _, w := range widths {
+		total += w
+	}
+	if total <= s.width || s.width <= 0 {
+		bar := lipgloss.JoinHorizontal(lipgloss.Top, append(tabs, newTab)...)
+		if pad := s.width - lipgloss.Width(bar); pad > 0 {
+			bar += tabBarStyle.Render(strings.Repeat(" ", pad))
+		}
+		return bar
+	}
+
+	// Otherwise, pick a window [start..end) of tabs around `focused` that
+	// fits in `available` cells. Overflow markers ‹/› occupy 2 cells each
+	// (with the modal-gap style so the background matches the tab bar).
+	left := tabBarStyle.Render(" ‹ ")
+	right := tabBarStyle.Render(" › ")
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+
+	// Find a focused-anchored window. We always show the new-tab button
+	// at the right; overflow markers appear only when there are tabs
+	// outside the visible window on that side.
+	focusedPos := -1
+	for i, sess := range sessions {
+		if sess.Index() == focused {
+			focusedPos = i
+			break
 		}
 	}
-	tabs = append(tabs, tabInactiveStyle.Render("[+] Ctrl+Alt+T"))
-	bar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	if focusedPos < 0 {
+		focusedPos = 0
+	}
+
+	// Greedily expand outward from the focused tab.
+	start, end := focusedPos, focusedPos+1
+	// Budget = full width minus the new-tab button. We don't reserve
+	// space for overflow markers up-front; they're added only if needed
+	// at the end and we then shrink the window if necessary.
+	used := widths[focusedPos]
+	for {
+		grew := false
+		if end < len(tabs) && used+widths[end] <= s.width-newTabW {
+			used += widths[end]
+			end++
+			grew = true
+		}
+		if start > 0 && used+widths[start-1] <= s.width-newTabW {
+			start--
+			used += widths[start]
+			grew = true
+		}
+		if !grew {
+			break
+		}
+	}
+
+	// Reserve room for overflow markers and shrink if needed.
+	needLeft := start > 0
+	needRight := end < len(tabs)
+	reserved := 0
+	if needLeft {
+		reserved += leftW
+	}
+	if needRight {
+		reserved += rightW
+	}
+	for used+reserved > s.width-newTabW && end-start > 1 {
+		// Drop the side farther from the focused tab.
+		if focusedPos-start > end-1-focusedPos && start < focusedPos {
+			used -= widths[start]
+			start++
+			needLeft = true
+		} else if end-1 > focusedPos {
+			end--
+			used -= widths[end]
+			needRight = true
+		} else if start < focusedPos {
+			used -= widths[start]
+			start++
+			needLeft = true
+		} else {
+			break
+		}
+		reserved = 0
+		if start > 0 {
+			needLeft = true
+		}
+		if end < len(tabs) {
+			needRight = true
+		}
+		if needLeft {
+			reserved += leftW
+		}
+		if needRight {
+			reserved += rightW
+		}
+	}
+
+	parts := make([]string, 0, end-start+3)
+	if needLeft {
+		parts = append(parts, left)
+	}
+	parts = append(parts, tabs[start:end]...)
+	if needRight {
+		parts = append(parts, right)
+	}
+	parts = append(parts, newTab)
+	bar := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 	if pad := s.width - lipgloss.Width(bar); pad > 0 {
 		bar += tabBarStyle.Render(strings.Repeat(" ", pad))
+	}
+	// If even that overflows (a single tab wider than the screen), hard
+	// truncate so we never wrap the bar onto a second row.
+	if lipgloss.Width(bar) > s.width {
+		bar = ansi.Truncate(bar, s.width, "")
 	}
 	return bar
 }
 
 func (m Model) renderPane() string {
 	s := m.s
-	if s.mode == modeSelecting {
-		return m.renderSessionSelector()
-	}
 	idx := s.manager.FocusedIndex()
 	paneCols, paneRows := paneSize(s.width, s.height)
 	var pane string
 	if vp, ok := s.viewports[idx]; ok {
 		pane = s.renderPaneContent(vp, paneCols, paneRows)
+		if s.scrollbackMode[idx] && !vp.AtBottom() {
+			pane = overlayScrollIndicator(pane, vp, paneCols, paneRows)
+		}
 	} else {
 		pane = blankPane(paneCols, paneRows)
 	}
@@ -865,6 +1330,8 @@ func (m Model) renderPane() string {
 		return m.overlayBox(pane, m.renderExitModal())
 	case modeNewSession:
 		return m.overlayBox(pane, m.renderNewSessionModal())
+	case modeSelecting:
+		return m.overlayBox(pane, m.renderSessionSelectorModal())
 	}
 	return pane
 }
@@ -961,7 +1428,7 @@ func (m Model) renderRenameModal() string {
 		"Rename session",
 		"",
 		"Current: " + truncate(current, width-9),
-		"New:     " + truncate(s.renameText, width-9) + "█",
+		"New:     " + truncate(renderWithCursor(s.renameText, s.renameCursor), width-9),
 		"",
 		"Enter save   Esc cancel",
 	}
@@ -986,7 +1453,7 @@ func (m Model) renderExitModal() string {
 		respawn = exitChoiceInactiveStyle.Render(respawn)
 		remove = exitChoiceActiveStyle.Render(remove)
 	}
-	choices := respawn + "   " + remove
+	choices := respawn + modalGapStyle.Render("   ") + remove
 	rows := []string{
 		"Session exited",
 		"",
@@ -1009,7 +1476,7 @@ func padBox(rows []string, width int) string {
 	}
 	for i, row := range rows {
 		if pad := width - lipgloss.Width(row); pad > 0 {
-			rows[i] = row + strings.Repeat(" ", pad)
+			rows[i] = row + modalGapStyle.Render(strings.Repeat(" ", pad))
 		}
 	}
 	return helpModalStyle.Render(strings.Join(rows, "\n"))
@@ -1038,6 +1505,7 @@ func (m Model) renderHelpModal() string {
 		"Ctrl+Alt+W           kill session",
 		"Ctrl+Alt+R           rename session",
 		"Ctrl+Alt+S           session selector",
+		"Ctrl+Alt+P           save layout to --config file",
 		"Ctrl+Alt+Left/Right  previous/next session",
 		"Ctrl+Alt+1..9        jump to session",
 		"Ctrl+Alt+PgUp/PgDown page scrollback",
@@ -1051,89 +1519,160 @@ func (m Model) renderHelpModal() string {
 	return padBox(rows, 0)
 }
 
+// overlayScrollIndicator paints a "current/total" badge into the top-right
+// of pane while the user is scrolled into the scrollback buffer. The
+// "current" line number reflects the bottom-most visible line.
+func overlayScrollIndicator(pane string, vp *viewport.Model, paneCols, paneRows int) string {
+	if paneRows <= 0 || paneCols <= 0 {
+		return pane
+	}
+	total := vp.TotalLineCount()
+	if total <= 0 {
+		return pane
+	}
+	cur := vp.YOffset() + vp.Height()
+	if cur > total {
+		cur = total
+	}
+	if cur < 1 {
+		cur = 1
+	}
+	badge := scrollIndicatorStyle.Render(fmt.Sprintf("%d/%d", cur, total))
+	bw := ansi.StringWidth(badge)
+	if bw > paneCols {
+		return pane
+	}
+	lines := strings.Split(pane, "\n")
+	if len(lines) == 0 {
+		return pane
+	}
+	left := paneCols - bw
+	lines[0] = overlayLine(lines[0], badge, left, paneCols)
+	return strings.Join(lines, "\n")
+}
+
+// overlayLine composites overlay over base at horizontal cell offset left,
+// preserving the ANSI styling of both the base and the overlay. We extract
+// the base's cells outside the overlay window via ansi.Cut/Truncate, and
+// emit an SGR reset between segments so the overlay's colors don't bleed
+// into the right-hand tail of base.
 func overlayLine(base, overlay string, left, width int) string {
-	plain := stripANSI(base)
-	if lipgloss.Width(plain) < width {
-		plain += strings.Repeat(" ", width-lipgloss.Width(plain))
+	baseWidth := ansi.StringWidth(base)
+	if baseWidth < width {
+		base += strings.Repeat(" ", width-baseWidth)
+		baseWidth = width
 	}
-	prefix := takeRunes(plain, left)
-	suffixStart := left + lipgloss.Width(stripANSI(overlay))
+	overlayWidth := ansi.StringWidth(overlay)
+	prefix := ansi.Truncate(base, left, "")
 	suffix := ""
-	if suffixStart < lipgloss.Width(plain) {
-		suffix = dropRunes(plain, suffixStart)
+	suffixStart := left + overlayWidth
+	if suffixStart < baseWidth {
+		suffix = ansi.Cut(base, suffixStart, baseWidth)
 	}
-	return prefix + overlay + suffix
+	const reset = "\x1b[0m"
+	return prefix + reset + overlay + reset + suffix
 }
 
-func stripANSI(s string) string {
-	var b strings.Builder
-	inEsc := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if inEsc {
-			if c >= '@' && c <= '~' {
-				inEsc = false
-			}
-			continue
-		}
-		if c == 0x1b {
-			inEsc = true
-			continue
-		}
-		b.WriteByte(c)
-	}
-	return b.String()
-}
-
-func takeRunes(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if n > len(runes) {
-		n = len(runes)
-	}
-	return string(runes[:n])
-}
-
-func dropRunes(s string, n int) string {
-	runes := []rune(s)
-	if n >= len(runes) {
-		return ""
-	}
-	return string(runes[n:])
-}
-
-func (m Model) renderSessionSelector() string {
+// renderSessionSelectorModal builds the centered sessions modal. The list
+// scrolls when there are more matches than fit in 80% of the screen height.
+func (m Model) renderSessionSelectorModal() string {
 	s := m.s
-	cols, rows := paneSize(s.width, s.height)
 	matches := s.filteredSessions()
 	if s.selectCursor >= len(matches) {
 		s.selectCursor = max(0, len(matches)-1)
 	}
-	lines := []string{"Sessions"}
-	for i, sess := range matches {
-		prefix := "  "
-		if i == s.selectCursor {
-			prefix = "> "
-		}
-		state := "running"
-		if sess.Exited() {
-			state = "exited"
-		}
-		lines = append(lines, fmt.Sprintf("%s[%d] %s  %s", prefix, sess.Index()+1, sess.Title(), state))
+	if s.selectCursor < 0 {
+		s.selectCursor = 0
+	}
+
+	// Modal sizing: width = min(76, 80% of screen); list height = up to 80%
+	// of screen rows minus title + filter + footer overhead.
+	width := s.width * 80 / 100
+	if width > 76 {
+		width = 76
+	}
+	if width < 30 {
+		width = 30
+	}
+
+	// Reserve 4 lines: title, filter, blank, footer.
+	const chrome = 4
+	maxListRows := s.height*80/100 - chrome
+	if maxListRows < 3 {
+		maxListRows = 3
+	}
+	listRows := len(matches)
+	if listRows == 0 {
+		listRows = 1
+	}
+	if listRows > maxListRows {
+		listRows = maxListRows
+	}
+
+	// Keep cursor visible: adjust scroll window.
+	if s.selectCursor < s.selectScroll {
+		s.selectScroll = s.selectCursor
+	}
+	if s.selectCursor >= s.selectScroll+listRows {
+		s.selectScroll = s.selectCursor - listRows + 1
+	}
+	if max := len(matches) - listRows; s.selectScroll > max && max >= 0 {
+		s.selectScroll = max
+	}
+	if s.selectScroll < 0 {
+		s.selectScroll = 0
+	}
+
+	rows := []string{
+		"Sessions",
+		"Filter: " + renderWithCursor(s.selectFilter, s.selectFilterCursor),
+		"",
 	}
 	if len(matches) == 0 {
-		lines = append(lines, "  no sessions match")
+		rows = append(rows, "  (no sessions match)")
+		for i := 1; i < listRows; i++ {
+			rows = append(rows, "")
+		}
+	} else {
+		end := s.selectScroll + listRows
+		if end > len(matches) {
+			end = len(matches)
+		}
+		for i := s.selectScroll; i < end; i++ {
+			sess := matches[i]
+			state := "running"
+			if sess.Exited() {
+				state = "exited"
+			}
+			marker := "  "
+			label := fmt.Sprintf("[%d] %s  %s", sess.Index()+1, sess.Title(), state)
+			label = truncate(label, width-4)
+			line := marker + label
+			if i == s.selectCursor {
+				if s.selectMoving {
+					line = selectorMovingStyle.Render("↕ " + label)
+				} else {
+					line = selectorActiveStyle.Render("▶ " + label)
+				}
+			}
+			rows = append(rows, line)
+		}
+		// Pad to listRows so footer position stays fixed.
+		for i := end - s.selectScroll; i < listRows; i++ {
+			rows = append(rows, "")
+		}
 	}
-	for len(lines) < rows {
-		lines = append(lines, "")
+
+	footer := "↑/↓ move   Space reorder   Enter select   Esc cancel"
+	if s.selectMoving {
+		footer = "↑/↓ reorder   Space drop   Enter commit & select   Esc revert"
 	}
-	out := strings.Join(lines[:min(len(lines), rows)], "\n")
-	if lipgloss.Width(out) > cols {
-		return out
+	if len(matches) > listRows {
+		footer = fmt.Sprintf("%d/%d   %s", s.selectCursor+1, len(matches), footer)
 	}
-	return out
+	rows = append(rows, "", footer)
+
+	return padBox(rows, width)
 }
 
 func (m Model) renderStatusBar() string {
@@ -1156,7 +1695,7 @@ func (m Model) renderStatusBar() string {
 		}
 	}
 	if s.mode == modeRenaming {
-		help := helpStyle.Render(" Rename: " + s.renameText + "█  Enter save  Esc cancel")
+		help := helpStyle.Render(" Rename: " + renderWithCursor(s.renameText, s.renameCursor) + "  Enter save  Esc cancel")
 		left := statusKeyStyle.Render(status)
 		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
@@ -1164,7 +1703,7 @@ func (m Model) renderStatusBar() string {
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
 	}
 	if s.mode == modeSelecting {
-		help := helpStyle.Render(" Filter: " + s.selectFilter + "█  ↑/↓ move  Enter select  Esc cancel")
+		help := helpStyle.Render(" Sessions — see modal")
 		left := statusKeyStyle.Render(status)
 		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
@@ -1187,7 +1726,10 @@ func (m Model) renderStatusBar() string {
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
 	}
-	help := helpStyle.Render(" Alt+` help  C-A-T new  C-A-W kill  C-A-R rename  C-A-S sessions  C-A-←/→ switch  C-A-Q quit")
+	help := helpStyle.Render(" Alt+` help  C-A-T new  C-A-W kill  C-A-R rename  C-A-S sessions  C-A-P save  C-A-←/→ switch  C-A-Q quit")
+	if s.statusMsg != "" {
+		help = helpStyle.Render(" " + s.statusMsg + " ")
+	}
 	left := statusKeyStyle.Render(status)
 	if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 		left += statusBarStyle.Render(strings.Repeat(" ", pad))

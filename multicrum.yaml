@@ -1,0 +1,31 @@
+sessions:
+    - title: first
+      cmd:
+        - bash
+    - title: second
+      cmd:
+        - bash
+    - title: test1
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bashsadsafjhsflhdsaflkjadhfjkd
+      cmdline: bash
+    - title: bash
+      cmdline: bash
+    - title: bash
+      cmdline: bash

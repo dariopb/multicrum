@@ -232,3 +232,36 @@ func (m *SessionManager) ByID(id int) *Session {
 	}
 	return nil
 }
+
+// Move relocates the session currently at index `from` to position `to` in
+// the ordered session list. All sessions in the affected range are
+// reindexed, and the focused index is updated so it still points at the
+// same session it pointed to before the move.
+func (m *SessionManager) Move(from, to int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := len(m.sessions)
+	if n <= 1 || from < 0 || from >= n {
+		return
+	}
+	if to < 0 {
+		to = 0
+	}
+	if to >= n {
+		to = n - 1
+	}
+	if from == to {
+		return
+	}
+	focusedSess := m.sessions[m.focused]
+	s := m.sessions[from]
+	m.sessions = append(m.sessions[:from], m.sessions[from+1:]...)
+	m.sessions = append(m.sessions[:to], append([]*Session{s}, m.sessions[to:]...)...)
+	for i, sess := range m.sessions {
+		sess.index = i
+		if sess == focusedSess {
+			m.focused = i
+		}
+	}
+	m.updateTerminalRepliesLocked()
+}

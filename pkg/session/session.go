@@ -21,10 +21,11 @@ type ExitMsg struct {
 
 // Session owns a PTY/ConPTY and the process running inside it.
 type Session struct {
-	mu     sync.Mutex
-	index  int
-	cmd    []string
-	title  string
+	mu      sync.Mutex
+	index   int
+	cmd     []string
+	cmdLine string
+	title   string
 	screen *VTScreen
 	exited bool
 
@@ -148,6 +149,25 @@ func (s *Session) Cmd() []string {
 	out := make([]string, len(s.cmd))
 	copy(out, s.cmd)
 	return out
+}
+
+// CmdLine returns the original user-supplied command line for the session,
+// if one was provided via SetCmdLine. Empty when the session was started
+// directly with an argv slice (no shell-parsing layer above it).
+func (s *Session) CmdLine() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cmdLine
+}
+
+// SetCmdLine records the original user-supplied command line so callers
+// that build argv via a shell-aware parser can round-trip the original
+// string back to disk (e.g. config save) without exposing the
+// "bash -c <line>" expansion.
+func (s *Session) SetCmdLine(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cmdLine = line
 }
 
 // Respawn relaunches the original command inside this session, reusing the

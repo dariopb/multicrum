@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"multicrum/pkg/session"
 	"multicrum/pkg/ssh_client"
 )
 
@@ -18,6 +19,13 @@ type newSessionState struct {
 	key    string
 	cmd    string
 	err    string
+
+	// per-field rune cursor positions
+	localCur  int
+	targetCur int
+	passwdCur int
+	keyCur    int
+	cmdCur    int
 }
 
 const (
@@ -54,6 +62,11 @@ func (s *state) openNewSessionModal(defaultCmd []string) {
 		target: target,
 		key:    key,
 		cmd:    remoteCmd,
+
+		localCur:  len([]rune(local)),
+		targetCur: len([]rune(target)),
+		keyCur:    len([]rune(key)),
+		cmdCur:    len([]rune(remoteCmd)),
 	}
 	s.mode = modeNewSession
 }
@@ -92,14 +105,19 @@ func (s *state) handleNewSessionKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case tea.KeyLeft:
-		if ns.choice > 0 {
-			ns.choice--
-		}
+		s.moveNewSessionCursor(-1)
 		return nil
 	case tea.KeyRight:
-		if ns.choice < 2 {
-			ns.choice++
-		}
+		s.moveNewSessionCursor(+1)
+		return nil
+	case tea.KeyHome:
+		s.setNewSessionCursor(0)
+		return nil
+	case tea.KeyEnd:
+		s.setNewSessionCursor(-1)
+		return nil
+	case tea.KeyDelete:
+		s.deleteNewSessionField()
 		return nil
 	case tea.KeyTab:
 		s.advanceNewSessionField(msg.Key().Mod.Contains(tea.ModShift))
@@ -145,59 +163,131 @@ func (s *state) advanceNewSessionField(reverse bool) {
 }
 
 func (s *state) appendNewSessionField(text string) {
-	switch s.newSession.field {
+	ns := &s.newSession
+	switch ns.field {
 	case newFieldLocal:
-		s.newSession.local += text
-		s.newSession.choice = 1
+		ns.local, ns.localCur = insertAt(ns.local, ns.localCur, text)
+		ns.choice = 1
 	case newFieldTarget:
-		s.newSession.target += text
-		s.newSession.choice = 2
+		ns.target, ns.targetCur = insertAt(ns.target, ns.targetCur, text)
+		ns.choice = 2
 	case newFieldPasswd:
-		s.newSession.passwd += text
-		s.newSession.choice = 2
+		ns.passwd, ns.passwdCur = insertAt(ns.passwd, ns.passwdCur, text)
+		ns.choice = 2
 	case newFieldKey:
-		s.newSession.key += text
-		s.newSession.choice = 2
+		ns.key, ns.keyCur = insertAt(ns.key, ns.keyCur, text)
+		ns.choice = 2
 	case newFieldRemoteCmd:
-		s.newSession.cmd += text
-		s.newSession.choice = 2
+		ns.cmd, ns.cmdCur = insertAt(ns.cmd, ns.cmdCur, text)
+		ns.choice = 2
 	}
 }
 
 func (s *state) backspaceNewSessionField() {
-	trim := func(v string) string {
-		r := []rune(v)
-		if len(r) == 0 {
-			return v
-		}
-		return string(r[:len(r)-1])
-	}
-	switch s.newSession.field {
+	ns := &s.newSession
+	switch ns.field {
 	case newFieldLocal:
-		s.newSession.local = trim(s.newSession.local)
+		ns.local, ns.localCur = backspaceAt(ns.local, ns.localCur)
 	case newFieldTarget:
-		s.newSession.target = trim(s.newSession.target)
+		ns.target, ns.targetCur = backspaceAt(ns.target, ns.targetCur)
 	case newFieldPasswd:
-		s.newSession.passwd = trim(s.newSession.passwd)
+		ns.passwd, ns.passwdCur = backspaceAt(ns.passwd, ns.passwdCur)
 	case newFieldKey:
-		s.newSession.key = trim(s.newSession.key)
+		ns.key, ns.keyCur = backspaceAt(ns.key, ns.keyCur)
 	case newFieldRemoteCmd:
-		s.newSession.cmd = trim(s.newSession.cmd)
+		ns.cmd, ns.cmdCur = backspaceAt(ns.cmd, ns.cmdCur)
+	}
+}
+
+func (s *state) deleteNewSessionField() {
+	ns := &s.newSession
+	switch ns.field {
+	case newFieldLocal:
+		ns.local, ns.localCur = deleteAt(ns.local, ns.localCur)
+	case newFieldTarget:
+		ns.target, ns.targetCur = deleteAt(ns.target, ns.targetCur)
+	case newFieldPasswd:
+		ns.passwd, ns.passwdCur = deleteAt(ns.passwd, ns.passwdCur)
+	case newFieldKey:
+		ns.key, ns.keyCur = deleteAt(ns.key, ns.keyCur)
+	case newFieldRemoteCmd:
+		ns.cmd, ns.cmdCur = deleteAt(ns.cmd, ns.cmdCur)
 	}
 }
 
 func (s *state) clearNewSessionField() {
-	switch s.newSession.field {
+	ns := &s.newSession
+	switch ns.field {
 	case newFieldLocal:
-		s.newSession.local = ""
+		ns.local = ""
+		ns.localCur = 0
 	case newFieldTarget:
-		s.newSession.target = ""
+		ns.target = ""
+		ns.targetCur = 0
 	case newFieldPasswd:
-		s.newSession.passwd = ""
+		ns.passwd = ""
+		ns.passwdCur = 0
 	case newFieldKey:
-		s.newSession.key = ""
+		ns.key = ""
+		ns.keyCur = 0
 	case newFieldRemoteCmd:
-		s.newSession.cmd = ""
+		ns.cmd = ""
+		ns.cmdCur = 0
+	}
+}
+
+// moveNewSessionCursor moves the active field's cursor by delta (clamped).
+func (s *state) moveNewSessionCursor(delta int) {
+	ns := &s.newSession
+	switch ns.field {
+	case newFieldLocal:
+		ns.localCur = clampCursor(ns.local, ns.localCur+delta)
+	case newFieldTarget:
+		ns.targetCur = clampCursor(ns.target, ns.targetCur+delta)
+	case newFieldPasswd:
+		ns.passwdCur = clampCursor(ns.passwd, ns.passwdCur+delta)
+	case newFieldKey:
+		ns.keyCur = clampCursor(ns.key, ns.keyCur+delta)
+	case newFieldRemoteCmd:
+		ns.cmdCur = clampCursor(ns.cmd, ns.cmdCur+delta)
+	}
+}
+
+// setNewSessionCursor sets cursor to pos (or end-of-field if pos < 0).
+func (s *state) setNewSessionCursor(pos int) {
+	ns := &s.newSession
+	end := func(v string) int { return len([]rune(v)) }
+	switch ns.field {
+	case newFieldLocal:
+		if pos < 0 {
+			ns.localCur = end(ns.local)
+		} else {
+			ns.localCur = clampCursor(ns.local, pos)
+		}
+	case newFieldTarget:
+		if pos < 0 {
+			ns.targetCur = end(ns.target)
+		} else {
+			ns.targetCur = clampCursor(ns.target, pos)
+		}
+	case newFieldPasswd:
+		if pos < 0 {
+			ns.passwdCur = end(ns.passwd)
+		} else {
+			ns.passwdCur = clampCursor(ns.passwd, pos)
+		}
+	case newFieldKey:
+		if pos < 0 {
+			ns.keyCur = end(ns.key)
+		} else {
+			ns.keyCur = clampCursor(ns.key, pos)
+		}
+	case newFieldRemoteCmd:
+		if pos < 0 {
+			ns.cmdCur = end(ns.cmd)
+		} else {
+			ns.cmdCur = clampCursor(ns.cmd, pos)
+		}
 	}
 }
 
@@ -206,17 +296,27 @@ func (s *state) resolveNewSession(m Model) tea.Cmd {
 	s.mode = modeNormal
 	s.newSession = newSessionState{}
 	var err error
+	var sess *session.Session
 	switch ns.choice {
 	case 0:
-		_, err = s.manager.New(m.agentCmd)
+		sess, err = s.manager.New(m.agentCmd)
+		if err == nil && m.agentCmdLine != "" {
+			sess.SetCmdLine(m.agentCmdLine)
+		}
 	case 1:
-		cmd := strings.Fields(strings.TrimSpace(ns.local))
+		line := strings.TrimSpace(ns.local)
+		cmd := parseCmdLine(line)
 		if len(cmd) == 0 {
 			cmd = m.agentCmd
+			line = m.agentCmdLine
 		}
-		_, err = s.manager.NewWithSSH(cmd, nil)
+		sess, err = s.manager.NewWithSSH(cmd, nil)
+		if err == nil && line != "" {
+			sess.SetCmdLine(line)
+		}
 	case 2:
-		cmd := strings.Fields(strings.TrimSpace(ns.cmd))
+		line := strings.TrimSpace(ns.cmd)
+		cmd := parseCmdLine(line)
 		client, cfgErr := ssh_client.New(ssh_client.Options{
 			Target:                strings.TrimSpace(ns.target),
 			IdentityFile:          strings.TrimSpace(ns.key),
@@ -229,7 +329,10 @@ func (s *state) resolveNewSession(m Model) tea.Cmd {
 		if cfgErr != nil {
 			err = cfgErr
 		} else {
-			_, err = s.manager.NewWithSSH(cmd, client)
+			sess, err = s.manager.NewWithSSH(cmd, client)
+			if err == nil && line != "" {
+				sess.SetCmdLine(line)
+			}
 		}
 	}
 	if err != nil {
@@ -254,27 +357,27 @@ func (m Model) renderNewSessionModal() string {
 		}
 		return exitChoiceInactiveStyle.Render(label)
 	}
-	field := func(f newSessionField, label, value string, secret bool) string {
+	field := func(f newSessionField, label, value string, cursor int, secret bool) string {
 		if secret && value != "" {
 			value = strings.Repeat("*", len([]rune(value)))
 		}
-		cursor := ""
+		display := value
 		if ns.field == f {
-			cursor = "█"
+			display = renderWithCursor(value, cursor)
 		}
-		return label + truncate(value, width-lipglossWidth(label)-1) + cursor
+		return label + truncate(display, width-lipglossWidth(label))
 	}
 	rows := []string{
 		"New session",
 		"",
-		choice(0, "[ Same as current/default ]") + "   " + choice(1, "[ Local command ]") + "   " + choice(2, "[ Remote SSH ]"),
+		choice(0, "[ Same as current/default ]") + modalGapStyle.Render("   ") + choice(1, "[ Local command ]") + modalGapStyle.Render("   ") + choice(2, "[ Remote SSH ]"),
 		"",
-		field(newFieldLocal, "Local cmd:  ", ns.local, false),
+		field(newFieldLocal, "Local cmd:  ", ns.local, ns.localCur, false),
 		"",
-		field(newFieldTarget, "SSH target: ", ns.target, false),
-		field(newFieldPasswd, "Password:   ", ns.passwd, true),
-		field(newFieldKey, "Key file:   ", ns.key, false),
-		field(newFieldRemoteCmd, "Remote cmd: ", ns.cmd, false),
+		field(newFieldTarget, "SSH target: ", ns.target, ns.targetCur, false),
+		field(newFieldPasswd, "Password:   ", ns.passwd, ns.passwdCur, true),
+		field(newFieldKey, "Key file:   ", ns.key, ns.keyCur, false),
+		field(newFieldRemoteCmd, "Remote cmd: ", ns.cmd, ns.cmdCur, false),
 	}
 	if ns.err != "" {
 		rows = append(rows, "", "Error:")

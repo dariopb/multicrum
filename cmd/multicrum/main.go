@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/urfave/cli/v3"
+	"multicrum/pkg/config"
 	"multicrum/pkg/ssh_client"
 	"multicrum/pkg/ui"
 )
@@ -61,6 +61,11 @@ func main() {
 				Name:  "token",
 				Usage: "optional auth token for the WebSocket endpoint",
 			},
+			&cli.StringFlag{
+				Name:  "config",
+				Value: "multicrum.yaml",
+				Usage: "path to layout YAML file; loaded on startup if it exists, saved with Ctrl+Alt+P",
+			},
 		},
 		Action: run,
 	}
@@ -72,9 +77,11 @@ func main() {
 }
 
 func run(_ context.Context, c *cli.Command) error {
-	agentCmd := strings.Fields(c.String("cmd"))
+	agentCmdLine := c.String("cmd")
+	agentCmd := ui.ParseCmdLine(agentCmdLine)
 	if len(agentCmd) == 0 {
 		agentCmd = []string{"bash"}
+		agentCmdLine = ""
 	}
 
 	cols, rows := 220, 48
@@ -101,6 +108,24 @@ func run(_ context.Context, c *cli.Command) error {
 	}
 
 	model := ui.NewModelWithSSH(agentCmd, cols, rows, sshClient)
+	model.SetAgentCmdLine(agentCmdLine)
+
+	configPath := c.String("config")
+	model.SetConfigPath(configPath)
+	if configPath != "" {
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		} else if cfg != nil && len(cfg.Sessions) > 0 {
+			for _, entry := range cfg.Sessions {
+				if entry.CmdLine != "" {
+					model.AddInitialSessionLine(entry.Title, entry.CmdLine)
+				} else {
+					model.AddInitialSession(entry.Title, entry.Cmd)
+				}
+			}
+		}
+	}
 
 	p := tea.NewProgram(
 		model,
