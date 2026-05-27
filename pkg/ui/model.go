@@ -339,6 +339,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "rename":
 			s.manager.Rename(msg.ID, strings.TrimSpace(msg.Title))
 			s.notifyMeta()
+		case "move":
+			s.manager.Move(msg.ID, msg.To)
+			s.refreshFocused()
+			s.notifyMeta()
+		case "save":
+			s.saveLayout()
+			s.notifyMeta()
 		case "exit":
 			s.handleWSExit(transport.ControlMsg(msg))
 		}

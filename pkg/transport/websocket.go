@@ -32,8 +32,9 @@ type MetaMsg struct {
 
 // ControlMsg is received from the browser for session management.
 type ControlMsg struct {
-	Action   string `json:"action"` // "focus" | "new" | "kill" | "rename" | "exit"
+	Action   string `json:"action"` // "focus" | "new" | "kill" | "rename" | "exit" | "move" | "save"
 	ID       int    `json:"id"`
+	To       int    `json:"to,omitempty"`       // move: target index
 	Title    string `json:"title,omitempty"`
 	Mode     string `json:"mode,omitempty"`     // new: "same" | "local" | "remote"
 	Cmd      string `json:"cmd,omitempty"`      // new local command or remote command
@@ -441,8 +442,9 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
   <span id="connection-state">connecting</span>
   <button id="btn-new" class="btn btn-green" title="New session (Ctrl+Alt+T)">+ New</button>
   <button id="btn-kill" class="btn btn-red" title="Kill session (Ctrl+Alt+W)">✕ Kill</button>
+  <button id="btn-save" class="btn" title="Save layout (Ctrl+Alt+P)">💾 Save</button>
   <button id="btn-settings" class="btn" title="Settings">⚙ Settings</button>
-  <span id="hint">Ctrl+←/→ switch &nbsp; Ctrl+Alt+S sessions &nbsp; Ctrl+Alt+R rename &nbsp; Ctrl+Alt+T new &nbsp; Ctrl+Alt+W kill</span>
+  <span id="hint">Ctrl+←/→ switch &nbsp; Ctrl+Alt+S sessions &nbsp; Ctrl+Alt+R rename &nbsp; Ctrl+Alt+T new &nbsp; Ctrl+Alt+W kill &nbsp; Ctrl+Alt+P save</span>
 </div>
 <div id="terminal"></div>
 <div id="statusbar"><span id="status-main">session 1 │ connecting │ 0x0</span><span id="status-help">Alt+Backtick help  C-A-T new  C-A-W kill  C-A-R rename  C-A-S sessions  C-A-←/→ switch</span></div>
@@ -526,6 +528,8 @@ let focusedID = 0;
 let modalOpen = false;
 let modalMode = 'sessions';
 let modalCursor = 0;
+let moveMode = false;
+let moveStart = -1;
 let newChoice = 0;
 let exitChoice = 0;
 const newModes = ['same','local','remote'];
@@ -708,7 +712,7 @@ function updateStatusBar(){
   document.getElementById('status-main').textContent = ' session '+(focusedID+1)+' │ '+state+' │ '+term.cols+'x'+term.rows+' │ mouse:app ';
   let help = 'Alt+Backtick help  C-A-T new  C-A-W kill  C-A-R rename  C-A-S sessions  C-A-←/→ switch  C-A-Q quit';
   if(modalOpen && modalMode === 'settings') help = 'Settings: changes save automatically   Esc close';
-  else if(modalOpen && modalMode === 'sessions') help = 'Filter sessions   ↑/↓ move   Enter select   Esc close';
+  else if(modalOpen && modalMode === 'sessions') help = moveMode ? '↑/↓ reorder   Space drop   Enter commit & select   Esc revert' : 'Filter sessions   ↑/↓ move   Space reorder   Enter select   Esc close';
   else if(modalOpen && modalMode === 'rename') help = 'Rename: Enter save   Esc cancel';
   else if(modalOpen && modalMode === 'new') help = 'New session: Enter start   Esc cancel';
   else if(modalOpen && modalMode === 'exit') help = 'Session exited — choose action in modal';
@@ -793,6 +797,8 @@ function openModal(){
   document.getElementById('session-list').style.display = '';
   document.getElementById('session-filter').value = '';
   filteredSessions = sessions;
+  moveMode = false;
+  moveStart = -1;
   modalCursor = Math.max(0, sessions.findIndex(s=>s.id===focusedID));
   renderModal();
   document.getElementById('modal-overlay').classList.add('open');
@@ -876,7 +882,8 @@ function renderModal(){
   filteredSessions.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = 'sess-item' + (s.id===focusedID?' active':'') + (s.exited?' exited':'');
-    if(i === modalCursor) row.style.outline = '1px solid #6af';
+    if(i === modalCursor) row.style.outline = moveMode ? '2px solid #ffaa33' : '1px solid #6af';
+    if(i === modalCursor && moveMode) row.style.background = 'color-mix(in srgb, #ffaa33 35%, transparent)';
     row.innerHTML =
       '<span class="sess-num">'+(s.id+1)+'</span>'+
       '<span class="sess-title">'+escHtml(s.title||('Session '+(s.id+1)))+'</span>'+
@@ -887,6 +894,10 @@ function renderModal(){
   // Scroll cursor into view
   const rows = el.querySelectorAll('.sess-item');
   if(rows[modalCursor]) rows[modalCursor].scrollIntoView({block:'nearest'});
+  const footer = document.getElementById('modal-footer');
+  footer.textContent = moveMode
+    ? '↑/↓ reorder   Space drop   Enter commit & select   Esc revert'
+    : 'Filter   ↑↓ navigate   Space reorder   Enter select   Esc close';
 }
 
 function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -894,6 +905,48 @@ function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace
 // Keyboard nav inside modal
 document.getElementById('modal-overlay').addEventListener('keydown', e => {
   if(!modalOpen) return;
+  if(modalMode === 'sessions' && moveMode){
+    if(e.key==='Escape'){
+      e.preventDefault();
+      const cur = filteredSessions[modalCursor];
+      if(cur && cur.id !== moveStart) control({action:'move', id:cur.id, to:moveStart});
+      moveMode = false; moveStart = -1; modalCursor = Math.max(0, sessions.findIndex(s=>s.id===focusedID));
+      renderModal(); updateStatusBar();
+      return;
+    }
+    if(e.key===' ' || e.key==='Spacebar'){
+      e.preventDefault();
+      moveMode = false; moveStart = -1;
+      renderModal(); updateStatusBar();
+      return;
+    }
+    if(e.key==='Enter'){
+      e.preventDefault();
+      const cur = filteredSessions[modalCursor];
+      moveMode = false; moveStart = -1;
+      if(cur) { focusSession(cur.id); }
+      closeModal();
+      return;
+    }
+    if(e.key==='ArrowUp' && modalCursor > 0){
+      e.preventDefault();
+      const cur = filteredSessions[modalCursor];
+      const prev = filteredSessions[modalCursor-1];
+      if(cur && prev) control({action:'move', id:cur.id, to:prev.id});
+      modalCursor--;
+      return;
+    }
+    if(e.key==='ArrowDown' && modalCursor < filteredSessions.length-1){
+      e.preventDefault();
+      const cur = filteredSessions[modalCursor];
+      const next = filteredSessions[modalCursor+1];
+      if(cur && next) control({action:'move', id:cur.id, to:next.id});
+      modalCursor++;
+      return;
+    }
+    e.preventDefault();
+    return;
+  }
   if(e.key==='Escape'){ e.preventDefault(); closeModal(); return; }
   if(modalMode === 'rename'){
     if(e.key==='Enter'){
@@ -922,6 +975,15 @@ document.getElementById('modal-overlay').addEventListener('keydown', e => {
   }
   if(e.key==='ArrowDown' && filteredSessions.length){ e.preventDefault(); modalCursor=(modalCursor+1)%filteredSessions.length; renderModal(); return; }
   if(e.key==='ArrowUp' && filteredSessions.length){ e.preventDefault(); modalCursor=(modalCursor-1+filteredSessions.length)%filteredSessions.length; renderModal(); return; }
+  if((e.key===' ' || e.key==='Spacebar') && document.getElementById('session-filter').value.trim()===''){
+    if(filteredSessions[modalCursor]){
+      e.preventDefault();
+      moveMode = true;
+      moveStart = filteredSessions[modalCursor].id;
+      renderModal(); updateStatusBar();
+    }
+    return;
+  }
   if(e.key==='Enter'){ e.preventDefault(); if(filteredSessions[modalCursor]){ focusSession(filteredSessions[modalCursor].id); closeModal(); } return; }
 });
 
@@ -949,6 +1011,7 @@ document.getElementById('settings-close').onclick = closeModal;
 document.getElementById('btn-sessions').onclick = () => { openModal(); };
 document.getElementById('btn-new').onclick = ()=>{ newSession(); };
 document.getElementById('btn-kill').onclick = ()=>{ if(connected && sessions.length>1){ control({action:'kill',id:focusedID}); } term.focus(); };
+document.getElementById('btn-save').onclick = ()=>{ if(connected){ control({action:'save',id:0}); } term.focus(); };
 document.getElementById('btn-settings').onclick = () => { openSettings(); };
 const renameBtn = document.createElement('button');
 renameBtn.className = 'btn';
@@ -966,6 +1029,7 @@ function handleAppShortcut(e){
     if(k==='r'){ e.preventDefault(); e.stopPropagation(); openRename(); return true; }
     if(k==='t'){ e.preventDefault(); e.stopPropagation(); newSession(); return true; }
     if(k==='w'){ e.preventDefault(); e.stopPropagation(); if(sessions.length>1) control({action:'kill',id:focusedID}); return true; }
+    if(k==='p'){ e.preventDefault(); e.stopPropagation(); control({action:'save',id:0}); return true; }
     if(k===','){ e.preventDefault(); e.stopPropagation(); openSettings(); return true; }
   }
   return false;
