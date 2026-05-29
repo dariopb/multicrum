@@ -585,8 +585,15 @@ func (m Model) cursor() *tea.Cursor {
 		return nil
 	}
 	_, rows := paneSize(s.width, s.height)
-	line := len(sess.Screen().BufferLines()) - rows + cur.Y
-	y := 1 + line - vp.YOffset()
+	var y int
+	if s.scrollbackMode[idx] {
+		// Viewport content is scrollback + screen; map vt row to viewport line.
+		line := len(sess.Screen().BufferLines()) - rows + cur.Y
+		y = 1 + line - vp.YOffset()
+	} else {
+		// Cheap path: viewport content is just the rows-line screen.
+		y = 1 + cur.Y
+	}
 	if y < 1 || y > rows || cur.X < 0 || cur.X >= s.width {
 		return nil
 	}
@@ -736,9 +743,22 @@ func (s *state) refreshFocused() {
 			vp.GotoBottom()
 			s.scrollbackMode[idx] = false
 			s.viewports[idx] = vp
+			s.maybePromptExited(sess)
 			return
 		}
 	}
+}
+
+// maybePromptExited opens the respawn/remove modal if the given session
+// is already exited and we're currently in normal mode. Used when the
+// user focuses a background session that died while not visible.
+func (s *state) maybePromptExited(sess *session.Session) {
+	if sess == nil || !sess.Exited() || s.mode != modeNormal {
+		return
+	}
+	s.mode = modeExitPrompt
+	s.exitPromptID = sess.Index()
+	s.exitChoice = 0
 }
 
 // ── shortcuts ─────────────────────────────────────────────────────────────────
@@ -1013,14 +1033,14 @@ func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 		case tea.KeyEnter:
 			// Commit the move and select the session.
 			s.selectMoving = false
-			if len(matches) > 0 {
-				s.manager.Focus(matches[s.selectCursor].Index())
-				s.refreshFocused()
-			}
 			s.mode = modeNormal
 			s.selectFilter = ""
 			s.selectFilterCursor = 0
 			s.selectCursor = 0
+			if len(matches) > 0 {
+				s.manager.Focus(matches[s.selectCursor].Index())
+				s.refreshFocused()
+			}
 			s.notifyMeta()
 			return
 		case tea.KeyUp:
@@ -1082,6 +1102,9 @@ func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 		s.selectFilter, s.selectFilterCursor = insertAt(s.selectFilter, s.selectFilterCursor, " ")
 		s.selectCursor = 0
 	case tea.KeyEnter:
+		s.mode = modeNormal
+		s.selectFilter = ""
+		s.selectFilterCursor = 0
 		if len(matches) > 0 {
 			if s.selectCursor >= len(matches) {
 				s.selectCursor = len(matches) - 1
@@ -1090,9 +1113,6 @@ func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 			s.refreshFocused()
 			s.notifyMeta()
 		}
-		s.mode = modeNormal
-		s.selectFilter = ""
-		s.selectFilterCursor = 0
 		s.selectCursor = 0
 	case tea.KeyEscape:
 		s.mode = modeNormal
@@ -1172,6 +1192,9 @@ func (m Model) renderTabBar() string {
 	focused := s.manager.FocusedIndex()
 	sessions := s.manager.Sessions()
 
+	brand := brandStyle.Render("multicrum")
+	brandW := lipgloss.Width(brand)
+
 	// Build each tab as a styled string with its measured width.
 	tabs := make([]string, len(sessions))
 	widths := make([]int, len(sessions))
@@ -1195,15 +1218,16 @@ func (m Model) renderTabBar() string {
 
 	// If the screen is wide enough to show all tabs + the new-tab button,
 	// no scrolling needed.
-	total := newTabW
+	total := brandW + newTabW
 	for _, w := range widths {
 		total += w
 	}
 	if total <= s.width || s.width <= 0 {
 		bar := lipgloss.JoinHorizontal(lipgloss.Top, append(tabs, newTab)...)
-		if pad := s.width - lipgloss.Width(bar); pad > 0 {
+		if pad := s.width - lipgloss.Width(bar) - brandW; pad > 0 {
 			bar += tabBarStyle.Render(strings.Repeat(" ", pad))
 		}
+		bar += brand
 		return bar
 	}
 
@@ -1237,12 +1261,12 @@ func (m Model) renderTabBar() string {
 	used := widths[focusedPos]
 	for {
 		grew := false
-		if end < len(tabs) && used+widths[end] <= s.width-newTabW {
+		if end < len(tabs) && used+widths[end] <= s.width-newTabW-brandW {
 			used += widths[end]
 			end++
 			grew = true
 		}
-		if start > 0 && used+widths[start-1] <= s.width-newTabW {
+		if start > 0 && used+widths[start-1] <= s.width-newTabW-brandW {
 			start--
 			used += widths[start]
 			grew = true
@@ -1262,7 +1286,7 @@ func (m Model) renderTabBar() string {
 	if needRight {
 		reserved += rightW
 	}
-	for used+reserved > s.width-newTabW && end-start > 1 {
+	for used+reserved > s.width-newTabW-brandW && end-start > 1 {
 		// Drop the side farther from the focused tab.
 		if focusedPos-start > end-1-focusedPos && start < focusedPos {
 			used -= widths[start]
@@ -1294,7 +1318,7 @@ func (m Model) renderTabBar() string {
 		}
 	}
 
-	parts := make([]string, 0, end-start+3)
+	parts := make([]string, 0, end-start+4)
 	if needLeft {
 		parts = append(parts, left)
 	}
@@ -1304,9 +1328,10 @@ func (m Model) renderTabBar() string {
 	}
 	parts = append(parts, newTab)
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
-	if pad := s.width - lipgloss.Width(bar); pad > 0 {
+	if pad := s.width - lipgloss.Width(bar) - brandW; pad > 0 {
 		bar += tabBarStyle.Render(strings.Repeat(" ", pad))
 	}
+	bar += brand
 	// If even that overflows (a single tab wider than the screen), hard
 	// truncate so we never wrap the bar onto a second row.
 	if lipgloss.Width(bar) > s.width {
@@ -1733,13 +1758,13 @@ func (m Model) renderStatusBar() string {
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
 	}
-	help := helpStyle.Render(" Alt+` help  C-A-T new  C-A-W kill  C-A-R rename  C-A-S sessions  C-A-P save  C-A-←/→ switch  C-A-Q quit")
+	help := helpStyle.Render(" Alt+` help")
 	if s.statusMsg != "" {
 		help = helpStyle.Render(" " + s.statusMsg + " ")
 	}
-	left := statusKeyStyle.Render(status)
-	if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+	left := statusKeyStyle.Render(status) + help
+	if pad := s.width - lipgloss.Width(left); pad > 0 {
 		left += statusBarStyle.Render(strings.Repeat(" ", pad))
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
+	return left
 }

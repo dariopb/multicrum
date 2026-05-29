@@ -20,6 +20,12 @@ var (
 	tabBarStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("199"))
 
+	brandStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("199")).
+			Padding(0, 1)
+
 	statusBarStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250")).
 			Background(lipgloss.Color("236")).
@@ -34,7 +40,8 @@ var (
 			Background(lipgloss.Color("0"))
 
 	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("241"))
+			Foreground(lipgloss.Color("252")).
+			Background(lipgloss.Color("236"))
 
 	helpModalStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("252")).

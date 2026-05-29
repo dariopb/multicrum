@@ -270,7 +270,7 @@ func indexHTML(wsQuery string) string {
 <script>
 (function(){
   try{
-    var d={theme:"light",accent:"#7c3aed",uiFont:"system",topbarFont:"system",terminalFont:"cascadia",fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:"#0b0b10"};
+    var d={theme:"light",accent:"#7c3aed",uiFont:"system",topbarFont:"system",terminalFont:"cascadia",fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:"#0b0b10",scrollback:4000};
     var raw=JSON.parse(localStorage.getItem("multicrum-settings")||"{}");
     if(raw.font && !raw.uiFont) raw.uiFont=raw.font;
     if(raw.fontMono && !raw.terminalFont) raw.terminalFont=raw.fontMono;
@@ -378,9 +378,23 @@ html[data-terminalfont="roboto-mono"]{--font-mono:"Roboto Mono",ui-monospace,"SF
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-family:var(--font);font-size:var(--font-size-base);color:var(--text)}
-#tabbar{display:flex;align-items:center;background:linear-gradient(90deg,var(--panel-strong),color-mix(in srgb,var(--accent-violet) 48%,var(--panel)) 45%,color-mix(in srgb,var(--accent-pink) 48%,var(--panel)));border-bottom:1px solid var(--border);box-shadow:0 4px 18px #0008;min-height:calc(var(--topbar-font-size) + 26px);padding:5px 10px;gap:7px;flex-shrink:0;font-family:var(--topbar-font);font-size:var(--topbar-font-size);flex-wrap:wrap}
-#session-label{display:inline-flex;align-items:center;height:27px;font-size:inherit;color:var(--text);background:var(--panel-strong);border:1px solid var(--border);border-radius:7px;padding:0 11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;box-shadow:inset 0 0 12px color-mix(in srgb,var(--accent-violet) 32%,transparent)}
-#connection-state{display:inline-flex;align-items:center;height:27px;font-size:inherit;border-radius:7px;padding:0 9px;border:1px solid color-mix(in srgb,var(--pill-amber-fg) 45%,transparent);background:var(--pill-amber-bg);color:var(--pill-amber-fg);white-space:nowrap}
+#tabbar{display:flex;align-items:stretch;background:linear-gradient(90deg,var(--panel-strong),color-mix(in srgb,var(--accent-violet) 48%,var(--panel)) 45%,color-mix(in srgb,var(--accent-pink) 48%,var(--panel)));border-bottom:1px solid var(--border);box-shadow:0 4px 18px #0008;min-height:calc(var(--topbar-font-size) + 16px);padding:4px 8px;gap:4px;flex-shrink:0;font-family:var(--topbar-font);font-size:var(--topbar-font-size);position:relative}
+#menu-wrap{position:relative;flex-shrink:0}
+#menu-pop{display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--panel);border:1px solid var(--border-strong);border-radius:7px;box-shadow:0 8px 24px #000a;z-index:50;min-width:200px;padding:4px;flex-direction:column}
+#menu-pop.open{display:flex}
+.menu-item{display:flex;align-items:center;justify-content:space-between;gap:12px;background:transparent;border:0;color:var(--text);padding:7px 10px;border-radius:5px;cursor:pointer;font:inherit;text-align:left}
+.menu-item:hover{background:var(--row-hover)}
+.menu-item .kbd{font-family:var(--font-mono);font-size:11px;color:var(--text-soft)}
+#tab-list{display:flex;align-items:stretch;gap:0;flex:1 1 auto;min-width:0;overflow-x:auto;scrollbar-width:none}
+#tab-list::-webkit-scrollbar{display:none}
+.tab-pill{display:inline-flex;align-items:center;height:auto;padding:4px 12px;border:0;border-radius:0;cursor:pointer;font:inherit;color:var(--text-muted);background:transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;flex:0 0 auto}
+.tab-pill:hover{background:color-mix(in srgb,var(--accent-violet) 20%,transparent)}
+.tab-pill.active{background:var(--accent-violet);color:#fff;font-weight:700}
+.tab-pill.exited{color:#fb7185;text-decoration:line-through}
+.tab-newtab{color:var(--text-muted);font-family:var(--font-mono);flex-shrink:0}
+.tab-newtab:hover{background:color-mix(in srgb,var(--accent-violet) 30%,transparent);color:#fff}
+#brand{display:inline-flex;align-items:center;padding:4px 12px;font-weight:700;color:#fff;background:color-mix(in srgb,var(--accent-pink) 60%,transparent);margin-left:auto;flex-shrink:0}
+#connection-state{display:inline-flex;align-items:center;height:auto;padding:0 8px;border-radius:5px;border:1px solid color-mix(in srgb,var(--pill-amber-fg) 45%,transparent);background:var(--pill-amber-bg);color:var(--pill-amber-fg);white-space:nowrap;font-size:11px;margin:0 4px}
 #connection-state.connected{border-color:color-mix(in srgb,var(--pill-green-fg) 45%,transparent);background:var(--pill-green-bg);color:var(--pill-green-fg)}
 #connection-state.disconnected{border-color:color-mix(in srgb,var(--pill-red-fg) 45%,transparent);background:var(--pill-red-bg);color:var(--pill-red-fg)}
 .btn{display:inline-flex;align-items:center;justify-content:center;min-height:calc(1em + 15px);padding:.35em 1em;border-radius:7px;cursor:pointer;font-size:inherit;font-family:inherit;line-height:1.2;border:1px solid var(--border);background:color-mix(in srgb,var(--accent-violet) 24%,var(--panel));color:var(--text);box-shadow:0 1px 8px #0004;transition:background .12s,border-color .12s,transform .12s}
@@ -389,16 +403,15 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 .btn-green{background:color-mix(in srgb,var(--accent-violet) 28%,var(--panel));border-color:var(--border)}.btn-green:hover{background:color-mix(in srgb,var(--accent-violet) 42%,var(--panel))}
 .btn-red{background:color-mix(in srgb,#be123c 30%,var(--panel));border-color:color-mix(in srgb,#fb7185 45%,var(--border));color:var(--pill-red-fg)}.btn-red:hover{background:color-mix(in srgb,#be123c 45%,var(--panel))}
 .btn-blue{background:color-mix(in srgb,var(--accent-violet) 34%,var(--panel));border-color:color-mix(in srgb,var(--accent-violet) 55%,var(--border))}.btn-blue:hover{background:color-mix(in srgb,var(--accent-violet) 48%,var(--panel))}
-#hint{margin-left:auto;font-size:inherit;color:var(--text-muted)}
-#terminal{flex:1 1 auto;min-height:0;overflow:hidden;padding:0;background:var(--terminal-bg)}
+#hint,#status-help{display:none}#terminal{flex:1 1 auto;min-height:0;overflow:hidden;padding:0 0 0 6px;background:var(--terminal-bg)}
 #terminal .xterm{font-family:var(--font-mono);height:100%}
 #terminal .xterm-viewport{overflow-y:hidden!important}
 #statusbar{display:flex;align-items:center;gap:8px;min-height:24px;padding:0 10px;background:var(--panel-strong);border-top:1px solid var(--border);color:var(--text-muted);font-family:var(--topbar-font);font-size:12px;flex-shrink:0;white-space:nowrap;overflow:hidden}
 #status-main{font-weight:700;color:var(--accent-violet)}
-#status-help{margin-left:auto;overflow:hidden;text-overflow:ellipsis}
 #modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
 #modal-overlay.open{display:flex}
-#modal{background:var(--panel);border:1px solid var(--border-strong);border-radius:10px;padding:16px;min-width:320px;max-width:620px;width:90%;box-shadow:0 8px 32px #000a;color:var(--text);font-family:var(--font)}
+#modal{background:var(--panel);border:1px solid var(--border-strong);border-radius:10px;padding:16px;min-width:320px;max-width:620px;width:90%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px #000a;color:var(--text);font-family:var(--font)}
+#modal-body{overflow-y:auto;min-height:0;flex:1 1 auto;margin:-4px -4px 0;padding:4px}
 #modal h2{font-size:13px;color:var(--text-muted);margin-bottom:10px;font-weight:normal;text-transform:uppercase;letter-spacing:.08em}
 #session-filter,#rename-input,.new-input,.settings-field select,.settings-field input[type="text"],.settings-field input[type="color"]{width:100%;background:var(--panel-strong);border:1px solid var(--border-strong);border-radius:5px;color:var(--text);padding:7px 9px;margin-bottom:10px;font-family:inherit;font-size:13px}
 .settings-field input[type="range"]{width:100%}
@@ -431,27 +444,34 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 .settings-preview{border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--panel-strong)}
 .settings-preview-row{display:flex;gap:8px;align-items:center;margin:6px 0}.settings-preview-row.mono{font-family:var(--font-mono);font-size:var(--terminal-font-size)}
 .pill{font-size:11px;padding:2px 7px;border-radius:999px}.pill.green{background:var(--pill-green-bg);color:var(--pill-green-fg)}.pill.amber{background:var(--pill-amber-bg);color:var(--pill-amber-fg)}.pill.red{background:var(--pill-red-bg);color:var(--pill-red-fg)}.pill.gray{background:var(--pill-gray-bg);color:var(--pill-gray-fg)}
-@media(max-width:900px){#hint{display:none}}
+@media(max-width:900px){#brand{display:none}}
 @media(max-width:620px){.settings-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <div id="tabbar">
-  <button id="btn-sessions" class="btn btn-blue" title="Switch session (Ctrl+Alt+S)">☰ Sessions</button>
-  <span id="session-label">—</span>
-  <span id="connection-state">connecting</span>
-  <button id="btn-new" class="btn btn-green" title="New session (Ctrl+Alt+T)">+ New</button>
-  <button id="btn-kill" class="btn btn-red" title="Kill session (Ctrl+Alt+W)">✕ Kill</button>
-  <button id="btn-save" class="btn" title="Save layout (Ctrl+Alt+P)">💾 Save</button>
-  <button id="btn-settings" class="btn" title="Settings">⚙ Settings</button>
-  <span id="hint">Ctrl+←/→ switch &nbsp; Ctrl+Alt+S sessions &nbsp; Ctrl+Alt+R rename &nbsp; Ctrl+Alt+T new &nbsp; Ctrl+Alt+W kill &nbsp; Ctrl+Alt+P save</span>
+  <div id="menu-wrap">
+    <button id="btn-menu" class="btn btn-blue" title="Menu">☰</button>
+    <div id="menu-pop">
+      <button id="m-sessions" class="menu-item">☰ Sessions <span class="kbd">C-A-S</span></button>
+      <button id="m-new" class="menu-item">+ New <span class="kbd">C-A-T</span></button>
+      <button id="m-kill" class="menu-item">✕ Kill <span class="kbd">C-A-W</span></button>
+      <button id="m-rename" class="menu-item">✎ Rename <span class="kbd">C-A-R</span></button>
+      <button id="m-save" class="menu-item">💾 Save layout <span class="kbd">C-A-P</span></button>
+      <button id="m-settings" class="menu-item">⚙ Settings</button>
+    </div>
+  </div>
+  <div id="tab-list"></div>
+  <button id="btn-newtab" class="tab-pill tab-newtab" title="New session (Ctrl+Alt+T)">[+] Ctrl+Alt+T</button>
+  <span id="brand">multicrum</span>
 </div>
 <div id="terminal"></div>
-<div id="statusbar"><span id="status-main">session 1 │ connecting │ 0x0</span><span id="status-help">Alt+Backtick help  C-A-T new  C-A-W kill  C-A-R rename  C-A-S sessions  C-A-←/→ switch</span></div>
+<div id="statusbar"><span id="status-main">session 1 │ connecting │ 0x0</span></div>
 
 <div id="modal-overlay">
   <div id="modal">
     <h2 id="modal-title">Sessions</h2>
+    <div id="modal-body">
     <input id="session-filter" placeholder="Filter sessions..." autocomplete="off"/>
     <input id="rename-input" placeholder="Session name" autocomplete="off" style="display:none"/>
     <div id="new-session-form" style="display:none">
@@ -475,6 +495,7 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
           <label class="settings-field"><span>Theme</span><select id="set-theme"><option value="system">Match system</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
           <label class="settings-field"><span>Accent color</span><div class="color-row"><input type="color" id="set-accent"/><code id="set-accent-val">#7c3aed</code></div></label>
           <label class="settings-field"><span>Console background</span><div class="color-row"><input type="color" id="set-terminalbg"/><code id="set-terminalbg-val">#0b0b10</code></div></label>
+          <label class="settings-field"><span>Color scheme</span><select id="set-palette"><option value="xterm">xterm (default)</option><option value="vscode">VS Code Dark+</option><option value="onedark">One Dark</option><option value="solarized-dark">Solarized Dark</option><option value="gruvbox-dark">Gruvbox Dark</option></select></label>
         </div>
       </section>
       <section class="settings-section">
@@ -486,6 +507,7 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
           <label class="settings-field"><span>Top size: <code id="set-topbarsize-val">12</code> px</span><input type="range" id="set-topbarsize" min="10" max="24" step="1"/></label>
           <label class="settings-field"><span>Terminal font</span><select id="set-terminalfont"><option value="cascadia">Cascadia Mono (bundled)</option><option value="roboto-mono">Roboto Mono (bundled)</option><option value="ui">ui-monospace / system</option></select></label>
           <label class="settings-field"><span>Terminal size: <code id="set-terminalsize-val">14</code> px</span><input type="range" id="set-terminalsize" min="10" max="24" step="1"/></label>
+          <label class="settings-field"><span>Scrollback: <code id="set-scrollback-val">4000</code> lines</span><input type="number" id="set-scrollback" min="0" max="100000" step="500"/></label>
         </div>
       </section>
       <section class="settings-section">
@@ -498,13 +520,30 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
       </section>
     </div>
     <div id="session-list"></div>
+    </div>
     <div id="modal-footer">Type to filter &nbsp; ↑↓ navigate &nbsp; Enter select &nbsp; Esc close</div>
   </div>
 </div>
 
 <script>
 const SETTINGS_KEY = 'multicrum-settings';
-const DEFAULT_SETTINGS = {theme:'light',accent:'#7c3aed',uiFont:'system',topbarFont:'system',terminalFont:'cascadia',fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:'#0b0b10'};
+const DEFAULT_SETTINGS = {theme:'light',accent:'#7c3aed',uiFont:'system',topbarFont:'system',terminalFont:'cascadia',fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:'#0b0b10',palette:'vscode',scrollback:4000};
+const PALETTES = {
+  'xterm': null,
+  'vscode': {background:'#1e1e1e',foreground:'#cccccc',cursor:'#aeafad',selectionBackground:'#264f78',
+    black:'#000000',red:'#cd3131',green:'#0dbc79',yellow:'#e5e510',blue:'#2472c8',magenta:'#bc3fbc',cyan:'#11a8cd',white:'#e5e5e5',
+    brightBlack:'#666666',brightRed:'#f14c4c',brightGreen:'#23d18b',brightYellow:'#f5f543',brightBlue:'#3b8eea',brightMagenta:'#d670d6',brightCyan:'#29b8db',brightWhite:'#e5e5e5'},
+  'onedark': {background:'#282c34',foreground:'#abb2bf',cursor:'#528bff',selectionBackground:'#3e4451',
+    black:'#282c34',red:'#e06c75',green:'#98c379',yellow:'#e5c07b',blue:'#61afef',magenta:'#c678dd',cyan:'#56b6c2',white:'#abb2bf',
+    brightBlack:'#5c6370',brightRed:'#e06c75',brightGreen:'#98c379',brightYellow:'#e5c07b',brightBlue:'#61afef',brightMagenta:'#c678dd',brightCyan:'#56b6c2',brightWhite:'#ffffff'},
+  'solarized-dark': {background:'#002b36',foreground:'#839496',cursor:'#93a1a1',selectionBackground:'#073642',
+    black:'#073642',red:'#dc322f',green:'#859900',yellow:'#b58900',blue:'#268bd2',magenta:'#d33682',cyan:'#2aa198',white:'#eee8d5',
+    brightBlack:'#586e75',brightRed:'#cb4b16',brightGreen:'#586e75',brightYellow:'#657b83',brightBlue:'#839496',brightMagenta:'#6c71c4',brightCyan:'#93a1a1',brightWhite:'#fdf6e3'},
+  'gruvbox-dark': {background:'#282828',foreground:'#ebdbb2',cursor:'#ebdbb2',selectionBackground:'#504945',
+    black:'#282828',red:'#cc241d',green:'#98971a',yellow:'#d79921',blue:'#458588',magenta:'#b16286',cyan:'#689d6a',white:'#a89984',
+    brightBlack:'#928374',brightRed:'#fb4934',brightGreen:'#b8bb26',brightYellow:'#fabd2f',brightBlue:'#83a598',brightMagenta:'#d3869b',brightCyan:'#8ec07c',brightWhite:'#ebdbb2'}
+};
+function paletteTheme(s){ const p = PALETTES[s.palette||'vscode']; if(!p) return {}; const out = Object.assign({}, p); if(s.terminalBg) out.background = s.terminalBg; return out; }
 function normalizeSettings(s){ if(s.font && !s.uiFont) s.uiFont = s.font; if(s.fontMono && !s.terminalFont) s.terminalFont = s.fontMono; return s; }
 function loadSettings(){ try{ const raw = normalizeSettings(JSON.parse(localStorage.getItem(SETTINGS_KEY)||'{}')); return Object.assign({}, DEFAULT_SETTINGS, raw); }catch(e){ return Object.assign({}, DEFAULT_SETTINGS); } }
 function saveSettings(s){ localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
@@ -513,7 +552,7 @@ function fontFamilyChoice(value, s){ if(value === 'inter') return 'Inter, Helvet
 function uiFontFamily(s){ return fontFamilyChoice(s.uiFont, s); }
 function topbarFontFamily(s){ return fontFamilyChoice(s.topbarFont, s); }
 const initialSettings = loadSettings();
-const term = new Terminal({cursorBlink:true,fontSize:Number(initialSettings.terminalFontSize||14),fontFamily:monoFontFamily(initialSettings),theme:{background:getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim()||'#0b0b10'}});
+const term = new Terminal({cursorBlink:true,scrollback:Number(initialSettings.scrollback||4000),fontSize:Number(initialSettings.terminalFontSize||14),fontFamily:monoFontFamily(initialSettings),theme:Object.assign({background:getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim()||'#0b0b10'}, paletteTheme(initialSettings))});
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal'));
@@ -554,8 +593,9 @@ function applySettingsToDOM(s){
 function applySettingsToTerminal(s){
   term.options.fontFamily = monoFontFamily(s);
   term.options.fontSize = Number(s.terminalFontSize || 14);
+  term.options.scrollback = Number(s.scrollback || 4000);
   const bg = s.terminalBg || getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim() || '#0b0b10';
-  term.options.theme = Object.assign({}, term.options.theme || {}, {background:bg});
+  term.options.theme = Object.assign({}, paletteTheme(s), {background:bg});
   if(document.fonts && document.fonts.load){
     const primary = monoFontFamily(s).split(',')[0].trim().replace(/^['"]|['"]$/g, '');
     document.fonts.load((s.terminalFontSize || 14) + 'px "' + primary + '"').finally(() => { fitAndResize(); });
@@ -564,17 +604,18 @@ function applySettingsToTerminal(s){
   }
 }
 function syncSettingsForm(s){
-  const map = {'set-theme':s.theme,'set-accent':s.accent,'set-terminalbg':s.terminalBg,'set-uifont':s.uiFont,'set-topbarfont':s.topbarFont,'set-terminalfont':s.terminalFont,'set-fontsize':s.fontSize,'set-topbarsize':s.topbarFontSize,'set-terminalsize':s.terminalFontSize};
+  const map = {'set-theme':s.theme,'set-accent':s.accent,'set-terminalbg':s.terminalBg,'set-uifont':s.uiFont,'set-topbarfont':s.topbarFont,'set-terminalfont':s.terminalFont,'set-fontsize':s.fontSize,'set-topbarsize':s.topbarFontSize,'set-terminalsize':s.terminalFontSize,'set-palette':s.palette,'set-scrollback':s.scrollback};
   Object.keys(map).forEach(id => { const el = document.getElementById(id); if(el && map[id] !== undefined) el.value = map[id]; });
   const acc = document.getElementById('set-accent-val'); if(acc) acc.textContent = s.accent;
   const bg = document.getElementById('set-terminalbg-val'); if(bg) bg.textContent = s.terminalBg;
   const fs = document.getElementById('set-fontsize-val'); if(fs) fs.textContent = s.fontSize;
   const tops = document.getElementById('set-topbarsize-val'); if(tops) tops.textContent = s.topbarFontSize;
   const ts = document.getElementById('set-terminalsize-val'); if(ts) ts.textContent = s.terminalFontSize;
+  const sb = document.getElementById('set-scrollback-val'); if(sb) sb.textContent = s.scrollback;
 }
 function applySetting(key, value){
   const s = loadSettings();
-  if(key === 'fontSize' || key === 'topbarFontSize' || key === 'terminalFontSize') value = parseInt(value, 10);
+  if(key === 'fontSize' || key === 'topbarFontSize' || key === 'terminalFontSize' || key === 'scrollback') value = parseInt(value, 10);
   s[key] = value;
   saveSettings(s);
   applySettingsToDOM(s);
@@ -597,13 +638,10 @@ if(window.matchMedia){
 }
 
 function setConnectionState(state){
-  const el = document.getElementById('connection-state');
-  el.className = state;
-  el.textContent = state;
   connected = state === 'connected';
-  document.querySelectorAll('.btn').forEach(b=>{
-    if(b.id !== 'btn-settings' && b.id !== 'settings-reset' && b.id !== 'settings-close') b.disabled=!connected;
-  });
+  document.body.dataset.conn = state;
+  updateStatusBar();
+  renderTabs();
 }
 
 function send(data){ if(ws && ws.readyState===1) ws.send(data); }
@@ -701,22 +739,31 @@ function startWebSocket(){
 
 function updateLabel(){
   const s = sessions.find(s=>s.id===focusedID);
-  document.getElementById('session-label').textContent = s ? '['+(s.id+1)+'] '+s.title : '—';
+  renderTabs();
   updateStatusBar();
   if(s && s.exited && !modalOpen) openExitModal(s.id);
+}
+
+function renderTabs(){
+  const list = document.getElementById('tab-list');
+  list.innerHTML = '';
+  let active = null;
+  sessions.forEach(s => {
+    const b = document.createElement('button');
+    b.className = 'tab-pill' + (s.id===focusedID?' active':'') + (s.exited?' exited':'');
+    b.title = (s.title||'Session '+(s.id+1));
+    b.textContent = (s.title||'Session '+(s.id+1)) + (s.exited?' ✗':'');
+    b.onclick = () => focusSession(s.id);
+    if(s.id===focusedID) active = b;
+    list.appendChild(b);
+  });
+  if(active) active.scrollIntoView({block:'nearest',inline:'nearest'});
 }
 
 function updateStatusBar(){
   const s = sessions.find(s=>s.id===focusedID);
   const state = s && s.exited ? 'exited' : (connected ? 'running' : 'connecting');
   document.getElementById('status-main').textContent = ' session '+(focusedID+1)+' │ '+state+' │ '+term.cols+'x'+term.rows+' │ mouse:app ';
-  let help = 'Alt+Backtick help  C-A-T new  C-A-W kill  C-A-R rename  C-A-S sessions  C-A-←/→ switch  C-A-Q quit';
-  if(modalOpen && modalMode === 'settings') help = 'Settings: changes save automatically   Esc close';
-  else if(modalOpen && modalMode === 'sessions') help = moveMode ? '↑/↓ reorder   Space drop   Enter commit & select   Esc revert' : 'Filter sessions   ↑/↓ move   Space reorder   Enter select   Esc close';
-  else if(modalOpen && modalMode === 'rename') help = 'Rename: Enter save   Esc cancel';
-  else if(modalOpen && modalMode === 'new') help = 'New session: Enter start   Esc cancel';
-  else if(modalOpen && modalMode === 'exit') help = 'Session exited — choose action in modal';
-  document.getElementById('status-help').textContent = help;
 }
 
 function focusSession(id){
@@ -1006,18 +1053,24 @@ document.getElementById('set-terminalfont').onchange = e => applySetting('termin
 document.getElementById('set-fontsize').oninput = e => applySetting('fontSize', e.target.value);
 document.getElementById('set-topbarsize').oninput = e => applySetting('topbarFontSize', e.target.value);
 document.getElementById('set-terminalsize').oninput = e => applySetting('terminalFontSize', e.target.value);
+document.getElementById('set-palette').onchange = e => applySetting('palette', e.target.value);
+document.getElementById('set-scrollback').oninput = e => applySetting('scrollback', e.target.value);
 document.getElementById('settings-reset').onclick = resetSettings;
 document.getElementById('settings-close').onclick = closeModal;
-document.getElementById('btn-sessions').onclick = () => { openModal(); };
-document.getElementById('btn-new').onclick = ()=>{ newSession(); };
-document.getElementById('btn-kill').onclick = ()=>{ if(connected && sessions.length>1){ control({action:'kill',id:focusedID}); } term.focus(); };
-document.getElementById('btn-save').onclick = ()=>{ if(connected){ control({action:'save',id:0}); } term.focus(); };
-document.getElementById('btn-settings').onclick = () => { openSettings(); };
-const renameBtn = document.createElement('button');
-renameBtn.className = 'btn';
-renameBtn.textContent = 'Rename';
-renameBtn.onclick = () => { openRename(); };
-document.getElementById('btn-kill').after(renameBtn);
+function openMenu(open){
+  const p = document.getElementById('menu-pop');
+  if(open === undefined) open = !p.classList.contains('open');
+  p.classList.toggle('open', open);
+}
+document.getElementById('btn-menu').onclick = (e) => { e.stopPropagation(); openMenu(); };
+document.addEventListener('click', e => { if(!e.target.closest('#menu-wrap')) openMenu(false); });
+document.getElementById('m-sessions').onclick = () => { openMenu(false); openModal(); };
+document.getElementById('m-new').onclick = () => { openMenu(false); newSession(); };
+document.getElementById('m-kill').onclick = () => { openMenu(false); if(connected && sessions.length>1){ control({action:'kill',id:focusedID}); } term.focus(); };
+document.getElementById('m-rename').onclick = () => { openMenu(false); openRename(); };
+document.getElementById('m-save').onclick = () => { openMenu(false); if(connected){ control({action:'save',id:0}); } term.focus(); };
+document.getElementById('m-settings').onclick = () => { openMenu(false); openSettings(); };
+document.getElementById('btn-newtab').onclick = () => { newSession(); };
 
 // Intercept browser shortcuts before they're swallowed.
 function handleAppShortcut(e){
@@ -1052,6 +1105,21 @@ window.addEventListener('wheel', e => {
 
 function fitAndResize(){
   fitAddon.fit();
+  // FitAddon reserves space for xterm's scrollbar, but we hide it with
+  // overflow-y:hidden, so an extra column often fits. Bump cols when the
+  // leftover width can hold another full cell.
+  try {
+    const core = term._core;
+    const cell = core && core._renderService && core._renderService.dimensions && core._renderService.dimensions.css && core._renderService.dimensions.css.cell;
+    const host = document.getElementById('terminal');
+    if (cell && cell.width > 0 && host) {
+      const style = getComputedStyle(host);
+      const padL = parseFloat(style.paddingLeft)||0, padR = parseFloat(style.paddingRight)||0;
+      const avail = host.clientWidth - padL - padR;
+      const extra = Math.floor((avail - term.cols * cell.width) / cell.width);
+      if (extra > 0) term.resize(term.cols + extra, term.rows);
+    }
+  } catch(e) {}
   updateStatusBar();
   sendResize();
 }
@@ -1067,6 +1135,14 @@ requestAnimationFrame(() => {
   startWebSocket();
   applySettingsToTerminal(initialSettings);
   term.focus();
+  // Initial cell metrics may be off before web fonts finish loading; refit
+  // once they're ready, and one more frame later for layout to settle.
+  if(document.fonts && document.fonts.ready){
+    document.fonts.ready.then(() => {
+      fitAndResize();
+      requestAnimationFrame(() => fitAndResize());
+    });
+  }
 });
 
 </script>
