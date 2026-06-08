@@ -266,11 +266,12 @@ func indexHTML(wsQuery string) string {
 <html>
 <head>
 <meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>multicrum</title>
 <script>
 (function(){
   try{
-    var d={theme:"light",accent:"#7c3aed",uiFont:"system",topbarFont:"system",terminalFont:"cascadia",fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:"#0b0b10",scrollback:4000};
+    var d={theme:"light",accent:"#7c3aed",uiFont:"system",topbarFont:"system",terminalFont:"cascadia",fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:"#0b0b10",scrollback:4000,viewportMode:"device",viewportWidth:1280};
     var raw=JSON.parse(localStorage.getItem("multicrum-settings")||"{}");
     if(raw.font && !raw.uiFont) raw.uiFont=raw.font;
     if(raw.fontMono && !raw.terminalFont) raw.terminalFont=raw.fontMono;
@@ -382,6 +383,11 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 #menu-wrap{position:relative;flex-shrink:0}
 #menu-pop{display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--panel);border:1px solid var(--border-strong);border-radius:7px;box-shadow:0 8px 24px #000a;z-index:50;min-width:200px;padding:4px;flex-direction:column}
 #menu-pop.open{display:flex}
+#keys-pop{display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--panel);border:1px solid var(--border-strong);border-radius:7px;box-shadow:0 8px 24px #000a;z-index:50;padding:6px;flex-direction:column;gap:4px;max-width:calc(100vw - 16px);overflow-x:auto;scrollbar-width:thin}
+#keys-pop.open{display:flex}
+.keys-row{display:flex;gap:4px;flex-wrap:nowrap}
+.key-btn{padding:6px 10px;min-width:38px;border:1px solid var(--border-strong);border-radius:5px;background:var(--panel-strong);color:var(--text);font-family:var(--font-mono);font-size:12px;cursor:pointer;white-space:nowrap;flex:0 0 auto}
+.key-btn:hover{background:color-mix(in srgb,var(--accent-violet) 30%,var(--panel-strong));border-color:var(--accent-violet)}
 .menu-item{display:flex;align-items:center;justify-content:space-between;gap:12px;background:transparent;border:0;color:var(--text);padding:7px 10px;border-radius:5px;cursor:pointer;font:inherit;text-align:left}
 .menu-item:hover{background:var(--row-hover)}
 .menu-item .kbd{font-family:var(--font-mono);font-size:11px;color:var(--text-soft)}
@@ -405,7 +411,8 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 .btn-blue{background:color-mix(in srgb,var(--accent-violet) 34%,var(--panel));border-color:color-mix(in srgb,var(--accent-violet) 55%,var(--border))}.btn-blue:hover{background:color-mix(in srgb,var(--accent-violet) 48%,var(--panel))}
 #hint,#status-help{display:none}#terminal{flex:1 1 auto;min-height:0;overflow:hidden;padding:0 0 0 6px;background:var(--terminal-bg)}
 #terminal .xterm{font-family:var(--font-mono);height:100%}
-#terminal .xterm-viewport{overflow-y:hidden!important}
+#terminal .xterm-viewport{overflow-y:scroll!important;scrollbar-width:none}
+#terminal .xterm-viewport::-webkit-scrollbar{display:none}
 #statusbar{display:flex;align-items:center;gap:8px;min-height:24px;padding:0 10px;background:var(--panel-strong);border-top:1px solid var(--border);color:var(--text-muted);font-family:var(--topbar-font);font-size:12px;flex-shrink:0;white-space:nowrap;overflow:hidden}
 #status-main{font-weight:700;color:var(--accent-violet)}
 #modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
@@ -441,6 +448,8 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 .settings-field code,.settings-preview code{font-family:var(--font-mono);font-size:12px;color:var(--text)}
 .color-row{display:flex;align-items:center;gap:8px}.color-row input{height:34px;padding:2px;margin:0;max-width:72px}.color-row code{min-width:70px}
 .settings-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+.key-btn{padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;background:var(--panel-strong);color:var(--text);font-family:var(--font-mono);font-size:12px;cursor:pointer}
+.key-btn:hover{background:color-mix(in srgb,var(--accent-violet) 30%,var(--panel-strong));border-color:var(--accent-violet)}
 .settings-preview{border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--panel-strong)}
 .settings-preview-row{display:flex;gap:8px;align-items:center;margin:6px 0}.settings-preview-row.mono{font-family:var(--font-mono);font-size:var(--terminal-font-size)}
 .pill{font-size:11px;padding:2px 7px;border-radius:999px}.pill.green{background:var(--pill-green-bg);color:var(--pill-green-fg)}.pill.amber{background:var(--pill-amber-bg);color:var(--pill-amber-fg)}.pill.red{background:var(--pill-red-bg);color:var(--pill-red-fg)}.pill.gray{background:var(--pill-gray-bg);color:var(--pill-gray-fg)}
@@ -453,16 +462,23 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
   <div id="menu-wrap">
     <button id="btn-menu" class="btn btn-blue" title="Menu">☰</button>
     <div id="menu-pop">
-      <button id="m-sessions" class="menu-item">☰ Sessions <span class="kbd">C-A-S</span></button>
-      <button id="m-new" class="menu-item">+ New <span class="kbd">C-A-T</span></button>
-      <button id="m-kill" class="menu-item">✕ Kill <span class="kbd">C-A-W</span></button>
-      <button id="m-rename" class="menu-item">✎ Rename <span class="kbd">C-A-R</span></button>
-      <button id="m-save" class="menu-item">💾 Save layout <span class="kbd">C-A-P</span></button>
-      <button id="m-settings" class="menu-item">⚙ Settings</button>
+      <button id="m-sessions" class="menu-item">☰ Sessions <span class="kbd">Alt-S</span></button>
+      <button id="m-prev" class="menu-item">‹ Prev session <span class="kbd">Ctrl-Alt-←</span></button>
+      <button id="m-next" class="menu-item">› Next session <span class="kbd">Ctrl-Alt-→</span></button>
+      <button id="m-new" class="menu-item">+ New <span class="kbd">Alt-N</span></button>
+      <button id="m-kill" class="menu-item">✕ Kill <span class="kbd">Alt-K</span></button>
+      <button id="m-rename" class="menu-item">✎ Rename <span class="kbd">Alt-R</span></button>
+      <button id="m-save" class="menu-item">💾 Save layout <span class="kbd">Alt-P</span></button>
+      <button id="m-mouse" class="menu-item">🖱 Mouse: <span id="m-mouse-mode">app</span> <span class="kbd">Alt-M</span></button>
+      <button id="m-settings" class="menu-item">⚙ Settings <span class="kbd">Alt-,</span></button>
     </div>
   </div>
+  <div id="keys-wrap" style="position:relative;flex-shrink:0">
+    <button id="btn-keys" class="btn btn-blue" title="Send key">⌨</button>
+    <div id="keys-pop"></div>
+  </div>
   <div id="tab-list"></div>
-  <button id="btn-newtab" class="tab-pill tab-newtab" title="New session (Ctrl+Alt+T)">[+] Ctrl+Alt+T</button>
+  <button id="btn-newtab" class="tab-pill tab-newtab" title="New session (Alt+N)">[+] Alt+N</button>
   <span id="brand">multicrum</span>
 </div>
 <div id="terminal"></div>
@@ -508,6 +524,8 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
           <label class="settings-field"><span>Terminal font</span><select id="set-terminalfont"><option value="cascadia">Cascadia Mono (bundled)</option><option value="roboto-mono">Roboto Mono (bundled)</option><option value="ui">ui-monospace / system</option></select></label>
           <label class="settings-field"><span>Terminal size: <code id="set-terminalsize-val">14</code> px</span><input type="range" id="set-terminalsize" min="10" max="24" step="1"/></label>
           <label class="settings-field"><span>Scrollback: <code id="set-scrollback-val">4000</code> lines</span><input type="number" id="set-scrollback" min="0" max="100000" step="500"/></label>
+          <label class="settings-field"><span>Viewport</span><select id="set-viewportmode"><option value="device">Match device width</option><option value="fixed">Fixed CSS px width</option></select></label>
+          <label class="settings-field"><span>Viewport width: <code id="set-viewportwidth-val">1280</code> px</span><input type="number" id="set-viewportwidth" min="320" max="4096" step="32"/></label>
         </div>
       </section>
       <section class="settings-section">
@@ -527,7 +545,7 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 
 <script>
 const SETTINGS_KEY = 'multicrum-settings';
-const DEFAULT_SETTINGS = {theme:'light',accent:'#7c3aed',uiFont:'system',topbarFont:'system',terminalFont:'cascadia',fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:'#0b0b10',palette:'vscode',scrollback:4000};
+const DEFAULT_SETTINGS = {theme:'light',accent:'#7c3aed',uiFont:'system',topbarFont:'system',terminalFont:'cascadia',fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:'#0b0b10',palette:'vscode',scrollback:4000,viewportMode:'device',viewportWidth:1280};
 const PALETTES = {
   'xterm': null,
   'vscode': {background:'#1e1e1e',foreground:'#cccccc',cursor:'#aeafad',selectionBackground:'#264f78',
@@ -572,6 +590,22 @@ let moveStart = -1;
 let newChoice = 0;
 let exitChoice = 0;
 const newModes = ['same','local','remote'];
+// Mouse mode: 'app' = forward wheel/clicks to child PTY when it enables mouse
+// tracking (default); 'select' = always keep wheel for local scrollback and
+// release mouse clicks for native text selection, no matter what the child
+// requested. Persisted across reloads.
+let mouseMode = (localStorage.getItem('multicrum-mouse-mode') === 'select') ? 'select' : 'app';
+
+function applyViewport(s){
+  let meta = document.querySelector('meta[name="viewport"]');
+  if(!meta){ meta = document.createElement('meta'); meta.name='viewport'; document.head.appendChild(meta); }
+  if(s.viewportMode === 'fixed'){
+    const w = Math.max(320, Number(s.viewportWidth || 1280));
+    meta.content = 'width='+w+',viewport-fit=cover';
+  } else {
+    meta.content = 'width=device-width,initial-scale=1,viewport-fit=cover';
+  }
+}
 
 function applySettingsToDOM(s){
   const root = document.documentElement;
@@ -581,6 +615,7 @@ function applySettingsToDOM(s){
   root.setAttribute('data-uifont', s.uiFont || 'system');
   root.setAttribute('data-topbarfont', s.topbarFont || 'system');
   root.setAttribute('data-terminalfont', s.terminalFont || 'cascadia');
+  applyViewport(s);
   root.style.setProperty('--accent-violet', s.accent || '#7c3aed');
   root.style.setProperty('--font', uiFontFamily(s));
   root.style.setProperty('--topbar-font', topbarFontFamily(s));
@@ -604,7 +639,7 @@ function applySettingsToTerminal(s){
   }
 }
 function syncSettingsForm(s){
-  const map = {'set-theme':s.theme,'set-accent':s.accent,'set-terminalbg':s.terminalBg,'set-uifont':s.uiFont,'set-topbarfont':s.topbarFont,'set-terminalfont':s.terminalFont,'set-fontsize':s.fontSize,'set-topbarsize':s.topbarFontSize,'set-terminalsize':s.terminalFontSize,'set-palette':s.palette,'set-scrollback':s.scrollback};
+  const map = {'set-theme':s.theme,'set-accent':s.accent,'set-terminalbg':s.terminalBg,'set-uifont':s.uiFont,'set-topbarfont':s.topbarFont,'set-terminalfont':s.terminalFont,'set-fontsize':s.fontSize,'set-topbarsize':s.topbarFontSize,'set-terminalsize':s.terminalFontSize,'set-palette':s.palette,'set-scrollback':s.scrollback,'set-viewportmode':s.viewportMode,'set-viewportwidth':s.viewportWidth};
   Object.keys(map).forEach(id => { const el = document.getElementById(id); if(el && map[id] !== undefined) el.value = map[id]; });
   const acc = document.getElementById('set-accent-val'); if(acc) acc.textContent = s.accent;
   const bg = document.getElementById('set-terminalbg-val'); if(bg) bg.textContent = s.terminalBg;
@@ -612,10 +647,12 @@ function syncSettingsForm(s){
   const tops = document.getElementById('set-topbarsize-val'); if(tops) tops.textContent = s.topbarFontSize;
   const ts = document.getElementById('set-terminalsize-val'); if(ts) ts.textContent = s.terminalFontSize;
   const sb = document.getElementById('set-scrollback-val'); if(sb) sb.textContent = s.scrollback;
+  const vw = document.getElementById('set-viewportwidth-val'); if(vw) vw.textContent = s.viewportWidth;
+  const vwRow = document.getElementById('set-viewportwidth'); if(vwRow) vwRow.closest('.settings-field').style.display = (s.viewportMode === 'fixed') ? '' : 'none';
 }
 function applySetting(key, value){
   const s = loadSettings();
-  if(key === 'fontSize' || key === 'topbarFontSize' || key === 'terminalFontSize' || key === 'scrollback') value = parseInt(value, 10);
+  if(key === 'fontSize' || key === 'topbarFontSize' || key === 'terminalFontSize' || key === 'scrollback' || key === 'viewportWidth') value = parseInt(value, 10);
   s[key] = value;
   saveSettings(s);
   applySettingsToDOM(s);
@@ -725,10 +762,14 @@ function startWebSocket(){
       sessions = meta.sessions || [];
       if(typeof meta.focusedId === 'number' && focusedID !== meta.focusedId){
         focusedID = meta.focusedId;
-        term.clear();
+        // Drain any still-queued bytes from the previous session before
+        // clearing, otherwise leftover ESC-mid-sequence bytes will be
+        // applied to the cleared screen and show as escape garbage.
         terminalWriter.reset();
+        term.reset();
         control({action:'focus',id:focusedID});
         sendResize();
+        term.focus();
       }
     }
     updateLabel();
@@ -763,7 +804,7 @@ function renderTabs(){
 function updateStatusBar(){
   const s = sessions.find(s=>s.id===focusedID);
   const state = s && s.exited ? 'exited' : (connected ? 'running' : 'connecting');
-  document.getElementById('status-main').textContent = ' session '+(focusedID+1)+' │ '+state+' │ '+term.cols+'x'+term.rows+' │ mouse:app ';
+  document.getElementById('status-main').textContent = ' session '+(focusedID+1)+' │ '+state+' │ '+term.cols+'x'+term.rows+' │ mouse:'+mouseMode+' ';
 }
 
 function focusSession(id){
@@ -910,6 +951,67 @@ function openSettings(){
   document.getElementById('set-theme').focus();
 }
 
+const KEY_ROWS = [
+  [
+    {label:'^C', title:'Ctrl-C (interrupt)', bytes:'\x03'},
+    {label:'^A', title:'Ctrl-A',              bytes:'\x01'},
+    {label:'^Z', title:'Ctrl-Z (suspend)',    bytes:'\x1a'},
+    {label:'^V', title:'Ctrl-V',              bytes:'\x16'},
+    {label:'Esc',title:'Escape',              bytes:'\x1b'},
+    {label:'⇥', title:'Tab',                   bytes:'\t'},
+    {label:'⌫', title:'Backspace',             bytes:'\x7f'},
+    {label:'⏎', title:'Enter',                 bytes:'\r'},
+  ],
+  [
+    {label:'F1', bytes:'\x1bOP'},   {label:'F2', bytes:'\x1bOQ'},
+    {label:'F3', bytes:'\x1bOR'},   {label:'F4', bytes:'\x1bOS'},
+    {label:'F5', bytes:'\x1b[15~'}, {label:'F6', bytes:'\x1b[17~'},
+    {label:'F7', bytes:'\x1b[18~'}, {label:'F8', bytes:'\x1b[19~'},
+    {label:'F9', bytes:'\x1b[20~'}, {label:'F10',bytes:'\x1b[21~'},
+    {label:'F11',bytes:'\x1b[23~'}, {label:'F12',bytes:'\x1b[24~'},
+  ],
+  [
+    {label:'←',  title:'Left',     bytes:'\x1b[D'},
+    {label:'↓',  title:'Down',     bytes:'\x1b[B'},
+    {label:'↑',  title:'Up',       bytes:'\x1b[A'},
+    {label:'→',  title:'Right',    bytes:'\x1b[C'},
+    {label:'⇱',  title:'Home',     bytes:'\x1b[H'},
+    {label:'⇲',  title:'End',      bytes:'\x1b[F'},
+    {label:'PgUp',title:'Page Up', bytes:'\x1b[5~'},
+    {label:'PgDn',title:'Page Down',bytes:'\x1b[6~'},
+    {label:'Ins',title:'Insert',   bytes:'\x1b[2~'},
+    {label:'Del',title:'Delete',   bytes:'\x1b[3~'},
+  ],
+];
+
+function buildKeysPanel(){
+  const root = document.getElementById('keys-pop');
+  root.innerHTML = '';
+  KEY_ROWS.forEach(row => {
+    const r = document.createElement('div');
+    r.className = 'keys-row';
+    row.forEach(k => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'key-btn';
+      b.textContent = k.label;
+      if(k.title) b.title = k.title;
+      b.onmousedown = e => e.preventDefault();
+      b.onclick = () => { keystroke(k.bytes); term.focus(); };
+      r.appendChild(b);
+    });
+    root.appendChild(r);
+  });
+}
+
+function openKeysPanel(open){
+  const p = document.getElementById('keys-pop');
+  const want = (open === undefined) ? !p.classList.contains('open') : open;
+  p.classList.toggle('open', want);
+}
+
+
+
 function closeModal(){
   modalOpen = false;
   document.getElementById('modal-overlay').classList.remove('open');
@@ -1055,6 +1157,8 @@ document.getElementById('set-topbarsize').oninput = e => applySetting('topbarFon
 document.getElementById('set-terminalsize').oninput = e => applySetting('terminalFontSize', e.target.value);
 document.getElementById('set-palette').onchange = e => applySetting('palette', e.target.value);
 document.getElementById('set-scrollback').oninput = e => applySetting('scrollback', e.target.value);
+document.getElementById('set-viewportmode').onchange = e => { applySetting('viewportMode', e.target.value); fitAndResize(); };
+document.getElementById('set-viewportwidth').oninput = e => { applySetting('viewportWidth', e.target.value); fitAndResize(); };
 document.getElementById('settings-reset').onclick = resetSettings;
 document.getElementById('settings-close').onclick = closeModal;
 function openMenu(open){
@@ -1065,25 +1169,43 @@ function openMenu(open){
 document.getElementById('btn-menu').onclick = (e) => { e.stopPropagation(); openMenu(); };
 document.addEventListener('click', e => { if(!e.target.closest('#menu-wrap')) openMenu(false); });
 document.getElementById('m-sessions').onclick = () => { openMenu(false); openModal(); };
+document.getElementById('m-prev').onclick = () => { openMenu(false); switchSession(-1); term.focus(); };
+document.getElementById('m-next').onclick = () => { openMenu(false); switchSession(1);  term.focus(); };
 document.getElementById('m-new').onclick = () => { openMenu(false); newSession(); };
 document.getElementById('m-kill').onclick = () => { openMenu(false); if(connected && sessions.length>1){ control({action:'kill',id:focusedID}); } term.focus(); };
 document.getElementById('m-rename').onclick = () => { openMenu(false); openRename(); };
 document.getElementById('m-save').onclick = () => { openMenu(false); if(connected){ control({action:'save',id:0}); } term.focus(); };
+document.getElementById('m-mouse').onclick = () => { openMenu(false); toggleMouseMode(); term.focus(); };
 document.getElementById('m-settings').onclick = () => { openMenu(false); openSettings(); };
+buildKeysPanel();
+document.getElementById('btn-keys').onclick = (e) => { e.stopPropagation(); openKeysPanel(); };
+document.addEventListener('click', e => { if(!e.target.closest('#keys-wrap')) openKeysPanel(false); });
 document.getElementById('btn-newtab').onclick = () => { newSession(); };
 
 // Intercept browser shortcuts before they're swallowed.
 function handleAppShortcut(e){
-  if(e.ctrlKey && !e.shiftKey && e.key==='ArrowLeft'){ e.preventDefault(); e.stopPropagation(); switchSession(-1); return true; }
-  if(e.ctrlKey && !e.shiftKey && e.key==='ArrowRight'){ e.preventDefault(); e.stopPropagation(); switchSession(1); return true; }
-  if(e.ctrlKey && e.altKey && !e.shiftKey){
-    const k = e.key.toLowerCase();
-    if(k==='s'){ e.preventDefault(); e.stopPropagation(); openModal(); return true; }
-    if(k==='r'){ e.preventDefault(); e.stopPropagation(); openRename(); return true; }
-    if(k==='t'){ e.preventDefault(); e.stopPropagation(); newSession(); return true; }
-    if(k==='w'){ e.preventDefault(); e.stopPropagation(); if(sessions.length>1) control({action:'kill',id:focusedID}); return true; }
-    if(k==='p'){ e.preventDefault(); e.stopPropagation(); control({action:'save',id:0}); return true; }
-    if(k===','){ e.preventDefault(); e.stopPropagation(); openSettings(); return true; }
+  // Tab nav uses Ctrl+Alt+Arrow to match the local TUI. Note Ctrl+Alt+M is
+  // dev-tools in Edge but Ctrl+Alt+Arrow is free across browsers/OSes.
+  // Letter shortcuts use plain Alt+letter to avoid Edge's Ctrl+Alt+T/W/R/M
+  // claims (reopen-tab, close-window, reload-bypass, dev-tools).
+  const arrowL = (e.key==='ArrowLeft'  || e.code==='ArrowLeft');
+  const arrowR = (e.key==='ArrowRight' || e.code==='ArrowRight');
+  const onlyCtrlAlt = e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey;
+  if(onlyCtrlAlt && arrowL){ e.preventDefault(); e.stopPropagation(); switchSession(-1); return true; }
+  if(onlyCtrlAlt && arrowR){ e.preventDefault(); e.stopPropagation(); switchSession(1); return true; }
+  if(e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey){
+    // Prefer e.code over e.key because some keyboard layouts (US-Intl,
+    // macOS Option, AltGr layouts) compose Alt+letter into special chars,
+    // which would make e.key something other than the letter.
+    const c = e.code || '';
+    const k = (e.key||'').toLowerCase();
+    if(c==='KeyS' || k==='s'){ e.preventDefault(); e.stopPropagation(); openModal(); return true; }
+    if(c==='KeyR' || k==='r'){ e.preventDefault(); e.stopPropagation(); openRename(); return true; }
+    if(c==='KeyN' || k==='n'){ e.preventDefault(); e.stopPropagation(); newSession(); return true; }
+    if(c==='KeyK' || k==='k'){ e.preventDefault(); e.stopPropagation(); if(sessions.length>1) control({action:'kill',id:focusedID}); return true; }
+    if(c==='KeyP' || k==='p'){ e.preventDefault(); e.stopPropagation(); control({action:'save',id:0}); return true; }
+    if(c==='KeyM' || k==='m'){ e.preventDefault(); e.stopPropagation(); toggleMouseMode(); return true; }
+    if(c==='Comma' || k===','){ e.preventDefault(); e.stopPropagation(); openSettings(); return true; }
   }
   return false;
 }
@@ -1094,14 +1216,71 @@ term.attachCustomKeyEventHandler(e=>{
   return true;
 });
 
+// Mouse mode toggle plumbing. xterm.js forwards wheel + click events to the
+// PTY whenever the child enables mouse tracking. Some apps (Edge browser key
+// combos aside) also intercept the bottom-pixel area for tooltips, making
+// regular text selection awkward. 'select' mode swallows the mouse-event
+// forwarding so wheel always scrolls the local scrollback and clicks select.
+term.attachCustomWheelEventHandler(e=>{
+  if(mouseMode==='select'){
+    // Scroll local scrollback ourselves; xterm aborts its own handling
+    // (which would otherwise forward as a mouse event to the child).
+    const lines = e.deltaMode===1 ? e.deltaY : Math.sign(e.deltaY) * 3;
+    if(lines) term.scrollLines(lines);
+    e.preventDefault();
+    return false;
+  }
+  return true;
+});
+
+// In 'select' mode, force xterm's selection service to engage even when the
+// child PTY has captured mouse events. xterm's SelectionService only sees a
+// mousedown when shouldForceSelection() is true; on non-Mac that means
+// shiftKey is held. So we intercept the original event in capture phase and
+// re-dispatch a Shift-modified clone at the same point. A WeakSet flag tags
+// the synthesized event so we don't recurse on it.
+const _synthMouse = new WeakSet();
+function forceSelectMouse(e){
+  if(mouseMode!=='select') return;
+  if(_synthMouse.has(e)) return;
+  if(e.button!==0) return;
+  e.stopImmediatePropagation();
+  e.preventDefault();
+  const clone = new MouseEvent(e.type, {
+    bubbles:true, cancelable:true, composed:true,
+    view:window, detail:e.detail,
+    screenX:e.screenX, screenY:e.screenY,
+    clientX:e.clientX, clientY:e.clientY,
+    ctrlKey:e.ctrlKey, altKey:e.altKey, metaKey:e.metaKey,
+    shiftKey:true, button:e.button, buttons:e.buttons,
+    relatedTarget:e.relatedTarget,
+  });
+  _synthMouse.add(clone);
+  e.target.dispatchEvent(clone);
+}
+document.getElementById('terminal').addEventListener('mousedown', forceSelectMouse, {capture:true});
+
+function updateMouseModeUI(){
+  const label = document.getElementById('m-mouse-mode');
+  if(label) label.textContent = mouseMode;
+  const root = document.getElementById('terminal');
+  if(root) root.classList.toggle('mouse-select', mouseMode==='select');
+  updateStatusBar();
+}
+
+function setMouseMode(mode){
+  mouseMode = (mode==='select') ? 'select' : 'app';
+  localStorage.setItem('multicrum-mouse-mode', mouseMode);
+  updateMouseModeUI();
+}
+
+function toggleMouseMode(){ setMouseMode(mouseMode==='select' ? 'app' : 'select'); }
+
+updateMouseModeUI();
+
 term.onData(d=>keystroke(d));
 window.addEventListener('keydown',e=>{ handleAppShortcut(e); },{capture:true});
 window.addEventListener('resize',()=>{fitAndResize();});
-window.addEventListener('wheel', e => {
-  if(e.target && e.target.closest && e.target.closest('.xterm')){
-    e.stopPropagation();
-  }
-},{capture:true,passive:false});
 
 function fitAndResize(){
   fitAddon.fit();

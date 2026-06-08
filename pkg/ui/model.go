@@ -192,7 +192,9 @@ func StartWSTransport(addr, token string, m *Model) (*transport.WSTransport, err
 	wst.FocusedID = func() int { return m.s.manager.FocusedIndex() }
 
 	wst.OnResize = func(rm transport.ResizeMsg) {
-		m.s.manager.ResizeOne(rm.ID, rm.Cols, rm.Rows)
+		if m.s.program != nil {
+			m.s.program.Send(wsResizeMsg(rm))
+		}
 	}
 
 	wst.OnControl = func(cm transport.ControlMsg) {
@@ -218,6 +220,9 @@ type wsInputMsg []byte
 
 // wsControlMsg carries a session-management command from a browser client.
 type wsControlMsg transport.ControlMsg
+
+// wsResizeMsg carries a terminal resize report from a browser client.
+type wsResizeMsg transport.ResizeMsg
 
 // renderTickMsg is sent ~at renderInterval after an OutputMsg arrives so the
 // visible viewport gets refreshed once per frame rather than once per PTY
@@ -315,6 +320,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case wsResizeMsg:
+		// Last resizer wins: the surface actively viewing the session is
+		// authoritative. The other renderer simply shows whatever fits.
+		s.manager.ResizeOne(msg.ID, msg.Cols, msg.Rows)
+		return m, nil
+
 	case wsInputMsg:
 		if sess := s.manager.Focused(); sess != nil {
 			_, _ = sess.Write([]byte(msg))
@@ -392,13 +403,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// scrollback content and resume cheap rendering.
 						s.scrollbackMode[idx] = false
 						vp.SetContent(sess.Screen().Render())
-						vp.GotoBottom()
+						anchorViewportToCursor(vp, sess)
 					}
 				} else {
 					// Hot path: only the visible screen, bounded cols x rows
 					// of work per frame regardless of scrollback depth.
 					vp.SetContent(sess.Screen().Render())
-					vp.GotoBottom()
+					anchorViewportToCursor(vp, sess)
 				}
 				s.viewports[idx] = vp
 				break
@@ -591,8 +602,10 @@ func (m Model) cursor() *tea.Cursor {
 		line := len(sess.Screen().BufferLines()) - rows + cur.Y
 		y = 1 + line - vp.YOffset()
 	} else {
-		// Cheap path: viewport content is just the rows-line screen.
-		y = 1 + cur.Y
+		// Cheap path: viewport content is the full vt screen; map vt-Y
+		// through the viewport's current scroll offset so the on-screen
+		// cursor stays aligned when the vt grid is taller than the pane.
+		y = 1 + cur.Y - vp.YOffset()
 	}
 	if y < 1 || y > rows || cur.X < 0 || cur.X >= s.width {
 		return nil
@@ -1402,6 +1415,35 @@ func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int) st
 		out = append(out, strings.Repeat(" ", paneCols))
 	}
 	return strings.Join(out, "\n")
+}
+
+
+// anchorViewportToCursor scrolls vp so the vt cursor row is visible inside
+// the pane. This is necessary when the vt screen is taller than the pane —
+// e.g. when a browser xterm resized the PTY to more rows than the TUI shows.
+// We keep the cursor in the bottom-most region without ever putting it past
+// the visible area, which makes the shell prompt and its output visible
+// regardless of where in the vt grid the cursor currently sits.
+func anchorViewportToCursor(vp *viewport.Model, sess *session.Session) {
+	cur := sess.Screen().Cursor()
+	h := vp.Height()
+	if h <= 0 {
+		vp.GotoBottom()
+		return
+	}
+	desired := cur.Y - h + 1
+	if desired < 0 {
+		desired = 0
+	}
+	total := vp.TotalLineCount()
+	maxOff := total - h
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	if desired > maxOff {
+		desired = maxOff
+	}
+	vp.SetYOffset(desired)
 }
 
 // padLine truncates or right-pads an ANSI-styled line to exactly width cells.
