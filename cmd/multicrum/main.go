@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/urfave/cli/v3"
 	"multicrum/pkg/config"
+	"multicrum/pkg/localserver"
 	"multicrum/pkg/ssh_client"
 	"multicrum/pkg/ui"
 )
@@ -62,6 +64,12 @@ func main() {
 				Usage: "optional auth token for the WebSocket endpoint",
 			},
 			&cli.StringFlag{
+				Name:    "server",
+				Aliases: []string{"srv", "S"},
+				Value:   "default",
+				Usage:   "named local multicrum server to attach/create",
+			},
+			&cli.StringFlag{
 				Name:  "config",
 				Value: "multicrum.yaml",
 				Usage: "path to layout YAML file; loaded on startup if it exists, saved with Ctrl+Alt+P",
@@ -77,6 +85,16 @@ func main() {
 }
 
 func run(_ context.Context, c *cli.Command) error {
+	serverName := c.String("server")
+	if serverName == "" {
+		serverName = "default"
+	}
+	if socketPath, err := localserver.SocketPath(serverName); err == nil {
+		if attached, attachErr := localserver.TryAttach(socketPath, serverName, os.Stdin, os.Stdout); attached {
+			return attachErr
+		}
+	}
+
 	agentCmdLine := c.String("cmd")
 	agentCmd := ui.ParseCmdLine(agentCmdLine)
 	if len(agentCmd) == 0 {
@@ -109,6 +127,7 @@ func run(_ context.Context, c *cli.Command) error {
 
 	model := ui.NewModelWithSSH(agentCmd, cols, rows, sshClient)
 	model.SetAgentCmdLine(agentCmdLine)
+	model.SetServerName(serverName)
 
 	configPath := c.String("config")
 	model.SetConfigPath(configPath)
@@ -116,21 +135,38 @@ func run(_ context.Context, c *cli.Command) error {
 		cfg, err := config.Load(configPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-		} else if cfg != nil && len(cfg.Sessions) > 0 {
-			for _, entry := range cfg.Sessions {
-				if entry.CmdLine != "" {
-					model.AddInitialSessionLine(entry.Title, entry.CmdLine)
-				} else {
-					model.AddInitialSession(entry.Title, entry.Cmd)
-				}
-			}
+		} else if cfg != nil {
+			model.SetConfigConnections(cfg)
 		}
 	}
 
-	p := tea.NewProgram(
+	inputMux := ui.NewInputMux(os.Stdin)
+	model.SetInputMux(inputMux)
+	var p *tea.Program
+	socketPath, socketErr := localserver.SocketPath(serverName)
+	var owner *localserver.Owner
+	if socketErr == nil {
+		owner, _ = localserver.Listen(socketPath, serverName, inputMux, func(n int) {
+			if p != nil {
+				p.Send(ui.LocalClientCountMsg(n))
+			}
+		}, func(cols, rows int) {
+			if p != nil {
+				p.Send(tea.WindowSizeMsg{Width: cols, Height: rows})
+			}
+		})
+		defer owner.Close()
+	}
+	output := io.Writer(os.Stdout)
+	if owner != nil {
+		output = localserver.FanoutWriter{Primary: os.Stdout, Mirror: owner}
+	}
+
+	p = tea.NewProgram(
 		model,
 		tea.WithColorProfile(colorprofile.TrueColor),
-		tea.WithOutput(ui.NewKeyboardStripWriter(os.Stdout)),
+		tea.WithInput(inputMux),
+		tea.WithOutput(ui.NewKeyboardStripWriter(output)),
 	)
 	model.SetProgram(p)
 

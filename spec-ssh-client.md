@@ -20,7 +20,7 @@ multicrum --ssh user@host --ssh-use-default-keys
 multicrum --ssh user@host --cmd bash
 ```
 
-Implemented new-session behavior reuses the same SSH client object/options by default, and the `Ctrl+Alt+T` modal can also create a one-off typed local command or one-off remote SSH session with its own target, password/key, and optional remote command.
+Implemented new-session behavior reuses the same SSH client object/options by default, and the `Ctrl+Alt+T` modal can also create a one-off typed local command or one-off remote SSH session with its own target, port (default `22`), password/key, and optional remote command.
 
 ## Requirements
 

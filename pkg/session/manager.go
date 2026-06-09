@@ -56,6 +56,15 @@ func (m *SessionManager) SetSendOutput(fn func(OutputMsg)) {
 	}
 }
 
+func (m *SessionManager) SetSendExit(fn func(ExitMsg)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.SendExit = fn
+	for _, s := range m.sessions {
+		s.SendExit = fn
+	}
+}
+
 // New creates, starts, and appends a new session.
 func (m *SessionManager) New(cmd []string) (*Session, error) {
 	return m.NewWithSSH(cmd, m.sshClient)

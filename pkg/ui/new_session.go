@@ -15,6 +15,7 @@ type newSessionState struct {
 	field  newSessionField
 	local  string
 	target string
+	port   string
 	passwd string
 	key    string
 	cmd    string
@@ -23,6 +24,7 @@ type newSessionState struct {
 	// per-field rune cursor positions
 	localCur  int
 	targetCur int
+	portCur   int
 	passwdCur int
 	keyCur    int
 	cmdCur    int
@@ -31,24 +33,31 @@ type newSessionState struct {
 const (
 	newFieldLocal newSessionField = iota
 	newFieldTarget
+	newFieldPort
 	newFieldPasswd
 	newFieldKey
 	newFieldRemoteCmd
 )
 
 func (s *state) openNewSessionModal(defaultCmd []string) {
+	s.newSessionReturn = modeNormal
+	s.openNewSessionModalWithReturn(defaultCmd, modeNormal)
+}
+
+func (s *state) openNewSessionModalWithReturn(defaultCmd []string, returnMode mode) {
 	local := strings.Join(defaultCmd, " ")
 	cfg := ssh_client.ResolvedConfig{}
 	if s.sshClient != nil {
 		cfg = s.sshClient.Config()
 	}
 	target := ""
+	port := "22"
 	remoteCmd := ""
 	key := ""
 	if cfg.Host != "" {
 		target = cfg.User + "@" + cfg.Host
-		if cfg.Port != "" && cfg.Port != "22" {
-			target += ":" + cfg.Port
+		if cfg.Port != "" {
+			port = cfg.Port
 		}
 		remoteCmd = strings.Join(cfg.Command, " ")
 		if len(cfg.IdentityFiles) > 0 {
@@ -60,14 +69,17 @@ func (s *state) openNewSessionModal(defaultCmd []string) {
 		field:  newFieldLocal,
 		local:  local,
 		target: target,
+		port:   port,
 		key:    key,
 		cmd:    remoteCmd,
 
 		localCur:  len([]rune(local)),
 		targetCur: len([]rune(target)),
+		portCur:   len([]rune(port)),
 		keyCur:    len([]rune(key)),
 		cmdCur:    len([]rune(remoteCmd)),
 	}
+	s.newSessionReturn = returnMode
 	s.mode = modeNewSession
 }
 
@@ -90,7 +102,7 @@ func (s *state) handleNewSessionKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 	}
 	switch key.Code {
 	case tea.KeyEscape:
-		s.mode = modeNormal
+		s.mode = s.newSessionReturn
 		return nil
 	case tea.KeyEnter:
 		return s.resolveNewSession(m)
@@ -141,7 +153,7 @@ func (s *state) handleNewSessionKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (s *state) advanceNewSessionField(reverse bool) {
-	fields := []newSessionField{newFieldLocal, newFieldTarget, newFieldPasswd, newFieldKey, newFieldRemoteCmd}
+	fields := []newSessionField{newFieldLocal, newFieldTarget, newFieldPort, newFieldPasswd, newFieldKey, newFieldRemoteCmd}
 	idx := 0
 	for i, f := range fields {
 		if f == s.newSession.field {
@@ -171,6 +183,9 @@ func (s *state) appendNewSessionField(text string) {
 	case newFieldTarget:
 		ns.target, ns.targetCur = insertAt(ns.target, ns.targetCur, text)
 		ns.choice = 2
+	case newFieldPort:
+		ns.port, ns.portCur = insertAt(ns.port, ns.portCur, text)
+		ns.choice = 2
 	case newFieldPasswd:
 		ns.passwd, ns.passwdCur = insertAt(ns.passwd, ns.passwdCur, text)
 		ns.choice = 2
@@ -190,6 +205,8 @@ func (s *state) backspaceNewSessionField() {
 		ns.local, ns.localCur = backspaceAt(ns.local, ns.localCur)
 	case newFieldTarget:
 		ns.target, ns.targetCur = backspaceAt(ns.target, ns.targetCur)
+	case newFieldPort:
+		ns.port, ns.portCur = backspaceAt(ns.port, ns.portCur)
 	case newFieldPasswd:
 		ns.passwd, ns.passwdCur = backspaceAt(ns.passwd, ns.passwdCur)
 	case newFieldKey:
@@ -206,6 +223,8 @@ func (s *state) deleteNewSessionField() {
 		ns.local, ns.localCur = deleteAt(ns.local, ns.localCur)
 	case newFieldTarget:
 		ns.target, ns.targetCur = deleteAt(ns.target, ns.targetCur)
+	case newFieldPort:
+		ns.port, ns.portCur = deleteAt(ns.port, ns.portCur)
 	case newFieldPasswd:
 		ns.passwd, ns.passwdCur = deleteAt(ns.passwd, ns.passwdCur)
 	case newFieldKey:
@@ -224,6 +243,9 @@ func (s *state) clearNewSessionField() {
 	case newFieldTarget:
 		ns.target = ""
 		ns.targetCur = 0
+	case newFieldPort:
+		ns.port = ""
+		ns.portCur = 0
 	case newFieldPasswd:
 		ns.passwd = ""
 		ns.passwdCur = 0
@@ -244,6 +266,8 @@ func (s *state) moveNewSessionCursor(delta int) {
 		ns.localCur = clampCursor(ns.local, ns.localCur+delta)
 	case newFieldTarget:
 		ns.targetCur = clampCursor(ns.target, ns.targetCur+delta)
+	case newFieldPort:
+		ns.portCur = clampCursor(ns.port, ns.portCur+delta)
 	case newFieldPasswd:
 		ns.passwdCur = clampCursor(ns.passwd, ns.passwdCur+delta)
 	case newFieldKey:
@@ -270,6 +294,12 @@ func (s *state) setNewSessionCursor(pos int) {
 		} else {
 			ns.targetCur = clampCursor(ns.target, pos)
 		}
+	case newFieldPort:
+		if pos < 0 {
+			ns.portCur = end(ns.port)
+		} else {
+			ns.portCur = clampCursor(ns.port, pos)
+		}
 	case newFieldPasswd:
 		if pos < 0 {
 			ns.passwdCur = end(ns.passwd)
@@ -293,7 +323,8 @@ func (s *state) setNewSessionCursor(pos int) {
 
 func (s *state) resolveNewSession(m Model) tea.Cmd {
 	ns := s.newSession
-	s.mode = modeNormal
+	returnMode := s.newSessionReturn
+	s.mode = returnMode
 	s.newSession = newSessionState{}
 	var err error
 	var sess *session.Session
@@ -319,6 +350,7 @@ func (s *state) resolveNewSession(m Model) tea.Cmd {
 		cmd := parseCmdLine(line)
 		client, cfgErr := ssh_client.New(ssh_client.Options{
 			Target:                strings.TrimSpace(ns.target),
+			Port:                  strings.TrimSpace(ns.port),
 			IdentityFile:          strings.TrimSpace(ns.key),
 			Password:              ns.passwd,
 			UseDefaultKeys:        strings.TrimSpace(ns.key) == "" && ns.passwd == "",
@@ -339,11 +371,15 @@ func (s *state) resolveNewSession(m Model) tea.Cmd {
 		ns.err = err.Error()
 		s.mode = modeNewSession
 		s.newSession = ns
+		s.newSessionReturn = returnMode
 		return nil
 	}
 	s.errMsg = ""
 	s.resetViewport(s.manager.FocusedIndex(), s.width, s.height)
 	s.notifyMeta()
+	if returnMode == modeSelecting {
+		s.selectCursor = s.filteredSessionCursorForIndex(s.manager.FocusedIndex())
+	}
 	return nil
 }
 
@@ -375,6 +411,7 @@ func (m Model) renderNewSessionModal() string {
 		field(newFieldLocal, "Local cmd:  ", ns.local, ns.localCur, false),
 		"",
 		field(newFieldTarget, "SSH target: ", ns.target, ns.targetCur, false),
+		field(newFieldPort, "SSH port:   ", ns.port, ns.portCur, false),
 		field(newFieldPasswd, "Password:   ", ns.passwd, ns.passwdCur, true),
 		field(newFieldKey, "Key file:   ", ns.key, ns.keyCur, false),
 		field(newFieldRemoteCmd, "Remote cmd: ", ns.cmd, ns.cmdCur, false),

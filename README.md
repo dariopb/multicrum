@@ -14,27 +14,25 @@ The child program or remote shell is treated as a black-box terminal: the app fo
 
 ## Features
 
-- Multiple tabs / sessions.
+- Long-running named local servers; later `multicrum` processes attach to the same server over a Unix socket.
+- Multiple connections/workspaces per server, each with its own tabs / sessions.
 - Local commands via PTY on Unix and ConPTY on Windows.
-- SSH sessions with `user@host[:port]`, password, explicit key, SSH agent, `~/.ssh/config`, and known-host verification.
+- SSH sessions with `user@host[:port]`, explicit port, password, explicit key, SSH agent, `~/.ssh/config`, and known-host verification.
 - `Ctrl+Alt+T` new-session modal:
   - default: same current/default session behavior,
   - typed local command,
-  - one-off remote SSH session with target/password/key/remote command.
+  - one-off remote SSH session with target/port/password/key/remote command.
 - Session rename, kill, respawn/remove on exit, and filtered session picker.
+- Layout save/load for local sessions and SSH sessions, including remote commands.
 - Optional xterm.js browser UI over WebSocket.
 - Mouse selection/copy mode that preserves soft-wrapped logical lines.
 
 ## Build
 
-```bash
-go build ./...
-```
-
-Build the runnable binary:
+Go is expected to be available in `PATH`.
 
 ```bash
-go build -o multicrum ./cmd/multicrum
+go build -v ./cmd/multicrum/
 ```
 
 Run tests:
@@ -45,10 +43,17 @@ go test ./...
 
 ## Run as an app
 
-Local shell:
+Local shell on the default named server:
 
 ```bash
 ./multicrum --cmd bash
+```
+
+Attach to or create a separate named server:
+
+```bash
+./multicrum --server work --cmd bash
+./multicrum --server work
 ```
 
 Local command:
@@ -104,6 +109,7 @@ http://localhost:9999/?token=mytoken
 | Flag | Purpose |
 |---|---|
 | `--cmd` | Local command, or remote command when `--ssh` is set. Default: `bash`. |
+| `--server`, `--srv`, `-S` | Named local long-running server to attach/create. Default: `default`. |
 | `--ssh` | SSH target: `host`, `user@host`, `host:port`, `user@host:port`. |
 | `-i`, `--ssh-key` | Explicit identity file. Overrides config/default identities. |
 | `--ssh-passwd` | Explicit password / keyboard-interactive password. Overrides config/default identities. |
@@ -121,12 +127,16 @@ http://localhost:9999/?token=mytoken
 | `Alt+`` | Show / close help. |
 | `Ctrl+Alt+T` | Open new-session modal. |
 | `Ctrl+Alt+W` | Kill focused session, except final session. |
-| `Ctrl+Alt+R` | Rename focused session. |
-| `Ctrl+Alt+S` | Open session selector. |
-| `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Switch sessions. |
-| `Alt+1..9` | Jump to session N. |
+| `Ctrl+Alt+R` | Open the sessions dialog on the active session; press `R` to rename. |
+| `Ctrl+Alt+S` | Open sessions dialog (focus, create, rename, move/reorder, filter, remove). |
+| `Ctrl+Alt+O` | Open connections modal (focus, create, rename, move/reorder, filter, remove). |
+| `Ctrl+Alt+E` | Open the connections modal on the active connection; press `R` to rename. |
+| `Ctrl+Alt+C` | Quick-create a new connection/workspace. |
+| `Ctrl+Alt+[` / `Ctrl+Alt+]` | Switch connections/workspaces. |
+| `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Switch sessions inside the active connection. |
+| `Alt+1..9` | Jump to session N in the active connection. |
 | `Ctrl+Alt+M` | Toggle mouse mode: selection/copy vs app forwarding. |
-| `Ctrl+Alt+Q` | Quit. |
+| `Ctrl+Alt+Q` | Quit the owner TUI/server; in an attached client, detach that client. |
 
 In SSH sessions, OpenSSH-style escapes are supported at line start:
 
@@ -175,7 +185,7 @@ Example control message shape:
 
 ```json
 {"action":"new-local","cmd":["bash"]}
-{"action":"new-ssh","target":"user@example.com","password":"secret","cmd":["bash","-l"]}
+{"action":"new-ssh","target":"user@example.com","port":"22","password":"secret","cmd":["bash","-l"]}
 ```
 
 Single `urfave/cli` app with parent and `--child` modes:
@@ -199,6 +209,7 @@ type ControlMsg struct {
     Action   string   `json:"action"`
     Cmd      []string `json:"cmd,omitempty"`
     Target   string   `json:"target,omitempty"`
+    Port     string   `json:"port,omitempty"`
     Password string   `json:"password,omitempty"`
     KeyFile  string   `json:"keyFile,omitempty"`
 }
@@ -309,6 +320,7 @@ func serveControl(listener net.Listener, manager *session.SessionManager) {
             case "new-ssh":
                 sshClient, err := ssh_client.New(ssh_client.Options{
                     Target:       msg.Target,
+                    Port:         msg.Port,
                     Password:     msg.Password,
                     IdentityFile: msg.KeyFile,
                     Command:      msg.Cmd,
@@ -338,6 +350,7 @@ func requestNewSSHSession(sockPath string) {
     _ = json.NewEncoder(conn).Encode(ControlMsg{
         Action: "new-ssh",
         Target: "user@example.com",
+        Port:   "22",
         Cmd:    []string{"bash", "-l"},
     })
 }
@@ -349,7 +362,8 @@ If you do not need the multiplexer manager, use `ssh_client.Client` directly:
 
 ```go
 client, err := ssh_client.New(ssh_client.Options{
-    Target:         "user@example.com:22",
+    Target:         "user@example.com",
+    Port:           "22",
     Password:       "secret",
     UseAgent:       false,
     UseDefaultKeys: false,

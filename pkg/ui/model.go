@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
+	"multicrum/pkg/config"
 	"multicrum/pkg/session"
 	"multicrum/pkg/ssh_client"
 	"multicrum/pkg/transport"
@@ -30,37 +31,71 @@ const (
 	modeHelp
 	modeExitPrompt
 	modeNewSession
+	modeConnections
+	modeQuitConfirm
+	modeDeleteConfirm
 )
 
+type connectionState struct {
+	name           string
+	manager        *session.SessionManager
+	viewports      map[int]*viewport.Model
+	altScreens     map[int]bool
+	scrollbackMode map[int]bool
+	initialCfg     []startupSession
+}
+
 type state struct {
-	manager      *session.SessionManager
-	viewports    map[int]*viewport.Model
-	altScreens   map[int]bool // last-seen alt-screen state per session index, for transition detection
-	program      *tea.Program
-	width        int
-	height       int
-	errMsg       string
-	mode         mode
-	renameText   string
-	renameCursor int
-	selectFilter string
+	manager            *session.SessionManager
+	viewports          map[int]*viewport.Model
+	altScreens         map[int]bool // last-seen alt-screen state per session index, for transition detection
+	connections        []*connectionState
+	activeConn         int
+	serverName         string
+	localClients       int
+	inputMux           *InputMux
+	program            *tea.Program
+	width              int
+	height             int
+	errMsg             string
+	mode               mode
+	renameText         string
+	renameCursor       int
+	selectFilter       string
 	selectFilterCursor int
-	selectCursor int
-	selectScroll int // first visible row index when sessions overflow modal height
-	selectMoving bool // when true, Up/Down reorders the selected session instead of moving cursor
-	selectMoveStart int // original session index of the moving entry, so Esc can revert
-	exitPromptID int                // session index waiting for user decision (in exit prompt)
-	exitChoice   int                // 0 = respawn, 1 = remove
-	newSession   newSessionState    // state for the new-session modal
-	mouseCapture bool               // when true, mouse events are forwarded to the child PTY (app-mode)
-	sel          selection          // in-progress / completed mouse selection over the focused buffer
-	sshClient    *ssh_client.Client // non-nil starts SSH-backed sessions
-	onMetaChange func()             // called when sessions are added/removed/focused
-	configPath   string             // path used by save/load layout shortcut
-	initialCfg   []startupSession   // sessions to spawn on Init (instead of agentCmd)
-	statusMsg    string             // transient status line (e.g. config save result)
-	renderPending bool              // a render tick is in flight (coalescing PTY bursts)
-	scrollbackMode map[int]bool     // sessions currently scrolled up (need full scrollback in viewport)
+	selectCursor       int
+	selectScroll       int  // first visible row index when sessions overflow modal height
+	selectMoving       bool // when true, Up/Down reorders the selected session instead of moving cursor
+	selectMoveStart    int  // original session index of the moving entry, so Esc can revert
+	selectRenaming     bool
+	selectFiltering    bool
+	exitPromptID       int // session index waiting for user decision (in exit prompt)
+	exitChoice         int // 0 = respawn, 1 = remove
+	deleteKind         string
+	deleteIndex        int
+	deleteName         string
+	deleteReturn       mode
+	deleteChoice       int
+	newSession         newSessionState // state for the new-session modal
+	newSessionReturn   mode
+	connCursor         int
+	connRename         string
+	connRenameCursor   int
+	connRenaming       bool
+	connFilter         string
+	connFilterCursor   int
+	connFiltering      bool
+	connMoving         bool
+	mouseCapture       bool               // when true, mouse events are forwarded to the child PTY (app-mode)
+	sel                selection          // in-progress / completed mouse selection over the focused buffer
+	sshClient          *ssh_client.Client // non-nil starts SSH-backed sessions
+	onMetaChange       func()             // called when sessions are added/removed/focused
+	wsTransport        *transport.WSTransport
+	configPath         string           // path used by save/load layout shortcut
+	initialCfg         []startupSession // sessions to spawn on Init (instead of agentCmd)
+	statusMsg          string           // transient status line (e.g. config save result)
+	renderPending      bool             // a render tick is in flight (coalescing PTY bursts)
+	scrollbackMode     map[int]bool     // sessions currently scrolled up (need full scrollback in viewport)
 }
 
 // startupSession is a session entry queued for startup, with its title and
@@ -71,6 +106,12 @@ type startupSession struct {
 	Title   string
 	Cmd     []string
 	CmdLine string
+	SSH     *config.SSHEntry
+}
+
+type startupConnection struct {
+	Name     string
+	Sessions []startupSession
 }
 
 // Model is the top-level Bubble Tea model.
@@ -89,23 +130,40 @@ func NewModel(agentCmd []string, cols, rows int) *Model {
 // NewModelWithSSH constructs a model that starts SSH-backed sessions when
 // sshClient is non-nil.
 func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Client) *Model {
-	return &Model{
-		agentCmd: agentCmd,
-		s: &state{
-			viewports:  make(map[int]*viewport.Model),
-			altScreens: make(map[int]bool),
-			scrollbackMode: make(map[int]bool),
-			width:     cols,
-			height:    rows,
-			sshClient: sshClient,
-		},
+	conn := &connectionState{
+		name:           "default",
+		viewports:      make(map[int]*viewport.Model),
+		altScreens:     make(map[int]bool),
+		scrollbackMode: make(map[int]bool),
 	}
+	st := &state{
+		viewports:      conn.viewports,
+		altScreens:     conn.altScreens,
+		scrollbackMode: conn.scrollbackMode,
+		connections:    []*connectionState{conn},
+		serverName:     "default",
+		width:          cols,
+		height:         rows,
+		sshClient:      sshClient,
+	}
+	return &Model{agentCmd: agentCmd, s: st}
 }
 
 // SetAgentCmdLine records the original shell line for the default
 // agentCmd. Used so the layout-save shortcut round-trips the original
 // string instead of the "bash -c <line>" expansion.
 func (m *Model) SetAgentCmdLine(line string) { m.agentCmdLine = line }
+
+func (m *Model) SetServerName(name string) {
+	if name == "" {
+		name = "default"
+	}
+	m.s.serverName = name
+}
+
+func (m *Model) SetInputMux(input *InputMux) { m.s.inputMux = input }
+
+func (m *Model) SetLocalClientCount(n int) { m.s.localClients = n }
 
 // SetConfigPath records the path the layout-save shortcut writes to.
 // Empty means "no config path", and the save shortcut becomes a no-op
@@ -144,10 +202,8 @@ func (m *Model) AddInitialSessionLine(title, line string) {
 // event loop. Must be called before p.Run().
 func (m *Model) SetProgram(p *tea.Program) {
 	m.s.program = p
-	sendOutput := func(msg session.OutputMsg) { p.Send(msg) }
-	sendExit := func(msg session.ExitMsg) { p.Send(msg) }
 	cols, rows := paneSize(m.s.width, m.s.height)
-	m.s.manager = session.NewManagerWithSSH(cols, rows, sendOutput, sendExit, m.s.sshClient)
+	m.s.initManagers(cols, rows)
 }
 
 // StartWSTransport starts the WebSocket transport wired to the session manager.
@@ -190,6 +246,23 @@ func StartWSTransport(addr, token string, m *Model) (*transport.WSTransport, err
 	}
 
 	wst.FocusedID = func() int { return m.s.manager.FocusedIndex() }
+	wst.Server = func() string { return m.s.serverName }
+	wst.ActiveConnection = func() string { return m.s.activeConnection().name }
+	wst.Connections = func() []transport.ConnectionInfo {
+		out := make([]transport.ConnectionInfo, 0, len(m.s.connections))
+		for _, conn := range m.s.connections {
+			info := transport.ConnectionInfo{ID: conn.name, Name: conn.name}
+			if conn.manager != nil {
+				info.FocusedID = conn.manager.FocusedIndex()
+				info.SessionCount = conn.manager.Len()
+				for _, sess := range conn.manager.Sessions() {
+					info.Sessions = append(info.Sessions, transport.SessionInfo{ID: sess.Index(), Title: sess.Title(), Exited: sess.Exited()})
+				}
+			}
+			out = append(out, info)
+		}
+		return out
+	}
 
 	wst.OnResize = func(rm transport.ResizeMsg) {
 		if m.s.program != nil {
@@ -203,13 +276,8 @@ func StartWSTransport(addr, token string, m *Model) (*transport.WSTransport, err
 		}
 	}
 
-	// Also broadcast PTY output to watching browser clients.
-	origSend := m.s.manager.SendOutputFn()
-	m.s.manager.SetSendOutput(func(msg session.OutputMsg) {
-		origSend(msg)
-		wst.SendPTY(msg.Index, msg.Data)
-	})
-
+	m.s.wsTransport = wst
+	m.s.rebindConnectionCallbacks()
 	m.s.onMetaChange = wst.BroadcastMeta
 
 	return wst, nil
@@ -223,6 +291,20 @@ type wsControlMsg transport.ControlMsg
 
 // wsResizeMsg carries a terminal resize report from a browser client.
 type wsResizeMsg transport.ResizeMsg
+
+type connectionOutputMsg struct {
+	Conn int
+	Msg  session.OutputMsg
+}
+
+type connectionExitMsg struct {
+	Conn int
+	Msg  session.ExitMsg
+}
+
+type LocalClientCountMsg int
+
+type localClientCountMsg = LocalClientCountMsg
 
 // renderTickMsg is sent ~at renderInterval after an OutputMsg arrives so the
 // visible viewport gets refreshed once per frame rather than once per PTY
@@ -258,16 +340,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case startFirstSessionMsg:
-		if len(s.initialCfg) > 0 {
-			var failed []string
-			for _, entry := range s.initialCfg {
+		var failed []string
+		for _, conn := range s.connections {
+			if conn.manager == nil {
+				continue
+			}
+			entries := conn.initialCfg
+			if len(entries) == 0 {
+				entries = []startupSession{{Cmd: m.agentCmd, CmdLine: m.agentCmdLine}}
+			}
+			for _, entry := range entries {
 				cmd := entry.Cmd
-				if len(cmd) == 0 {
+				if entry.CmdLine != "" {
+					cmd = ParseCmdLine(entry.CmdLine)
+				}
+				if len(cmd) == 0 && entry.SSH == nil {
 					cmd = m.agentCmd
 				}
-				sess, err := s.manager.New(cmd)
+				var sess *session.Session
+				var err error
+				if entry.SSH != nil {
+					client, err := sshClientFromConfig(entry.SSH, cmd)
+					if err != nil {
+						failed = append(failed, fmt.Sprintf("%s: %v", conn.name, err))
+						continue
+					}
+					sess, err = conn.manager.NewWithSSH(cmd, client)
+				} else {
+					sess, err = conn.manager.New(cmd)
+				}
 				if err != nil {
-					failed = append(failed, fmt.Sprintf("%v", err))
+					failed = append(failed, fmt.Sprintf("%s: %v", conn.name, err))
 					continue
 				}
 				if entry.Title != "" {
@@ -277,36 +380,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					sess.SetCmdLine(entry.CmdLine)
 				}
 			}
-			if len(failed) > 0 {
-				s.errMsg = "ERROR starting some sessions: " + strings.Join(failed, "; ")
-			} else {
-				s.errMsg = ""
-			}
-			if s.manager.Len() == 0 {
-				// Fall back to default session so the UI is never empty.
-				sess, err := s.manager.New(m.agentCmd)
+			if conn.manager.Len() == 0 {
+				sess, err := conn.manager.New(m.agentCmd)
 				if err != nil {
-					s.errMsg = fmt.Sprintf("ERROR starting session: %v", err)
-					return m, nil
+					failed = append(failed, fmt.Sprintf("%s: %v", conn.name, err))
+					continue
 				}
 				if m.agentCmdLine != "" {
 					sess.SetCmdLine(m.agentCmdLine)
 				}
 			}
+		}
+		s.syncActiveConnectionFields()
+		if len(failed) > 0 {
+			s.errMsg = "ERROR starting some sessions: " + strings.Join(failed, "; ")
 		} else {
-			sess, err := s.manager.New(m.agentCmd)
-			if err != nil {
-				s.errMsg = fmt.Sprintf("ERROR starting session: %v", err)
-				return m, nil
-			}
-			if m.agentCmdLine != "" {
-				sess.SetCmdLine(m.agentCmdLine)
-			}
 			s.errMsg = ""
 		}
 		s.ensureViewport(s.manager.FocusedIndex(), s.width, s.height)
 		s.notifyMeta()
 		return m, nil
+
+	case localClientCountMsg:
+		s.localClients = int(msg)
+		return m, tea.ClearScreen
 
 	case tea.WindowSizeMsg:
 		s.width = msg.Width
@@ -354,6 +451,68 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.manager.Move(msg.ID, msg.To)
 			s.refreshFocused()
 			s.notifyMeta()
+		case "prevConnection":
+			s.focusConnection(s.activeConn - 1)
+		case "nextConnection":
+			s.focusConnection(s.activeConn + 1)
+		case "focusConnection":
+			name := msg.Connection
+			if name == "" {
+				name = msg.Title
+			}
+			if name != "" {
+				s.focusConnectionByName(name)
+			}
+		case "moveConnection":
+			target := strings.TrimSpace(msg.Connection)
+			for i, c := range s.connections {
+				if c.name == target {
+					s.moveConnection(i, msg.To)
+					break
+				}
+			}
+		case "newConnection":
+			name := strings.TrimSpace(msg.Connection)
+			if name == "" {
+				name = strings.TrimSpace(msg.Title)
+			}
+			if name == "" {
+				name = fmt.Sprintf("conn-%d", len(s.connections)+1)
+			}
+			conn := s.createConnectionWithDefaultSession(name, m)
+			for i, c := range s.connections {
+				if c == conn {
+					s.focusConnection(i)
+					break
+				}
+			}
+		case "renameConnection":
+			target := strings.TrimSpace(msg.Connection)
+			newName := strings.TrimSpace(msg.Title)
+			if newName != "" {
+				if target == "" {
+					s.renameConnection(s.activeConn, newName)
+				} else {
+					for i, c := range s.connections {
+						if c.name == target {
+							s.renameConnection(i, newName)
+							break
+						}
+					}
+				}
+			}
+		case "removeConnection":
+			target := strings.TrimSpace(msg.Connection)
+			if target == "" {
+				s.removeConnection(s.activeConn)
+			} else {
+				for i, c := range s.connections {
+					if c.name == target {
+						s.removeConnection(i)
+						break
+					}
+				}
+			}
 		case "save":
 			s.saveLayout()
 			s.notifyMeta()
@@ -362,12 +521,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case connectionOutputMsg:
+		if msg.Conn != s.activeConn {
+			return m, nil
+		}
+		if msg.Msg.Index != s.manager.FocusedIndex() {
+			return m, nil
+		}
+		s.ensureViewport(msg.Msg.Index, s.width, s.height)
+		if s.renderPending {
+			return m, nil
+		}
+		s.renderPending = true
+		return m, tea.Tick(renderInterval, func(time.Time) tea.Msg { return renderTickMsg{} })
+
 	case OutputMsg:
-		// Only the focused session has a visible viewport, so non-focused
-		// sessions don't need a re-render here — their VT state has already
-		// been updated by Session.readLoop. Avoiding a full
-		// RenderWithScrollback + SetContent per chunk for background tabs
-		// keeps the message loop responsive when a background TUI is busy.
 		if msg.Index != s.manager.FocusedIndex() {
 			return m, nil
 		}
@@ -415,6 +583,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
+		return m, nil
+
+	case connectionExitMsg:
+		if msg.Conn != s.activeConn {
+			s.notifyMeta()
+			return m, nil
+		}
+		if s.mode == modeNormal && msg.Msg.Index == s.manager.FocusedIndex() {
+			s.mode = modeExitPrompt
+			s.exitPromptID = msg.Msg.Index
+			s.exitChoice = 0
+		}
+		s.notifyMeta()
 		return m, nil
 
 	case ExitMsg:
@@ -522,6 +703,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if handled, cmd := s.handleGlobalShortcut(msg); handled {
+			return m, cmd
+		}
 		if s.mode == modeHelp {
 			s.handleHelpKey(msg)
 			return m, nil
@@ -531,8 +715,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if s.mode == modeSelecting {
-			s.handleSelectKey(msg)
-			return m, nil
+			cmd := s.handleSelectKey(m, msg)
+			return m, cmd
 		}
 		if s.mode == modeExitPrompt {
 			cmd := s.handleExitPromptKey(m, msg)
@@ -540,6 +724,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.mode == modeNewSession {
 			cmd := s.handleNewSessionKey(m, msg)
+			return m, cmd
+		}
+		if s.mode == modeConnections {
+			cmd := s.handleConnectionsKey(m, msg)
+			return m, cmd
+		}
+		if s.mode == modeQuitConfirm {
+			cmd := s.handleQuitConfirmKey(msg)
+			return m, cmd
+		}
+		if s.mode == modeDeleteConfirm {
+			cmd := s.handleDeleteConfirmKey(msg)
 			return m, cmd
 		}
 		if handled, cmd := s.handleShortcut(m, msg); handled {
@@ -787,6 +983,9 @@ const (
 	shortcutRename       = "ctrl+alt+r"
 	shortcutSessions     = "ctrl+alt+s"
 	shortcutSaveLayout   = "ctrl+alt+p"
+	shortcutConnections  = "ctrl+alt+o"
+	shortcutRenameConn   = "ctrl+alt+e"
+	shortcutNewConn      = "ctrl+alt+c"
 	shortcutPrev         = "ctrl+alt+left"
 	shortcutNext         = "ctrl+alt+right"
 	shortcutScrollUp     = "ctrl+alt+up"
@@ -798,6 +997,59 @@ const (
 	shortcutMouse        = "alt+enter" // Ctrl+Alt+M; terminals encode Ctrl+M as Enter
 	shortcutQuit         = "ctrl+alt+q"
 )
+
+func (s *state) handleGlobalShortcut(msg tea.KeyPressMsg) (bool, tea.Cmd) {
+	k := msg.Key()
+	if k.Mod.Contains(tea.ModCtrl|tea.ModAlt) && (k.Code == '<' || k.Code == ',' || k.Code == '[') {
+		s.mode = modeNormal
+		s.focusConnection(s.activeConn - 1)
+		return true, nil
+	}
+	if k.Mod.Contains(tea.ModCtrl|tea.ModAlt) && (k.Code == '>' || k.Code == '.' || k.Code == ']') {
+		s.mode = modeNormal
+		s.focusConnection(s.activeConn + 1)
+		return true, nil
+	}
+	key := msg.Keystroke()
+	if key == "alt+esc" || key == "ctrl+alt+[" || key == "alt+ctrl+[" {
+		s.mode = modeNormal
+		s.focusConnection(s.activeConn - 1)
+		return true, nil
+	}
+	if key == "ctrl+alt+]" || key == "alt+ctrl+]" || key == "alt+ctrl+}" || key == "ctrl+alt+}" {
+		s.mode = modeNormal
+		s.focusConnection(s.activeConn + 1)
+		return true, nil
+	}
+	if key == shortcutNew {
+		s.openNewSessionModal(nil)
+		return true, nil
+	}
+	if key == shortcutNext {
+		if s.manager != nil && s.manager.Len() > 0 {
+			s.mode = modeNormal
+			s.manager.Focus((s.manager.FocusedIndex() + 1) % s.manager.Len())
+			s.refreshFocused()
+			s.notifyMeta()
+		}
+		return true, nil
+	}
+	if key == shortcutPrev {
+		if s.manager != nil && s.manager.Len() > 0 {
+			s.mode = modeNormal
+			s.manager.Focus((s.manager.FocusedIndex() - 1 + s.manager.Len()) % s.manager.Len())
+			s.refreshFocused()
+			s.notifyMeta()
+		}
+		return true, nil
+	}
+	if key == shortcutQuit {
+		s.mode = modeQuitConfirm
+		s.exitChoice = 0
+		return true, nil
+	}
+	return false, nil
+}
 
 func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	key := msg.Keystroke()
@@ -818,22 +1070,22 @@ func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		}
 		return true, nil
 	case shortcutRename:
-		s.mode = modeRenaming
-		if sess := s.manager.Focused(); sess != nil {
-			s.renameText = sess.Title()
-		}
-		s.renameCursor = len([]rune(s.renameText))
+		s.openSessionSelector()
 		return true, nil
 	case shortcutSessions:
-		s.mode = modeSelecting
-		s.selectFilter = ""
-		s.selectFilterCursor = 0
-		s.selectCursor = s.manager.FocusedIndex()
-		s.selectScroll = 0
-		s.selectMoving = false
+		s.openSessionSelector()
 		return true, nil
 	case shortcutSaveLayout:
 		s.saveLayout()
+		return true, nil
+	case shortcutConnections:
+		s.openConnectionsModal()
+		return true, nil
+	case shortcutRenameConn:
+		s.openConnectionsModal()
+		return true, nil
+	case shortcutNewConn:
+		s.quickAddConnection(m)
 		return true, nil
 	case shortcutScrollUp:
 		s.scrollFocused(-1)
@@ -870,11 +1122,6 @@ func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		s.refreshFocused()
 		s.notifyMeta()
 		return true, nil
-	case shortcutQuit:
-		for _, sess := range s.manager.Sessions() {
-			_ = sess.Close()
-		}
-		return true, tea.Quit
 	}
 	// Ctrl+Alt+<digit> (or the more portable Alt+<digit>): jump to session.
 	if n, ok := digitShortcut(key); ok {
@@ -920,9 +1167,6 @@ func (s *state) handleExitPromptKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 	case tea.KeyEnter:
 		return s.resolveExitPrompt(m)
 	case tea.KeyEscape:
-		// Esc keeps the tab around (effectively "remove later"); close the
-		// modal but leave the exited state.
-		s.mode = modeNormal
 		return nil
 	}
 	switch msg.String() {
@@ -934,8 +1178,6 @@ func (s *state) handleExitPromptKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 		return s.resolveExitPrompt(m)
 	case "y", "Y":
 		return s.resolveExitPrompt(m)
-	case "n", "N", "q", "Q":
-		s.mode = modeNormal
 	}
 	return nil
 }
@@ -953,12 +1195,18 @@ func (s *state) resolveExitPrompt(m Model) tea.Cmd {
 		s.notifyMeta()
 		return nil
 	}
-	// Remove: if this is the last session, quit the program entirely.
 	if s.manager.Len() <= 1 {
-		for _, sess := range s.manager.Sessions() {
-			_ = sess.Close()
+		name := "session"
+		if sess := s.manager.ByID(id); sess != nil {
+			name = sess.Title()
 		}
-		return tea.Quit
+		s.deleteKind = "lastSession"
+		s.deleteIndex = id
+		s.deleteName = name
+		s.deleteReturn = modeExitPrompt
+		s.deleteChoice = 1
+		s.mode = modeDeleteConfirm
+		return nil
 	}
 	delete(s.viewports, id)
 	s.manager.Kill(id)
@@ -1020,64 +1268,172 @@ func (s *state) handleRenameKey(msg tea.KeyPressMsg) {
 	}
 }
 
-func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
+func (s *state) openSessionSelector() {
+	s.mode = modeSelecting
+	s.selectFilter = ""
+	s.selectFilterCursor = 0
+	s.selectCursor = s.manager.FocusedIndex()
+	s.selectScroll = 0
+	s.selectMoving = false
+	s.selectRenaming = false
+	s.selectFiltering = false
+}
+
+func (s *state) handleSelectKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
+	if s.selectRenaming {
+		s.handleSessionRenameInSelector(msg)
+		return nil
+	}
+	if s.selectFiltering {
+		s.handleSessionFilterInSelector(msg)
+		return nil
+	}
 	matches := s.filteredSessions()
 	key := msg.Key()
+	switch key.Code {
+	case tea.KeyEscape:
+		if s.selectMoving {
+			s.selectMoving = false
+			return nil
+		}
+		s.mode = modeNormal
+		s.selectCursor = 0
+		return nil
+	case tea.KeyEnter:
+		if len(matches) > 0 {
+			if s.selectCursor >= len(matches) {
+				s.selectCursor = len(matches) - 1
+			}
+			s.manager.Focus(matches[s.selectCursor].Index())
+			s.refreshFocused()
+			s.notifyMeta()
+		}
+		s.mode = modeNormal
+		s.selectCursor = 0
+		return nil
+	case tea.KeyUp:
+		if s.selectMoving {
+			s.moveSessionInSelector(-1)
+			return nil
+		}
+		if len(matches) > 0 {
+			s.selectCursor = (s.selectCursor - 1 + len(matches)) % len(matches)
+		}
+		return nil
+	case tea.KeyDown:
+		if s.selectMoving {
+			s.moveSessionInSelector(1)
+			return nil
+		}
+		if len(matches) > 0 {
+			s.selectCursor = (s.selectCursor + 1) % len(matches)
+		}
+		return nil
+	case tea.KeyPgUp:
+		if len(matches) > 0 {
+			step := s.selectorPageStep()
+			s.selectCursor -= step
+			if s.selectCursor < 0 {
+				s.selectCursor = 0
+			}
+		}
+		return nil
+	case tea.KeyPgDown:
+		if len(matches) > 0 {
+			step := s.selectorPageStep()
+			s.selectCursor += step
+			if s.selectCursor >= len(matches) {
+				s.selectCursor = len(matches) - 1
+			}
+		}
+		return nil
+	case tea.KeyDelete:
+		s.confirmDeleteSessionAtSelectorCursor()
+		return nil
+	}
+	switch msg.String() {
+	case "n", "N":
+		s.openNewSessionModalWithReturn(m.agentCmd, modeSelecting)
+		return nil
+	case "r", "R":
+		if len(matches) > 0 {
+			s.selectRenaming = true
+			s.renameText = matches[s.selectCursor].Title()
+			s.renameCursor = len([]rune(s.renameText))
+		}
+		return nil
+	case "f", "F":
+		s.selectFiltering = true
+		s.selectFilterCursor = len([]rune(s.selectFilter))
+		return nil
+	case "m", "M":
+		s.selectMoving = !s.selectMoving
+		return nil
+	case "x", "X", "d", "D":
+		s.confirmDeleteSessionAtSelectorCursor()
+		return nil
+	}
+	return nil
+}
 
-	// In moving sub-mode, only navigation and Space/Esc are honored; all
-	// other input (typing, ctrl shortcuts) is ignored so the user can't
-	// edit the filter mid-move and break the index correspondence.
-	if s.selectMoving {
+func (s *state) handleSessionRenameInSelector(msg tea.KeyPressMsg) {
+	key := msg.Key()
+	if key.Mod.Contains(tea.ModCtrl) {
 		switch key.Code {
-		case tea.KeyEscape:
-			// Revert: move the session back to its original index.
-			if len(matches) > 0 {
-				cur := matches[s.selectCursor]
-				s.manager.Move(cur.Index(), s.selectMoveStart)
-			}
-			s.selectMoving = false
-			s.selectCursor = s.selectMoveStart
-			s.notifyMeta()
+		case 'h':
+			s.renameText, s.renameCursor = backspaceAt(s.renameText, s.renameCursor)
 			return
-		case tea.KeySpace:
-			s.selectMoving = false
-			s.notifyMeta()
+		case 'u':
+			s.renameText = ""
+			s.renameCursor = 0
 			return
-		case tea.KeyEnter:
-			// Commit the move and select the session.
-			s.selectMoving = false
-			s.mode = modeNormal
-			s.selectFilter = ""
-			s.selectFilterCursor = 0
-			s.selectCursor = 0
-			if len(matches) > 0 {
-				s.manager.Focus(matches[s.selectCursor].Index())
-				s.refreshFocused()
-			}
-			s.notifyMeta()
+		case 'a':
+			s.renameCursor = 0
 			return
-		case tea.KeyUp:
-			if s.selectCursor > 0 && len(matches) > 0 {
-				cur := matches[s.selectCursor]
-				prev := matches[s.selectCursor-1]
-				s.manager.Move(cur.Index(), prev.Index())
-				s.selectCursor--
-				s.notifyMeta()
-			}
-			return
-		case tea.KeyDown:
-			if s.selectCursor < len(matches)-1 {
-				cur := matches[s.selectCursor]
-				next := matches[s.selectCursor+1]
-				s.manager.Move(cur.Index(), next.Index())
-				s.selectCursor++
-				s.notifyMeta()
-			}
+		case 'e':
+			s.renameCursor = len([]rune(s.renameText))
 			return
 		}
+	}
+	if key.Text != "" {
+		s.renameText, s.renameCursor = insertAt(s.renameText, s.renameCursor, key.Text)
 		return
 	}
+	switch key.Code {
+	case tea.KeyEnter:
+		matches := s.filteredSessions()
+		if len(matches) > 0 && strings.TrimSpace(s.renameText) != "" {
+			s.manager.Rename(matches[s.selectCursor].Index(), strings.TrimSpace(s.renameText))
+			s.notifyMeta()
+		}
+		s.selectRenaming = false
+		s.renameText = ""
+		s.renameCursor = 0
+	case tea.KeyEscape:
+		s.selectRenaming = false
+		s.renameText = ""
+		s.renameCursor = 0
+	case tea.KeyBackspace:
+		s.renameText, s.renameCursor = backspaceAt(s.renameText, s.renameCursor)
+	case tea.KeyDelete:
+		s.renameText, s.renameCursor = deleteAt(s.renameText, s.renameCursor)
+	case tea.KeyLeft:
+		if s.renameCursor > 0 {
+			s.renameCursor--
+		}
+	case tea.KeyRight:
+		if s.renameCursor < len([]rune(s.renameText)) {
+			s.renameCursor++
+		}
+	case tea.KeyHome:
+		s.renameCursor = 0
+	case tea.KeyEnd:
+		s.renameCursor = len([]rune(s.renameText))
+	}
+}
 
+func (s *state) handleSessionFilterInSelector(msg tea.KeyPressMsg) {
+	key := msg.Key()
 	if key.Mod.Contains(tea.ModCtrl) {
 		switch key.Code {
 		case 'h':
@@ -1103,59 +1459,17 @@ func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 		return
 	}
 	switch key.Code {
-	case tea.KeySpace:
-		// Begin reordering the currently highlighted session. Only
-		// allowed with an empty filter so visible row indices match
-		// real session indices.
-		if strings.TrimSpace(s.selectFilter) == "" && len(matches) > 0 {
-			s.selectMoving = true
-			s.selectMoveStart = matches[s.selectCursor].Index()
-			return
-		}
-		s.selectFilter, s.selectFilterCursor = insertAt(s.selectFilter, s.selectFilterCursor, " ")
-		s.selectCursor = 0
 	case tea.KeyEnter:
-		s.mode = modeNormal
-		s.selectFilter = ""
-		s.selectFilterCursor = 0
-		if len(matches) > 0 {
-			if s.selectCursor >= len(matches) {
-				s.selectCursor = len(matches) - 1
-			}
-			s.manager.Focus(matches[s.selectCursor].Index())
-			s.refreshFocused()
-			s.notifyMeta()
-		}
-		s.selectCursor = 0
+		s.selectFiltering = false
+		s.selectCursor = min(s.selectCursor, max(0, len(s.filteredSessions())-1))
 	case tea.KeyEscape:
-		s.mode = modeNormal
-		s.selectFilter = ""
-		s.selectFilterCursor = 0
+		s.selectFiltering = false
+	case tea.KeyBackspace:
+		s.selectFilter, s.selectFilterCursor = backspaceAt(s.selectFilter, s.selectFilterCursor)
 		s.selectCursor = 0
-	case tea.KeyUp:
-		if len(matches) > 0 {
-			s.selectCursor = (s.selectCursor - 1 + len(matches)) % len(matches)
-		}
-	case tea.KeyDown:
-		if len(matches) > 0 {
-			s.selectCursor = (s.selectCursor + 1) % len(matches)
-		}
-	case tea.KeyPgUp:
-		if len(matches) > 0 {
-			step := s.selectorPageStep()
-			s.selectCursor -= step
-			if s.selectCursor < 0 {
-				s.selectCursor = 0
-			}
-		}
-	case tea.KeyPgDown:
-		if len(matches) > 0 {
-			step := s.selectorPageStep()
-			s.selectCursor += step
-			if s.selectCursor >= len(matches) {
-				s.selectCursor = len(matches) - 1
-			}
-		}
+	case tea.KeyDelete:
+		s.selectFilter, s.selectFilterCursor = deleteAt(s.selectFilter, s.selectFilterCursor)
+		s.selectCursor = 0
 	case tea.KeyLeft:
 		if s.selectFilterCursor > 0 {
 			s.selectFilterCursor--
@@ -1168,13 +1482,74 @@ func (s *state) handleSelectKey(msg tea.KeyPressMsg) {
 		s.selectFilterCursor = 0
 	case tea.KeyEnd:
 		s.selectFilterCursor = len([]rune(s.selectFilter))
-	case tea.KeyBackspace:
-		s.selectFilter, s.selectFilterCursor = backspaceAt(s.selectFilter, s.selectFilterCursor)
-		s.selectCursor = 0
-	case tea.KeyDelete:
-		s.selectFilter, s.selectFilterCursor = deleteAt(s.selectFilter, s.selectFilterCursor)
+	}
+}
+
+func (s *state) moveSessionInSelector(delta int) {
+	matches := s.filteredSessions()
+	if len(matches) == 0 || s.selectCursor < 0 || s.selectCursor >= len(matches) {
+		return
+	}
+	from := matches[s.selectCursor].Index()
+	to := from + delta
+	if to < 0 || to >= s.manager.Len() {
+		return
+	}
+	s.manager.Move(from, to)
+	s.selectCursor = s.filteredSessionCursorForIndex(to)
+	s.notifyMeta()
+}
+
+func (s *state) confirmDeleteSessionAtSelectorCursor() {
+	matches := s.filteredSessions()
+	if len(matches) == 0 || s.manager.Len() <= 1 {
+		return
+	}
+	if s.selectCursor >= len(matches) {
+		s.selectCursor = len(matches) - 1
+	}
+	sess := matches[s.selectCursor]
+	s.deleteKind = "session"
+	s.deleteIndex = sess.Index()
+	s.deleteName = sess.Title()
+	s.deleteReturn = modeSelecting
+	s.deleteChoice = 1
+	s.mode = modeDeleteConfirm
+}
+
+func (s *state) removeSessionAtSelectorCursor() {
+	matches := s.filteredSessions()
+	if len(matches) == 0 || s.manager.Len() <= 1 {
+		return
+	}
+	if s.selectCursor >= len(matches) {
+		s.selectCursor = len(matches) - 1
+	}
+	idx := matches[s.selectCursor].Index()
+	delete(s.viewports, idx)
+	s.manager.Kill(idx)
+	s.refreshFocused()
+	s.notifyMeta()
+	matches = s.filteredSessions()
+	if s.selectCursor >= len(matches) {
+		s.selectCursor = len(matches) - 1
+	}
+	if s.selectCursor < 0 {
 		s.selectCursor = 0
 	}
+}
+
+func (s *state) filteredSessionCursorForIndex(index int) int {
+	matches := s.filteredSessions()
+	for i, sess := range matches {
+		if sess.Index() == index {
+			return i
+		}
+	}
+	if len(matches) == 0 {
+		return 0
+	}
+	return min(s.selectCursor, len(matches)-1)
 }
 
 func (s *state) filteredSessions() []*session.Session {
@@ -1377,6 +1752,12 @@ func (m Model) renderPane() string {
 		return m.overlayBox(pane, m.renderNewSessionModal())
 	case modeSelecting:
 		return m.overlayBox(pane, m.renderSessionSelectorModal())
+	case modeConnections:
+		return m.overlayBox(pane, m.renderConnectionsModal())
+	case modeQuitConfirm:
+		return m.overlayBox(pane, m.renderQuitConfirmModal())
+	case modeDeleteConfirm:
+		return m.overlayBox(pane, m.renderDeleteConfirmModal())
 	}
 	return pane
 }
@@ -1416,7 +1797,6 @@ func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int) st
 	}
 	return strings.Join(out, "\n")
 }
-
 
 // anchorViewportToCursor scrolls vp so the vt cursor row is visible inside
 // the pane. This is necessary when the vt screen is taller than the pane —
@@ -1579,6 +1959,10 @@ func (m Model) renderHelpModal() string {
 		"Ctrl+Alt+W           kill session",
 		"Ctrl+Alt+R           rename session",
 		"Ctrl+Alt+S           session selector",
+		"Ctrl+Alt+O           connections modal",
+		"Ctrl+Alt+E           rename connection",
+		"Ctrl+Alt+C           quick-create connection",
+		"Ctrl+Alt+[ / ]       previous/next connection",
 		"Ctrl+Alt+P           save layout to --config file",
 		"Ctrl+Alt+Left/Right  previous/next session",
 		"Ctrl+Alt+1..9        jump to session",
@@ -1697,10 +2081,17 @@ func (m Model) renderSessionSelectorModal() string {
 		s.selectScroll = 0
 	}
 
-	rows := []string{
-		"Sessions",
-		"Filter: " + renderWithCursor(s.selectFilter, s.selectFilterCursor),
-		"",
+	rows := []string{"Sessions"}
+	if strings.TrimSpace(s.selectFilter) != "" || s.selectFiltering {
+		filter := renderWithCursor(s.selectFilter, s.selectFilterCursor)
+		if !s.selectFiltering {
+			filter = s.selectFilter
+		}
+		rows = append(rows, scrollIndicatorStyle.Render("Filter: "+truncate(filter, width-10)))
+	}
+	rows = append(rows, "")
+	if s.selectRenaming {
+		rows = append(rows, "Rename: "+renderWithCursor(s.renameText, s.renameCursor), "")
 	}
 	if len(matches) == 0 {
 		rows = append(rows, "  (no sessions match)")
@@ -1737,9 +2128,15 @@ func (m Model) renderSessionSelectorModal() string {
 		}
 	}
 
-	footer := "↑/↓ move   Space reorder   Enter select   Esc cancel"
+	footer := "↑/↓ select   Enter focus   N new   R rename   M move   F filter   Del/X remove   Esc cancel"
 	if s.selectMoving {
-		footer = "↑/↓ reorder   Space drop   Enter commit & select   Esc revert"
+		footer = "Move: ↑/↓ reorder   M/Esc stop moving"
+	}
+	if s.selectFiltering {
+		footer = "Filter: type pattern   Enter apply   Esc actions   Ctrl+U clear"
+	}
+	if s.selectRenaming {
+		footer = "Rename: Enter save   Esc cancel   Backspace edits"
 	}
 	if len(matches) > listRows {
 		footer = fmt.Sprintf("%d/%d   %s", s.selectCursor+1, len(matches), footer)
@@ -1751,26 +2148,15 @@ func (m Model) renderSessionSelectorModal() string {
 
 func (m Model) renderStatusBar() string {
 	s := m.s
-	focused := s.manager.FocusedIndex()
-	var status string
-	for _, sess := range s.manager.Sessions() {
-		if sess.Index() == focused {
-			state := "running"
-			if sess.Exited() {
-				state = "exited"
-			}
-			cols, rows := paneSize(s.width, s.height)
-			mouseTag := "mouse:select"
-			if s.mouseCapture {
-				mouseTag = "mouse:app"
-			}
-			status = fmt.Sprintf(" session %d │ %s │ %dx%d │ %s ", focused+1, state, cols, rows, mouseTag)
-			break
-		}
+	cols, rows := paneSize(s.width, s.height)
+	mouseTag := "mouse:select"
+	if s.mouseCapture {
+		mouseTag = "mouse:app"
 	}
+	status := statusKeyStyle.Render(fmt.Sprintf(" server:%s │ conn ", s.serverName)) + s.renderConnectionPills() + statusKeyStyle.Render(fmt.Sprintf(" │ %dx%d │ clients:%d │ %s ", cols, rows, s.localClients+1, mouseTag))
 	if s.mode == modeRenaming {
 		help := helpStyle.Render(" Rename: " + renderWithCursor(s.renameText, s.renameCursor) + "  Enter save  Esc cancel")
-		left := statusKeyStyle.Render(status)
+		left := status
 		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
@@ -1778,7 +2164,15 @@ func (m Model) renderStatusBar() string {
 	}
 	if s.mode == modeSelecting {
 		help := helpStyle.Render(" Sessions — see modal")
-		left := statusKeyStyle.Render(status)
+		left := status
+		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+			left += statusBarStyle.Render(strings.Repeat(" ", pad))
+		}
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
+	}
+	if s.mode == modeConnections {
+		help := helpStyle.Render(" Connections — see modal")
+		left := status
 		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
@@ -1786,7 +2180,15 @@ func (m Model) renderStatusBar() string {
 	}
 	if s.mode == modeHelp {
 		help := helpStyle.Render(" Help: Esc/Enter close")
-		left := statusKeyStyle.Render(status)
+		left := status
+		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+			left += statusBarStyle.Render(strings.Repeat(" ", pad))
+		}
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
+	}
+	if s.mode == modeQuitConfirm {
+		help := helpStyle.Render(" Confirm quit — Y/Enter quit, N/Esc cancel")
+		left := status
 		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
@@ -1794,7 +2196,7 @@ func (m Model) renderStatusBar() string {
 	}
 	if s.mode == modeExitPrompt {
 		help := helpStyle.Render(" Session exited — choose action in modal")
-		left := statusKeyStyle.Render(status)
+		left := status
 		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
@@ -1804,7 +2206,7 @@ func (m Model) renderStatusBar() string {
 	if s.statusMsg != "" {
 		help = helpStyle.Render(" " + s.statusMsg + " ")
 	}
-	left := statusKeyStyle.Render(status) + help
+	left := status + help
 	if pad := s.width - lipgloss.Width(left); pad > 0 {
 		left += statusBarStyle.Render(strings.Repeat(" ", pad))
 	}

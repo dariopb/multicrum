@@ -11,50 +11,57 @@ Each session is backed by a real PTY/ConPTY and a `vt10x` screen model. The app 
 
 ## Commands
 
-```bat
-# Build all packages
-C:\go124\go\bin\go.exe build ./...
+```bash
+# Build the runnable app (preferred build command)
+go build -v ./cmd/multicrum/
 
 # Run tests
-C:\go124\go\bin\go.exe test ./...
+go test ./...
 
 # Run local TUI only (default command is bash)
-C:\go124\go\bin\go.exe run . --cmd "bash"
+go run ./cmd/multicrum/ --cmd "bash"
 
 # Run with WebSocket/xterm.js UI
-C:\go124\go\bin\go.exe run . --cmd "bash" --ws :9999 --token mytoken
+go run ./cmd/multicrum/ --cmd "bash" --ws :9999 --token mytoken
 
 # Browser URL
 # http://localhost:9999/
 # http://localhost:9999/?token=mytoken
 ```
 
-`go.cmd` exists but may not be found through the shell PATH in this environment. The reliable command used during recent work is the explicit Go binary: `C:\go124\go\bin\go.exe`.
+Go is expected to be available in `PATH`. Use `go build -v ./cmd/multicrum/` for build verification; do not use hard-coded local Go installation paths.
 
 ## Architecture & Data Flow
 
 ```text
 cmd/multicrum/main.go
-  └─ ui.NewModel(cmd, cols, rows)
-       └─ session.SessionManager
-            └─ session.Session (one per tab/session)
-                 ├─ platform Start(): Unix PTY or Windows ConPTY
-                 ├─ readLoop goroutine
-                 │    ├─ VTScreen.Write(raw PTY bytes)
-                 │    └─ SendOutput(OutputMsg) → Bubble Tea program
-                 └─ VTScreen
-                      ├─ vt10x visible screen buffer
-                      └─ rawHistory for WebSocket replay
+  ├─ parse CLI flags (--server/--config/--cmd/--ssh/--ws)
+  ├─ localserver.TryAttach(server socket)
+  │    └─ attach client: raw local TTY ↔ Unix-socket frames ↔ owner-rendered TUI
+  └─ owner process
+       ├─ config.Load() → ui.Model.SetConfigConnections()
+       ├─ ui.InputMux(local stdin + attached-client input)
+       ├─ localserver.Listen() + FanoutWriter
+       ├─ Bubble Tea program
+       │    └─ ui.Model
+       │         └─ server state
+       │              └─ connections[]
+       │                   └─ session.SessionManager
+       │                        └─ session.Session
+       │                             ├─ Unix PTY / Windows ConPTY / SSH PTY
+       │                             ├─ readLoop → VTScreen.Write(raw bytes)
+       │                             └─ OutputMsg/ExitMsg → Bubble Tea program
+       └─ optional transport.WSTransport (--ws)
+            ├─ /ws binary WebSocket protocol
+            └─ / generated embedded xterm.js UI
 
 ui.Model Update loop
-  ├─ OutputMsg          → viewport content = sess.Screen().RenderWithScrollback()
-  ├─ tea.KeyMsg         → TUI shortcuts/scrollback or keyToBytes() → focused PTY
-  ├─ tea.WindowSizeMsg  → resize all sessions + viewports
-  └─ wsControlMsg       → browser-driven focus/new/kill/rename
-
-transport.WSTransport (--ws)
-  ├─ /ws  binary WebSocket protocol
-  └─ /    generated HTML/JS xterm.js client from indexHTML()
+  ├─ connectionOutputMsg/OutputMsg → active viewport render tick
+  ├─ connectionExitMsg/ExitMsg     → exited-session respawn/remove modal
+  ├─ tea.KeyPressMsg               → global shortcuts first, then modal/normal handlers
+  ├─ tea.WindowSizeMsg             → resize active connection sessions
+  ├─ wsResizeMsg                   → resize one browser-viewed session
+  └─ wsControlMsg                  → browser session/connection controls
 ```
 
 ## Package Structure
@@ -63,41 +70,66 @@ transport.WSTransport (--ws)
 |---|---|
 | `cmd/multicrum/` | CLI entry point, flags, Bubble Tea program, optional WS startup |
 | `cmd/ptyrec/` | Diagnostic PTY recorder/replay tool |
-| `pkg/ui/` | Bubble Tea model, key routing, tab/status rendering, viewport lifecycle |
-| `pkg/session/` | Session lifecycle, manager, `VTScreen` rendering/replay buffer |
-| `pkg/ssh_client/` | SSH client helpers |
-| `pkg/console/` | Windows ConPTY implementation, build-tagged for Windows |
-| `pkg/transport/` | Local no-op transport interface and WebSocket/xterm.js transport |
+| `pkg/ui/` | Bubble Tea model, connection/session dialogs, global shortcuts, viewport lifecycle, layout save, input mux |
+| `pkg/session/` | Session lifecycle, manager, move/respawn/rename/resize, `VTScreen` rendering/replay buffer |
+| `pkg/ssh_client/` | SSH target resolution and remote PTY backend |
+| `pkg/console/` | Unix PTY and Windows ConPTY implementations |
+| `pkg/config/` | YAML config tree with server → connections → sessions plus legacy migration |
+| `pkg/transport/` | Local no-op transport interface and WebSocket/xterm.js transport with embedded assets |
+| `pkg/localserver/` | Named local server Unix-socket attach protocol, frame codec, fan-out writer |
 
 ## Keyboard / UI Behavior
 
 ### TUI
 
 - `Alt+Backtick`: show/close centered help modal listing shortcuts.
-- `Ctrl+T`: create a new session.
-- `Ctrl+W`: kill focused session, but never kill the final remaining session.
-- `Ctrl+Shift+R`: rename focused session inline in the status bar.
-- `Ctrl+S`: open the filtered session selector; type to filter, arrows move, Enter selects.
-- `Ctrl+Left` / `Ctrl+Right`: previous/next session.
-- `Alt+1..9`: jump to session N.
+- `Ctrl+Alt+T`: open the new-session modal in the active connection. This is a global shortcut and must work from modal states, including exited-session prompts.
+- `Ctrl+Alt+O`: open the connections modal (focus, create, rename, move/reorder, filter, remove).
+- `Ctrl+Alt+E`: open the connections modal on the active connection; press `R` to rename.
+- `Ctrl+Alt+C`: quick-create a new connection/workspace and focus it.
+- `Ctrl+Alt+[` / `Ctrl+Alt+]`: previous/next connection/workspace.
+- `Ctrl+Alt+W`: kill focused session, but never kill the final remaining session.
+- `Ctrl+Alt+R`: open the sessions dialog on the active session; press `R` to rename.
+- `Ctrl+Alt+S`: open the sessions dialog (focus, create, rename, move/reorder, filter, remove).
+- `Ctrl+Alt+Left` / `Ctrl+Alt+Right`: previous/next session inside the active connection.
+- `Alt+1..9`: jump to session N inside the active connection.
 - `Ctrl+Y` / `Ctrl+PgUp`: page up through local TUI scrollback.
 - `Ctrl+PgDown`: page down through local TUI scrollback.
 - `Ctrl+Up` / `Ctrl+Down`: scroll local TUI scrollback one line.
 - `Ctrl+Home` / `Ctrl+End`: jump to top/bottom of local TUI scrollback.
-- `Ctrl+Q`: quit and close sessions.
+- `Ctrl+Alt+Q`: owner TUI opens server quit confirmation; attached clients use `Ctrl+Q`/`Alt+Ctrl+Q` to detach without killing sessions.
 
-Shortcut keys are consumed before the default key forwarding path. Do not add a TUI shortcut after the `default` PTY forwarding case in `pkg/ui/model.go`.
+Global shortcuts (`Ctrl+Alt+T`, `Ctrl+Alt+Left/Right`, `Ctrl+Alt+[`/`]`, `Ctrl+Alt+Q`) are centralized in `state.handleGlobalShortcut` and run before modal-specific handlers. Do not duplicate these bindings inside individual modal handlers; that caused regressions where exited-session dialogs blocked connection/session switching or quit.
+
+Shortcut keys are consumed before the default key forwarding path. Do not add a TUI shortcut after the default PTY forwarding case in `pkg/ui/model.go`.
 
 ### Web UI
 
 - Browser UI is embedded inside `pkg/transport/websocket.go:indexHTML()`; there are no static assets in `web/`.
-- `Ctrl+Shift+S`: open sessions modal with type-to-filter.
-- `Ctrl+Shift+R`: rename focused session.
-- `Ctrl+Shift+T`: new session.
-- `Ctrl+Shift+W`: kill focused session, blocked when only one session remains.
-- `Ctrl+Left` / `Ctrl+Right`: previous/next session.
+- `Alt+S`: open sessions dialog.
+- `Alt+N`: new session.
+- `Alt+K`: kill focused session when safe.
+- `Alt+R`: open sessions dialog on the focused session; press `R` to rename.
+- `Alt+P`: save layout.
+- `Alt+M`: toggle web mouse mode.
+- `Alt+,`: settings.
+- `Ctrl+Alt+Left` / `Ctrl+Alt+Right`: previous/next session.
+- `Ctrl+Alt+[` / `Ctrl+Alt+]`: previous/next connection.
+- `Ctrl+Alt+O`: open connections dialog.
+- `Ctrl+Alt+E`: open connections dialog on active connection; press `R` to rename.
+- `Ctrl+Alt+C`: new connection prompt.
 
-Ctrl-arrow handling uses both xterm's custom key handler and a capture-phase `window.keydown` listener with `preventDefault()`/`stopPropagation()`.
+Web shortcut handling uses both xterm's custom key handler and a capture-phase `window.keydown` listener with `preventDefault()`/`stopPropagation()` where needed.
+
+## Long-running server and connections
+
+`multicrum --server NAME` attaches to or creates a per-user local Unix socket server named `NAME` (default `default`). The socket path is generated by `pkg/localserver.SocketPath`, using `$XDG_RUNTIME_DIR/multicrum/<server>.sock` or `/tmp/multicrum-$UID/multicrum/<server>.sock` fallback.
+
+The runtime state is a tree: server → connections → sessions. `state.connections` stores `connectionState` objects, each with its own `SessionManager`, viewport map, alt-screen map, and scrollback-mode map. `state.syncActiveConnectionFields()` keeps legacy `state.manager`/`state.viewports` aliases pointed at the active connection so older UI paths keep working.
+
+Config files now save `connections[].sessions[]`; legacy top-level `sessions` are loaded into a `default` connection by `Config.Normalize()`. `cmdline` entries are parsed into startup argv with `ui.ParseCmdLine` while preserving the original `cmdline` for round-trip saves. SSH-backed sessions include an `ssh` block with target, port, key, default-key/agent flags, known-host settings, and remote command persistence.
+
+Attach clients stream raw terminal input to the owner through length-prefixed frames and receive mirrored owner TUI output. `SIGWINCH` from attach clients is forwarded as resize frames. Local socket support is Unix-only for now; Windows stubs return a clear unsupported error.
 
 ## Session Naming
 
@@ -105,8 +137,8 @@ Ctrl-arrow handling uses both xterm's custom key handler and a capture-phase `wi
 
 - `Session.title` and `Session.SetTitle()` in `pkg/session/session.go`.
 - `SessionManager.Rename()` in `pkg/session/manager.go`.
-- TUI `modeRenaming` state in `pkg/ui/model.go`.
-- Web control message `ControlMsg{Action:"rename", ID, Title}`.
+- TUI sessions dialog (`modeSelecting`, press `R`).
+- Web sessions dialog / control message `ControlMsg{Action:"rename", ID, Title}`.
 
 Metadata broadcasts are required after rename so both TUI and browser labels stay synchronized.
 
@@ -199,28 +231,33 @@ fork.
 Current modes in `pkg/ui/model.go`:
 
 - `modeNormal`
-- `modeRenaming`
-- `modeSelecting`
+- `modeRenaming` (legacy direct rename; current shortcuts use sessions dialog)
+- `modeSelecting` (sessions dialog)
 - `modeHelp`
+- `modeExitPrompt`
+- `modeNewSession`
+- `modeConnections`
+- `modeQuitConfirm`
+- `modeDeleteConfirm`
 
-Input handling checks these modes before normal shortcut/PTT forwarding.
+Input handling runs `handleGlobalShortcut` before mode-specific handlers, then normal PTY forwarding only in `modeNormal`.
 
 ## Testing / Verification
 
 After changes, run both:
 
-```bat
-C:\go124\go\bin\go.exe test ./...
-C:\go124\go\bin\go.exe build ./...
+```bash
+go test ./...
+go build -v ./cmd/multicrum/
 ```
 
-There are currently no committed tests, so these mainly verify compilation across packages/build tags available on the current platform.
+There are unit tests in config, localserver, SSH parsing/session helpers, keyboard stripping, command-line parsing, and UI config loading. These commands verify both tests and compilation across packages/build tags available on the current platform.
 
 ## Dependencies of Note
 
-- `github.com/charmbracelet/bubbletea v1.3.10` — TUI event loop.
-- `github.com/charmbracelet/bubbles/viewport` — local viewport rendering.
-- `github.com/charmbracelet/lipgloss` — TUI styling.
+- `charm.land/bubbletea/v2` — TUI event loop.
+- `charm.land/bubbles/v2/viewport` — local viewport rendering.
+- `charm.land/lipgloss/v2` — TUI styling.
 - `github.com/hinshun/vt10x` — virtual terminal screen model.
 - `github.com/creack/pty` — Unix PTY.
 - `golang.org/x/sys/windows` — Windows ConPTY syscalls.
@@ -229,6 +266,5 @@ There are currently no committed tests, so these mainly verify compilation acros
 ## Known Not Implemented
 
 - Background-session activity indicator.
-- Config file such as `~/.multicrum.toml`.
 - Session persistence / scrollback export.
 - Split-pane / tiling layout.

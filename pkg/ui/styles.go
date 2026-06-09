@@ -36,6 +36,17 @@ var (
 			Background(lipgloss.Color("236")).
 			Bold(true)
 
+	connActiveStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("33")).
+			Padding(0, 1)
+
+	connInactiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("250")).
+				Background(lipgloss.Color("238")).
+				Padding(0, 1)
+
 	viewportStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("0"))
 

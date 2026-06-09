@@ -42,15 +42,20 @@ type Options struct {
 // ResolvedConfig is a concrete ssh.ClientConfig plus metadata needed to start
 // interactive sessions.
 type ResolvedConfig struct {
-	Target        string
-	Alias         string
-	User          string
-	Host          string
-	Port          string
-	Addr          string
-	IdentityFiles []string
-	Command       []string
-	ClientConfig  *ssh.ClientConfig
+	Target                string
+	Alias                 string
+	User                  string
+	Host                  string
+	Port                  string
+	Addr                  string
+	IdentityFiles         []string
+	ExplicitIdentityFile  string
+	UseDefaultKeys        bool
+	UseAgent              bool
+	KnownHosts            string
+	InsecureIgnoreHostKey bool
+	Command               []string
+	ClientConfig          *ssh.ClientConfig
 }
 
 // Resolve parses target/options, applies ~/.ssh/config, discovers auth methods,
@@ -105,15 +110,20 @@ func Resolve(opts Options) (ResolvedConfig, error) {
 	}
 
 	return ResolvedConfig{
-		Target:        opts.Target,
-		Alias:         alias,
-		User:          userName,
-		Host:          host,
-		Port:          port,
-		Addr:          addr,
-		IdentityFiles: identityFiles,
-		Command:       append([]string(nil), opts.Command...),
-		ClientConfig:  clientConfig,
+		Target:                opts.Target,
+		Alias:                 alias,
+		User:                  userName,
+		Host:                  host,
+		Port:                  port,
+		Addr:                  addr,
+		IdentityFiles:         identityFiles,
+		ExplicitIdentityFile:  expandPath(opts.IdentityFile),
+		UseDefaultKeys:        opts.UseDefaultKeys,
+		UseAgent:              opts.UseAgent,
+		KnownHosts:            expandPath(opts.KnownHosts),
+		InsecureIgnoreHostKey: opts.InsecureIgnoreHostKey,
+		Command:               append([]string(nil), opts.Command...),
+		ClientConfig:          clientConfig,
 	}, nil
 }
 
@@ -153,6 +163,15 @@ func resolveIdentityFiles(alias string, opts Options) []string {
 		seen[path] = struct{}{}
 		files = append(files, path)
 	}
+	addIfExists := func(path string) {
+		path = expandPath(path)
+		if path == "" {
+			return
+		}
+		if st, err := os.Stat(path); err == nil && !st.IsDir() {
+			add(path)
+		}
+	}
 	if opts.IdentityFile != "" {
 		add(opts.IdentityFile)
 		return files
@@ -161,11 +180,11 @@ func resolveIdentityFiles(alias string, opts Options) []string {
 		return files
 	}
 	for _, path := range sshConfigValues(alias, "IdentityFile") {
-		add(path)
+		addIfExists(path)
 	}
-	if opts.UseDefaultKeys {
+	if opts.UseDefaultKeys || (opts.IdentityFile == "" && opts.Password == "") {
 		for _, path := range defaultIdentityFiles() {
-			add(path)
+			addIfExists(path)
 		}
 	}
 	return files

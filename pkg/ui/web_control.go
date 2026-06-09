@@ -26,6 +26,7 @@ func (s *state) handleWSNew(m Model, msg transport.ControlMsg) {
 		cmd := strings.Fields(strings.TrimSpace(msg.Cmd))
 		client, cfgErr := ssh_client.New(ssh_client.Options{
 			Target:         strings.TrimSpace(msg.Target),
+			Port:           strings.TrimSpace(msg.Port),
 			IdentityFile:   strings.TrimSpace(msg.Key),
 			Password:       msg.Password,
 			UseDefaultKeys: strings.TrimSpace(msg.Key) == "" && msg.Password == "",

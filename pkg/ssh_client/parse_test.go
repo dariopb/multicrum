@@ -1,6 +1,10 @@
 package ssh_client
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseTarget(t *testing.T) {
 	tests := []struct {
@@ -46,5 +50,23 @@ func TestExpandPath(t *testing.T) {
 	want := "/home/tester/.ssh/id_ed25519"
 	if got != want {
 		t.Fatalf("expandPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveIdentityFilesSkipsMissingDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.Mkdir(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rsa := filepath.Join(sshDir, "id_rsa")
+	if err := os.WriteFile(rsa, []byte("not a real key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveIdentityFiles("example.com", Options{})
+	if len(got) != 1 || got[0] != rsa {
+		t.Fatalf("resolveIdentityFiles() = %#v, want only %q", got, rsa)
 	}
 }

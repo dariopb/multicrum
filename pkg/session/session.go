@@ -26,8 +26,8 @@ type Session struct {
 	cmd     []string
 	cmdLine string
 	title   string
-	screen *VTScreen
-	exited bool
+	screen  *VTScreen
+	exited  bool
 
 	// rw is the bidirectional channel to the child process (unix pty master,
 	// Windows ConPTY pipe pair, or SSH remote PTY). Set by Start().
@@ -158,6 +158,15 @@ func (s *Session) CmdLine() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cmdLine
+}
+
+func (s *Session) SSHConfig() (ssh_client.ResolvedConfig, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sshClient == nil {
+		return ssh_client.ResolvedConfig{}, false
+	}
+	return s.sshClient.Config(), true
 }
 
 // SetCmdLine records the original user-supplied command line so callers

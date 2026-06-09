@@ -25,23 +25,36 @@ type SessionInfo struct {
 	Exited bool   `json:"exited"`
 }
 
+type ConnectionInfo struct {
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	FocusedID    int           `json:"focusedId"`
+	SessionCount int           `json:"sessionCount"`
+	Sessions     []SessionInfo `json:"sessions,omitempty"`
+}
+
 type MetaMsg struct {
-	FocusedID int           `json:"focusedId"`
-	Sessions  []SessionInfo `json:"sessions"`
+	Server           string           `json:"server,omitempty"`
+	ActiveConnection string           `json:"activeConnection,omitempty"`
+	Connections      []ConnectionInfo `json:"connections,omitempty"`
+	FocusedID        int              `json:"focusedId"`
+	Sessions         []SessionInfo    `json:"sessions"`
 }
 
 // ControlMsg is received from the browser for session management.
 type ControlMsg struct {
-	Action   string `json:"action"` // "focus" | "new" | "kill" | "rename" | "exit" | "move" | "save"
-	ID       int    `json:"id"`
-	To       int    `json:"to,omitempty"`       // move: target index
-	Title    string `json:"title,omitempty"`
-	Mode     string `json:"mode,omitempty"`     // new: "same" | "local" | "remote"
-	Cmd      string `json:"cmd,omitempty"`      // new local command or remote command
-	Target   string `json:"target,omitempty"`   // new remote SSH target
-	Password string `json:"password,omitempty"` // new remote SSH password
-	Key      string `json:"key,omitempty"`      // new remote SSH identity file
-	Choice   string `json:"choice,omitempty"`   // exit: "respawn" | "remove"
+	Action     string `json:"action"` // "focus" | "new" | "kill" | "rename" | "exit" | "move" | "save"
+	ID         int    `json:"id"`
+	To         int    `json:"to,omitempty"` // move: target index
+	Title      string `json:"title,omitempty"`
+	Connection string `json:"connection,omitempty"`
+	Mode       string `json:"mode,omitempty"`     // new: "same" | "local" | "remote"
+	Cmd        string `json:"cmd,omitempty"`      // new local command or remote command
+	Target     string `json:"target,omitempty"`   // new remote SSH target
+	Port       string `json:"port,omitempty"`     // new remote SSH port
+	Password   string `json:"password,omitempty"` // new remote SSH password
+	Key        string `json:"key,omitempty"`      // new remote SSH identity file
+	Choice     string `json:"choice,omitempty"`   // exit: "respawn" | "remove"
 }
 
 // ResizeMsg is received from the browser when xterm.js is resized.
@@ -92,12 +105,15 @@ type WSTransport struct {
 	token   string
 
 	// Callbacks wired by the UI layer.
-	OnInput   func(sessionID int, data []byte) // keystroke from browser
-	OnControl func(msg ControlMsg)             // session management from browser
-	OnResize  func(msg ResizeMsg)              // terminal resize from browser
-	SnapOf    func(sessionID int) []byte       // raw PTY snapshot for new clients
-	Sessions  func() []SessionInfo             // current session list
-	FocusedID func() int                       // currently focused session
+	OnInput          func(sessionID int, data []byte) // keystroke from browser
+	OnControl        func(msg ControlMsg)             // session management from browser
+	OnResize         func(msg ResizeMsg)              // terminal resize from browser
+	SnapOf           func(sessionID int) []byte       // raw PTY snapshot for new clients
+	Sessions         func() []SessionInfo             // current active-connection session list
+	FocusedID        func() int                       // currently focused session
+	Server           func() string                    // current server name
+	ActiveConnection func() string                    // active connection name
+	Connections      func() []ConnectionInfo          // connection list
 }
 
 // NewWSTransport starts listening on addr.
@@ -139,7 +155,19 @@ func (t *WSTransport) BroadcastMeta() {
 	if t.FocusedID != nil {
 		focusedID = t.FocusedID()
 	}
-	payload, _ := json.Marshal(MetaMsg{FocusedID: focusedID, Sessions: sessions})
+	server := ""
+	if t.Server != nil {
+		server = t.Server()
+	}
+	activeConnection := ""
+	if t.ActiveConnection != nil {
+		activeConnection = t.ActiveConnection()
+	}
+	var connections []ConnectionInfo
+	if t.Connections != nil {
+		connections = t.Connections()
+	}
+	payload, _ := json.Marshal(MetaMsg{Server: server, ActiveConnection: activeConnection, Connections: connections, FocusedID: focusedID, Sessions: sessions})
 	msg := append([]byte{0x02}, payload...)
 	t.mu.Lock()
 	clients := make([]*wsClient, len(t.clients))
@@ -413,8 +441,16 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 #terminal .xterm{font-family:var(--font-mono);height:100%}
 #terminal .xterm-viewport{overflow-y:scroll!important;scrollbar-width:none}
 #terminal .xterm-viewport::-webkit-scrollbar{display:none}
+body.ws-connecting #terminal,body.ws-disconnected #terminal,body.ws-connecting #tabbar,body.ws-disconnected #tabbar,body.ws-connecting #statusbar,body.ws-disconnected #statusbar{filter:grayscale(.55);opacity:.55;pointer-events:none}
+#reconnect-overlay{display:none;position:fixed;inset:0;z-index:90;align-items:center;justify-content:center;background:rgba(0,0,0,.28);color:var(--text);font-family:var(--font)}
+body.ws-connecting #reconnect-overlay,body.ws-disconnected #reconnect-overlay{display:flex}
+#reconnect-box{display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:10px;border:1px solid var(--border-strong);background:var(--panel);box-shadow:0 8px 32px #000a;font-weight:700}
+.spinner{width:18px;height:18px;border:3px solid color-mix(in srgb,var(--accent-violet) 25%,transparent);border-top-color:var(--accent-violet);border-radius:50%;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 #statusbar{display:flex;align-items:center;gap:8px;min-height:24px;padding:0 10px;background:var(--panel-strong);border-top:1px solid var(--border);color:var(--text-muted);font-family:var(--topbar-font);font-size:12px;flex-shrink:0;white-space:nowrap;overflow:hidden}
-#status-main{font-weight:700;color:var(--accent-violet)}
+#status-main{font-weight:700;color:var(--accent-violet);display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden}
+.conn-pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:var(--panel-strong);color:var(--text-muted);border:1px solid var(--border);white-space:nowrap;cursor:pointer;font-size:11px}
+.conn-pill.active{background:color-mix(in srgb,var(--accent-violet) 72%,var(--panel));color:#fff;border-color:var(--accent-violet)}
 #modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
 #modal-overlay.open{display:flex}
 #modal{background:var(--panel);border:1px solid var(--border-strong);border-radius:10px;padding:16px;min-width:320px;max-width:620px;width:90%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px #000a;color:var(--text);font-family:var(--font)}
@@ -463,6 +499,11 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
     <button id="btn-menu" class="btn btn-blue" title="Menu">☰</button>
     <div id="menu-pop">
       <button id="m-sessions" class="menu-item">☰ Sessions <span class="kbd">Alt-S</span></button>
+      <button id="m-connections" class="menu-item">☰ Connections <span class="kbd">Ctrl-Alt-O</span></button>
+      <button id="m-prevconn" class="menu-item">‹ Prev connection <span class="kbd">Ctrl-Alt-[</span></button>
+      <button id="m-nextconn" class="menu-item">› Next connection <span class="kbd">Ctrl-Alt-]</span></button>
+      <button id="m-newconn" class="menu-item">+ New connection <span class="kbd">Ctrl-Alt-C</span></button>
+      <button id="m-renameconn" class="menu-item">✎ Rename connection <span class="kbd">Ctrl-Alt-E</span></button>
       <button id="m-prev" class="menu-item">‹ Prev session <span class="kbd">Ctrl-Alt-←</span></button>
       <button id="m-next" class="menu-item">› Next session <span class="kbd">Ctrl-Alt-→</span></button>
       <button id="m-new" class="menu-item">+ New <span class="kbd">Alt-N</span></button>
@@ -483,8 +524,9 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 </div>
 <div id="terminal"></div>
 <div id="statusbar"><span id="status-main">session 1 │ connecting │ 0x0</span></div>
+<div id="reconnect-overlay"><div id="reconnect-box"><span class="spinner"></span><span id="reconnect-text">Connecting to multicrum…</span></div></div>
 
-<div id="modal-overlay">
+<div id="modal-overlay" tabindex="-1">
   <div id="modal">
     <h2 id="modal-title">Sessions</h2>
     <div id="modal-body">
@@ -495,7 +537,8 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
       <label class="choice-row"><input type="radio" name="new-mode" value="local"> Local command</label>
       <input id="new-local-cmd" class="new-input" placeholder="Local command (optional)" autocomplete="off"/>
       <label class="choice-row"><input type="radio" name="new-mode" value="remote"> Remote SSH</label>
-      <input id="new-ssh-target" class="new-input" placeholder="user@host[:port]" autocomplete="off"/>
+      <input id="new-ssh-target" class="new-input" placeholder="user@host" autocomplete="off"/>
+      <input id="new-ssh-port" class="new-input" placeholder="SSH port" autocomplete="off" value="22"/>
       <input id="new-ssh-passwd" class="new-input" placeholder="Password (optional)" autocomplete="off" type="password"/>
       <input id="new-ssh-key" class="new-input" placeholder="Key file (optional)" autocomplete="off"/>
       <input id="new-remote-cmd" class="new-input" placeholder="Remote command (optional)" autocomplete="off"/>
@@ -578,16 +621,29 @@ term.open(document.getElementById('terminal'));
 // Size xterm before opening the WebSocket so incoming snapshot bytes are
 // written to a properly-dimensioned terminal, not a 0×0 one.
 let ws;
+let reconnectTimer = null;
 let connected = false;
 let sessions = [];
+let connections = [];
+let activeConnection = '';
+let serverName = '';
 let filteredSessions = [];
 let focusedID = 0;
 let modalOpen = false;
 let modalMode = 'sessions';
 let modalCursor = 0;
+let sessionFilter = '';
+let sessionFiltering = false;
+let sessionRenaming = false;
+let renameSessionTarget = -1;
+let renameConnectionTarget = '';
+let connectionFilter = '';
+let connectionFiltering = false;
+let connectionMoving = false;
 let moveMode = false;
 let moveStart = -1;
 let newChoice = 0;
+let newReturnMode = '';
 let exitChoice = 0;
 const newModes = ['same','local','remote'];
 // Mouse mode: 'app' = forward wheel/clicks to child PTY when it enables mouse
@@ -677,6 +733,11 @@ if(window.matchMedia){
 function setConnectionState(state){
   connected = state === 'connected';
   document.body.dataset.conn = state;
+  document.body.classList.toggle('ws-connected', state === 'connected');
+  document.body.classList.toggle('ws-connecting', state === 'connecting');
+  document.body.classList.toggle('ws-disconnected', state === 'disconnected');
+  const text = document.getElementById('reconnect-text');
+  if(text) text.textContent = state === 'connected' ? '' : (state === 'connecting' ? 'Connecting to '+location.host+'…' : 'Disconnected. Reconnecting in 10s…');
   updateStatusBar();
   renderTabs();
 }
@@ -743,12 +804,19 @@ const terminalWriter = (() => {
   };
 })();
 
+function scheduleReconnect(){
+  if(reconnectTimer) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; startWebSocket(); }, 10000);
+}
+
 function startWebSocket(){
-  ws = new WebSocket('ws://'+location.host+'/ws__WS_QUERY__');
+  if(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  ws = new WebSocket(scheme+location.host+'/ws__WS_QUERY__');
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { setConnectionState('connected'); sendResize(); };
-  ws.onclose = () => { setConnectionState('disconnected'); };
-  ws.onerror = () => { setConnectionState('disconnected'); };
+  ws.onopen = () => { if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; } setConnectionState('connected'); sendResize(); };
+  ws.onclose = () => { setConnectionState('disconnected'); scheduleReconnect(); };
+  ws.onerror = () => { setConnectionState('disconnected'); scheduleReconnect(); };
   setConnectionState('connecting');
 
   ws.onmessage = e => {
@@ -760,7 +828,11 @@ function startWebSocket(){
       sessions = meta;
     } else {
       sessions = meta.sessions || [];
-      if(typeof meta.focusedId === 'number' && focusedID !== meta.focusedId){
+      connections = meta.connections || [];
+      const prevConnection = activeConnection;
+      activeConnection = meta.activeConnection || '';
+      serverName = meta.server || '';
+      if(typeof meta.focusedId === 'number' && (focusedID !== meta.focusedId || prevConnection !== activeConnection)){
         focusedID = meta.focusedId;
         // Drain any still-queued bytes from the previous session before
         // clearing, otherwise leftover ESC-mid-sequence bytes will be
@@ -774,6 +846,7 @@ function startWebSocket(){
     }
     updateLabel();
     if(modalOpen && modalMode === 'sessions') renderModal();
+    if(modalOpen && modalMode === 'connections') renderConnectionsModal();
   }
 };
 }
@@ -802,9 +875,29 @@ function renderTabs(){
 }
 
 function updateStatusBar(){
-  const s = sessions.find(s=>s.id===focusedID);
-  const state = s && s.exited ? 'exited' : (connected ? 'running' : 'connecting');
-  document.getElementById('status-main').textContent = ' session '+(focusedID+1)+' │ '+state+' │ '+term.cols+'x'+term.rows+' │ mouse:'+mouseMode+' ';
+  const root = document.getElementById('status-main');
+  root.innerHTML = '';
+  const prefix = document.createElement('span');
+  prefix.textContent = 'server:'+(serverName||'default')+' │ conn ';
+  root.appendChild(prefix);
+  if(connections.length){
+    connections.forEach(c => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'conn-pill' + (c.name===activeConnection || c.id===activeConnection ? ' active' : '');
+      b.textContent = c.name || c.id || 'connection';
+      b.onclick = () => { control({action:'focusConnection',connection:c.name||c.id}); term.focus(); };
+      root.appendChild(b);
+    });
+  } else {
+    const b = document.createElement('span');
+    b.className = 'conn-pill active';
+    b.textContent = activeConnection || 'default';
+    root.appendChild(b);
+  }
+  const suffix = document.createElement('span');
+  suffix.textContent = ' │ '+term.cols+'x'+term.rows+' │ mouse:'+mouseMode+' ';
+  root.appendChild(suffix);
 }
 
 function focusSession(id){
@@ -823,8 +916,61 @@ function switchSession(delta){
   const next = sessions[(i + delta + sessions.length) % sessions.length];
   if(next) focusSession(next.id);
 }
+function filteredSessionCursorForID(id){ const found = filteredSessions.findIndex(s => s.id === id); return found >= 0 ? found : Math.max(0, Math.min(modalCursor, filteredSessions.length-1)); }
+function moveSessionAtCursor(delta){
+  const cur = filteredSessions[modalCursor];
+  if(!cur) return;
+  const from = sessions.findIndex(s => s.id === cur.id);
+  const to = from + delta;
+  if(from < 0 || to < 0 || to >= sessions.length) return;
+  control({action:'move',id:cur.id,to});
+  const moved = sessions.splice(from, 1)[0];
+  sessions.splice(to, 0, moved);
+  renderTabs();
+  renderModal();
+  modalCursor = filteredSessionCursorForID(cur.id);
+  renderModal();
+}
 
-function newSession(){ openNewSession(); }
+function currentConnectionName(){ return activeConnection || (connections[0] && (connections[0].name || connections[0].id)) || 'default'; }
+function allConnections(){ return connections.length ? connections : [{id:activeConnection||'default',name:activeConnection||'default',sessionCount:sessions.length}]; }
+function filteredConnectionsList(){
+  const q = connectionFilter.trim().toLowerCase();
+  return allConnections().map((c,i)=>Object.assign({__index:i}, c)).filter(c => !q || (((c.name||c.id||'connection')+' '+(c.__index+1)).toLowerCase().includes(q)));
+}
+function connectionAtCursor(){ const list = filteredConnectionsList(); return list[Math.max(0, Math.min(modalCursor, list.length-1))]; }
+function connectionNameAtCursor(){ const c = connectionAtCursor(); return (c && (c.name || c.id)) || currentConnectionName(); }
+function filteredCursorForConnectionIndex(index){ const list = filteredConnectionsList(); const found = list.findIndex(c => c.__index === index); return found >= 0 ? found : Math.max(0, Math.min(modalCursor, list.length-1)); }
+function focusConnection(name){ if(!name) return; control({action:'focusConnection',connection:name}); term.focus(); }
+function newConnection(){
+  const suggested = 'conn-' + (connections.length + 1);
+  const name = prompt('New connection', suggested);
+  if(name && name.trim()){
+    control({action:'newConnection',connection:name.trim()});
+    if(modalOpen && modalMode === 'connections') requestAnimationFrame(() => openConnections());
+  }
+}
+function removeConnection(name){
+  const cur = name || currentConnectionName();
+  if(connections.length <= 1 || !cur) return;
+  if(confirm('Remove connection "'+cur+'" and close its sessions?')) control({action:'removeConnection',connection:cur});
+}
+function moveConnectionAtCursor(delta){
+  const c = connectionAtCursor();
+  if(!c || !connections.length) return;
+  const from = c.__index;
+  const to = from + delta;
+  if(to < 0 || to >= connections.length) return;
+  const name = c.name || c.id;
+  control({action:'moveConnection',connection:name,to});
+  const moved = connections.splice(from, 1)[0];
+  connections.splice(to, 0, moved);
+  modalCursor = filteredCursorForConnectionIndex(to);
+  renderConnectionsModal();
+  updateStatusBar();
+}
+
+function newSession(){ newReturnMode = ''; openNewSession(); }
 
 function updateNewChoice(){
   document.querySelectorAll('.choice-row').forEach((row,i)=>row.classList.toggle('selected', i===newChoice));
@@ -841,17 +987,20 @@ function setExitChoice(i){ exitChoice = Math.max(0, Math.min(1, i)); updateExitC
 function submitNewSession(){
   if(!connected) return;
   const mode = newModes[newChoice];
+  const ret = newReturnMode;
   control({
     action:'new',
     id:0,
     mode,
     cmd: mode === 'local' ? document.getElementById('new-local-cmd').value : document.getElementById('new-remote-cmd').value,
     target: document.getElementById('new-ssh-target').value,
+    port: document.getElementById('new-ssh-port').value || '22',
     password: document.getElementById('new-ssh-passwd').value,
     key: document.getElementById('new-ssh-key').value,
   });
   term.clear();
   closeModal();
+  if(ret === 'sessions') requestAnimationFrame(() => openModal());
 }
 
 function openNewSession(){
@@ -865,6 +1014,8 @@ function openNewSession(){
   document.getElementById('exit-form').style.display = 'none';
   document.getElementById('settings-form').style.display = 'none';
   document.getElementById('modal-footer').textContent = 'Enter start   Esc cancel   ↑/↓ choose   Tab fields';
+  const sshPort = document.getElementById('new-ssh-port');
+  if(sshPort && !sshPort.value) sshPort.value = '22';
   setNewChoice(0);
   document.getElementById('modal-overlay').classList.add('open');
   updateStatusBar();
@@ -876,14 +1027,16 @@ function openNewSession(){
 function openModal(){
   modalOpen = true;
   modalMode = 'sessions';
+  sessionFiltering = false;
+  sessionRenaming = false;
+  renameSessionTarget = -1;
   document.getElementById('modal-title').textContent = 'Sessions';
-  document.getElementById('session-filter').style.display = '';
+  document.getElementById('session-filter').style.display = 'none';
   document.getElementById('rename-input').style.display = 'none';
   document.getElementById('new-session-form').style.display = 'none';
   document.getElementById('exit-form').style.display = 'none';
   document.getElementById('settings-form').style.display = 'none';
   document.getElementById('session-list').style.display = '';
-  document.getElementById('session-filter').value = '';
   filteredSessions = sessions;
   moveMode = false;
   moveStart = -1;
@@ -891,23 +1044,46 @@ function openModal(){
   renderModal();
   document.getElementById('modal-overlay').classList.add('open');
   updateStatusBar();
-  document.getElementById('session-filter').focus();
+  document.getElementById('modal-overlay').focus();
 }
 
-function openRename(){
-  const s = sessions.find(s=>s.id===focusedID);
+function openRename(){ openModal(); }
+
+function openConnections(){
   modalOpen = true;
-  modalMode = 'rename';
-  document.getElementById('modal-title').textContent = 'Rename Session';
+  modalMode = 'connections';
+  connectionFiltering = false;
+  connectionMoving = false;
+  renameConnectionTarget = '';
+  document.getElementById('modal-title').textContent = 'Connections';
+  document.getElementById('session-filter').style.display = 'none';
+  document.getElementById('rename-input').style.display = 'none';
+  document.getElementById('new-session-form').style.display = 'none';
+  document.getElementById('exit-form').style.display = 'none';
+  document.getElementById('settings-form').style.display = 'none';
+  document.getElementById('session-list').style.display = '';
+  modalCursor = filteredCursorForConnectionIndex(Math.max(0, connections.findIndex(c => c.name===activeConnection || c.id===activeConnection)));
+  renderConnectionsModal();
+  document.getElementById('modal-overlay').classList.add('open');
+  updateStatusBar();
+  document.getElementById('modal-overlay').focus();
+}
+
+function openRenameConnection(name){
+  renameConnectionTarget = name || currentConnectionName();
+  modalOpen = true;
+  modalMode = 'renameConnection';
+  connectionFiltering = false;
+  connectionMoving = false;
+  document.getElementById('modal-title').textContent = 'Rename Connection';
   document.getElementById('session-filter').style.display = 'none';
   document.getElementById('rename-input').style.display = '';
   document.getElementById('new-session-form').style.display = 'none';
   document.getElementById('exit-form').style.display = 'none';
   document.getElementById('settings-form').style.display = 'none';
-  document.getElementById('session-list').style.display = '';
-  document.getElementById('session-list').innerHTML = '';
+  document.getElementById('session-list').style.display = 'none';
   document.getElementById('modal-footer').textContent = 'Enter save   Esc cancel';
-  document.getElementById('rename-input').value = s ? s.title : '';
+  document.getElementById('rename-input').value = renameConnectionTarget;
   document.getElementById('modal-overlay').classList.add('open');
   updateStatusBar();
   document.getElementById('rename-input').focus();
@@ -1014,6 +1190,12 @@ function openKeysPanel(open){
 
 function closeModal(){
   modalOpen = false;
+  sessionFiltering = false;
+  sessionRenaming = false;
+  renameSessionTarget = -1;
+  renameConnectionTarget = '';
+  connectionFiltering = false;
+  connectionMoving = false;
   document.getElementById('modal-overlay').classList.remove('open');
   document.getElementById('modal-footer').textContent = 'Type to filter   ↑↓ navigate   Enter select   Esc close';
   updateStatusBar();
@@ -1024,10 +1206,25 @@ function renderModal(){
   if(modalMode !== 'sessions') return;
   const el = document.getElementById('session-list');
   el.innerHTML = '';
-  const q = document.getElementById('session-filter').value.trim().toLowerCase();
+  const q = sessionFilter.trim().toLowerCase();
   filteredSessions = sessions.filter(s => !q || ((s.title||'')+' '+(s.id+1)).toLowerCase().includes(q));
   if(modalCursor < 0) modalCursor = 0;
   if(modalCursor >= filteredSessions.length) modalCursor = Math.max(0, filteredSessions.length-1);
+  if(sessionFilter.trim()){
+    const badge = document.createElement('div');
+    badge.className = 'sess-badge';
+    badge.style.background = 'var(--accent-pink)';
+    badge.style.color = '#fff';
+    badge.style.margin = '0 0 6px 0';
+    badge.textContent = 'Filter: '+sessionFilter;
+    el.appendChild(badge);
+  }
+  if(sessionRenaming){
+    const input = document.getElementById('rename-input');
+    input.style.display = '';
+  } else {
+    document.getElementById('rename-input').style.display = 'none';
+  }
   filteredSessions.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = 'sess-item' + (s.id===focusedID?' active':'') + (s.exited?' exited':'');
@@ -1040,13 +1237,56 @@ function renderModal(){
     row.onclick = () => { focusSession(s.id); closeModal(); };
     el.appendChild(row);
   });
-  // Scroll cursor into view
+  if(!filteredSessions.length){
+    const empty = document.createElement('div');
+    empty.className = 'sess-item';
+    empty.textContent = 'No matching sessions';
+    el.appendChild(empty);
+  }
   const rows = el.querySelectorAll('.sess-item');
   if(rows[modalCursor]) rows[modalCursor].scrollIntoView({block:'nearest'});
   const footer = document.getElementById('modal-footer');
-  footer.textContent = moveMode
-    ? '↑/↓ reorder   Space drop   Enter commit & select   Esc revert'
-    : 'Filter   ↑↓ navigate   Space reorder   Enter select   Esc close';
+  footer.textContent = sessionRenaming ? 'Rename: Enter save   Esc cancel   Backspace edits' : (sessionFiltering ? 'Filter: type pattern   Enter apply   Esc actions   Ctrl+U clear' : (moveMode ? 'Move: ↑/↓ reorder   M/Esc stop moving' : '↑↓ navigate   Enter focus   N new   R rename   M move   F filter   Del/X remove   Esc close'));
+}
+
+function renderConnectionsModal(){
+  if(modalMode !== 'connections') return;
+  const el = document.getElementById('session-list');
+  el.innerHTML = '';
+  const list = filteredConnectionsList();
+  if(modalCursor < 0) modalCursor = 0;
+  if(modalCursor >= list.length) modalCursor = Math.max(0, list.length-1);
+  if(connectionFilter.trim()){
+    const badge = document.createElement('div');
+    badge.className = 'sess-badge';
+    badge.style.background = 'var(--accent-pink)';
+    badge.style.color = '#fff';
+    badge.style.margin = '0 0 6px 0';
+    badge.textContent = 'Filter: '+connectionFilter;
+    el.appendChild(badge);
+  }
+  list.forEach((c, i) => {
+    const name = c.name || c.id || 'connection';
+    const row = document.createElement('div');
+    row.className = 'sess-item' + (name===activeConnection || c.id===activeConnection ? ' active' : '');
+    if(i === modalCursor) row.style.outline = connectionMoving ? '2px solid #ffaa33' : '1px solid #6af';
+    if(i === modalCursor && connectionMoving) row.style.background = 'color-mix(in srgb, #ffaa33 35%, transparent)';
+    row.innerHTML =
+      '<span class="sess-num">'+(c.__index+1)+'</span>'+
+      '<span class="sess-title">'+escHtml(name)+'</span>'+
+      '<span class="sess-badge running">'+(c.sessionCount||0)+' sessions</span>';
+    row.onclick = () => { focusConnection(name); closeModal(); };
+    el.appendChild(row);
+  });
+  if(!list.length){
+    const empty = document.createElement('div');
+    empty.className = 'sess-item';
+    empty.textContent = 'No matching connections';
+    el.appendChild(empty);
+  }
+  const rows = el.querySelectorAll('.sess-item');
+  if(rows[modalCursor]) rows[modalCursor].scrollIntoView({block:'nearest'});
+  document.getElementById('modal-footer').textContent = connectionMoving ? 'Move: ↑↓ reorder   M/Esc stop moving' : '↑↓ navigate   Enter focus   N new   R rename   M move   F filter   Del/X remove   Esc close';
 }
 
 function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -1054,49 +1294,7 @@ function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace
 // Keyboard nav inside modal
 document.getElementById('modal-overlay').addEventListener('keydown', e => {
   if(!modalOpen) return;
-  if(modalMode === 'sessions' && moveMode){
-    if(e.key==='Escape'){
-      e.preventDefault();
-      const cur = filteredSessions[modalCursor];
-      if(cur && cur.id !== moveStart) control({action:'move', id:cur.id, to:moveStart});
-      moveMode = false; moveStart = -1; modalCursor = Math.max(0, sessions.findIndex(s=>s.id===focusedID));
-      renderModal(); updateStatusBar();
-      return;
-    }
-    if(e.key===' ' || e.key==='Spacebar'){
-      e.preventDefault();
-      moveMode = false; moveStart = -1;
-      renderModal(); updateStatusBar();
-      return;
-    }
-    if(e.key==='Enter'){
-      e.preventDefault();
-      const cur = filteredSessions[modalCursor];
-      moveMode = false; moveStart = -1;
-      if(cur) { focusSession(cur.id); }
-      closeModal();
-      return;
-    }
-    if(e.key==='ArrowUp' && modalCursor > 0){
-      e.preventDefault();
-      const cur = filteredSessions[modalCursor];
-      const prev = filteredSessions[modalCursor-1];
-      if(cur && prev) control({action:'move', id:cur.id, to:prev.id});
-      modalCursor--;
-      return;
-    }
-    if(e.key==='ArrowDown' && modalCursor < filteredSessions.length-1){
-      e.preventDefault();
-      const cur = filteredSessions[modalCursor];
-      const next = filteredSessions[modalCursor+1];
-      if(cur && next) control({action:'move', id:cur.id, to:next.id});
-      modalCursor++;
-      return;
-    }
-    e.preventDefault();
-    return;
-  }
-  if(e.key==='Escape'){ e.preventDefault(); closeModal(); return; }
+  if(e.key==='Escape' && modalMode !== 'sessions' && modalMode !== 'connections' && modalMode !== 'new'){ e.preventDefault(); closeModal(); return; }
   if(modalMode === 'rename'){
     if(e.key==='Enter'){
       e.preventDefault();
@@ -1105,7 +1303,16 @@ document.getElementById('modal-overlay').addEventListener('keydown', e => {
     }
     return;
   }
+  if(modalMode === 'renameConnection'){
+    if(e.key==='Enter'){
+      e.preventDefault();
+      control({action:'renameConnection',connection:renameConnectionTarget||currentConnectionName(),title:document.getElementById('rename-input').value});
+      closeModal();
+    }
+    return;
+  }
   if(modalMode === 'new'){
+    if(e.key==='Escape' && newReturnMode === 'sessions'){ e.preventDefault(); closeModal(); requestAnimationFrame(() => openModal()); return; }
     if(e.key==='ArrowDown' || e.key==='ArrowRight'){ e.preventDefault(); setNewChoice(newChoice+1); return; }
     if(e.key==='ArrowUp' || e.key==='ArrowLeft'){ e.preventDefault(); setNewChoice(newChoice-1); return; }
     if(e.key==='Tab'){ return; }
@@ -1119,21 +1326,64 @@ document.getElementById('modal-overlay').addEventListener('keydown', e => {
   if(modalMode === 'exit'){
     if(e.key==='ArrowRight' || e.key==='Tab'){ e.preventDefault(); setExitChoice(1-exitChoice); return; }
     if(e.key==='ArrowLeft'){ e.preventDefault(); setExitChoice(1-exitChoice); return; }
-    if(e.key==='Enter'){ e.preventDefault(); control({action:'exit',id:focusedID,choice:exitChoice===0?'respawn':'remove'}); closeModal(); return; }
-    return;
-  }
-  if(e.key==='ArrowDown' && filteredSessions.length){ e.preventDefault(); modalCursor=(modalCursor+1)%filteredSessions.length; renderModal(); return; }
-  if(e.key==='ArrowUp' && filteredSessions.length){ e.preventDefault(); modalCursor=(modalCursor-1+filteredSessions.length)%filteredSessions.length; renderModal(); return; }
-  if((e.key===' ' || e.key==='Spacebar') && document.getElementById('session-filter').value.trim()===''){
-    if(filteredSessions[modalCursor]){
+    if(e.key==='Enter'){
       e.preventDefault();
-      moveMode = true;
-      moveStart = filteredSessions[modalCursor].id;
-      renderModal(); updateStatusBar();
+      if(exitChoice===1 && sessions.length<=1 && !confirm('Remove the last session and close this connection/server?')) return;
+      control({action:'exit',id:focusedID,choice:exitChoice===0?'respawn':'remove'});
+      closeModal();
+      return;
     }
+    if(e.key==='Escape'){ e.preventDefault(); return; }
     return;
   }
-  if(e.key==='Enter'){ e.preventDefault(); if(filteredSessions[modalCursor]){ focusSession(filteredSessions[modalCursor].id); closeModal(); } return; }
+  if(modalMode === 'connections'){
+    const list = filteredConnectionsList();
+    if(connectionFiltering){
+      if(e.key==='Escape' || e.key==='Enter'){ e.preventDefault(); connectionFiltering = false; renderConnectionsModal(); document.getElementById('modal-overlay').focus(); return; }
+      if(e.key==='Backspace'){ e.preventDefault(); connectionFilter = connectionFilter.slice(0, -1); modalCursor = 0; renderConnectionsModal(); return; }
+      if((e.ctrlKey || e.metaKey) && (e.key||'').toLowerCase()==='u'){ e.preventDefault(); connectionFilter = ''; modalCursor = 0; renderConnectionsModal(); return; }
+      if(e.key && e.key.length===1 && !e.ctrlKey && !e.metaKey){ e.preventDefault(); connectionFilter += e.key; modalCursor = 0; renderConnectionsModal(); return; }
+      return;
+    }
+    if(e.key==='Escape'){ if(connectionMoving){ e.preventDefault(); connectionMoving=false; renderConnectionsModal(); return; } }
+    if(e.key==='ArrowDown' && list.length){ e.preventDefault(); if(connectionMoving){ moveConnectionAtCursor(1); } else { modalCursor=(modalCursor+1)%list.length; renderConnectionsModal(); } return; }
+    if(e.key==='ArrowUp' && list.length){ e.preventDefault(); if(connectionMoving){ moveConnectionAtCursor(-1); } else { modalCursor=(modalCursor-1+list.length)%list.length; renderConnectionsModal(); } return; }
+    if(e.key==='Enter'){ e.preventDefault(); focusConnection(connectionNameAtCursor()); closeModal(); return; }
+    if(e.key==='n' || e.key==='N'){ e.preventDefault(); newConnection(); return; }
+    if(e.key==='r' || e.key==='R'){ e.preventDefault(); openRenameConnection(connectionNameAtCursor()); return; }
+    if(e.key==='m' || e.key==='M'){ e.preventDefault(); connectionMoving = !connectionMoving; renderConnectionsModal(); return; }
+    if(e.key==='f' || e.key==='F'){ e.preventDefault(); connectionFiltering = true; renderConnectionsModal(); return; }
+    if(e.key==='Delete' || e.key==='x' || e.key==='X'){ e.preventDefault(); removeConnection(connectionNameAtCursor()); return; }
+    return;
+  }
+  if(modalMode === 'sessions'){
+    if(sessionRenaming){
+      if(e.key==='Enter'){
+        e.preventDefault();
+        control({action:'rename',id:renameSessionTarget,title:document.getElementById('rename-input').value});
+        sessionRenaming = false; renameSessionTarget = -1; document.getElementById('rename-input').style.display = 'none'; renderModal(); return;
+      }
+      if(e.key==='Escape'){ e.preventDefault(); sessionRenaming = false; renameSessionTarget = -1; renderModal(); document.getElementById('modal-overlay').focus(); return; }
+      return;
+    }
+    if(sessionFiltering){
+      if(e.key==='Escape' || e.key==='Enter'){ e.preventDefault(); sessionFiltering = false; renderModal(); document.getElementById('modal-overlay').focus(); return; }
+      if(e.key==='Backspace'){ e.preventDefault(); sessionFilter = sessionFilter.slice(0, -1); modalCursor = 0; renderModal(); return; }
+      if((e.ctrlKey || e.metaKey) && (e.key||'').toLowerCase()==='u'){ e.preventDefault(); sessionFilter = ''; modalCursor = 0; renderModal(); return; }
+      if(e.key && e.key.length===1 && !e.ctrlKey && !e.metaKey){ e.preventDefault(); sessionFilter += e.key; modalCursor = 0; renderModal(); return; }
+      return;
+    }
+    if(e.key==='Escape'){ if(moveMode){ e.preventDefault(); moveMode=false; renderModal(); return; } }
+    if(e.key==='ArrowDown' && filteredSessions.length){ e.preventDefault(); if(moveMode){ moveSessionAtCursor(1); } else { modalCursor=(modalCursor+1)%filteredSessions.length; renderModal(); } return; }
+    if(e.key==='ArrowUp' && filteredSessions.length){ e.preventDefault(); if(moveMode){ moveSessionAtCursor(-1); } else { modalCursor=(modalCursor-1+filteredSessions.length)%filteredSessions.length; renderModal(); } return; }
+    if(e.key==='Enter'){ e.preventDefault(); if(filteredSessions[modalCursor]){ focusSession(filteredSessions[modalCursor].id); closeModal(); } return; }
+    if(e.key==='n' || e.key==='N'){ e.preventDefault(); newReturnMode = 'sessions'; openNewSession(); return; }
+    if(e.key==='r' || e.key==='R'){ e.preventDefault(); const s=filteredSessions[modalCursor]; if(s){ sessionRenaming=true; renameSessionTarget=s.id; document.getElementById('rename-input').value=s.title||('Session '+(s.id+1)); renderModal(); document.getElementById('rename-input').focus(); document.getElementById('rename-input').select(); } return; }
+    if(e.key==='m' || e.key==='M'){ e.preventDefault(); moveMode=!moveMode; renderModal(); return; }
+    if(e.key==='f' || e.key==='F'){ e.preventDefault(); sessionFiltering=true; renderModal(); return; }
+    if(e.key==='Delete' || e.key==='x' || e.key==='X'){ e.preventDefault(); const s=filteredSessions[modalCursor]; if(s && sessions.length>1 && confirm('Delete session "'+(s.title||('Session '+(s.id+1)))+'"?')){ control({action:'kill',id:s.id}); } return; }
+    return;
+  }
 });
 
 document.getElementById('session-filter').addEventListener('input', () => { modalCursor = 0; renderModal(); });
@@ -1145,7 +1395,7 @@ document.getElementById('modal-overlay').addEventListener('click', e => {
 
 document.querySelectorAll('input[name="new-mode"]').forEach((el,i)=>el.onchange=()=>setNewChoice(i));
 document.getElementById('exit-respawn').onclick = () => { setExitChoice(0); control({action:'exit',id:focusedID,choice:'respawn'}); closeModal(); };
-document.getElementById('exit-remove').onclick = () => { setExitChoice(1); control({action:'exit',id:focusedID,choice:'remove'}); closeModal(); };
+document.getElementById('exit-remove').onclick = () => { setExitChoice(1); if(sessions.length<=1 && !confirm('Remove the last session and close this connection/server?')) return; control({action:'exit',id:focusedID,choice:'remove'}); closeModal(); };
 document.getElementById('set-theme').onchange = e => applySetting('theme', e.target.value);
 document.getElementById('set-accent').oninput = e => applySetting('accent', e.target.value);
 document.getElementById('set-terminalbg').oninput = e => applySetting('terminalBg', e.target.value);
@@ -1169,6 +1419,11 @@ function openMenu(open){
 document.getElementById('btn-menu').onclick = (e) => { e.stopPropagation(); openMenu(); };
 document.addEventListener('click', e => { if(!e.target.closest('#menu-wrap')) openMenu(false); });
 document.getElementById('m-sessions').onclick = () => { openMenu(false); openModal(); };
+document.getElementById('m-connections').onclick = () => { openMenu(false); openConnections(); };
+document.getElementById('m-prevconn').onclick = () => { openMenu(false); control({action:'prevConnection'}); term.focus(); };
+document.getElementById('m-nextconn').onclick = () => { openMenu(false); control({action:'nextConnection'}); term.focus(); };
+document.getElementById('m-newconn').onclick = () => { openMenu(false); newConnection(); term.focus(); };
+document.getElementById('m-renameconn').onclick = () => { openMenu(false); openRenameConnection(currentConnectionName()); };
 document.getElementById('m-prev').onclick = () => { openMenu(false); switchSession(-1); term.focus(); };
 document.getElementById('m-next').onclick = () => { openMenu(false); switchSession(1);  term.focus(); };
 document.getElementById('m-new').onclick = () => { openMenu(false); newSession(); };
@@ -1191,8 +1446,15 @@ function handleAppShortcut(e){
   const arrowL = (e.key==='ArrowLeft'  || e.code==='ArrowLeft');
   const arrowR = (e.key==='ArrowRight' || e.code==='ArrowRight');
   const onlyCtrlAlt = e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey;
+  const bracketL = (e.key==='[' || e.code==='BracketLeft');
+  const bracketR = (e.key===']' || e.code==='BracketRight');
   if(onlyCtrlAlt && arrowL){ e.preventDefault(); e.stopPropagation(); switchSession(-1); return true; }
   if(onlyCtrlAlt && arrowR){ e.preventDefault(); e.stopPropagation(); switchSession(1); return true; }
+  if(onlyCtrlAlt && bracketL){ e.preventDefault(); e.stopPropagation(); control({action:'prevConnection'}); return true; }
+  if(onlyCtrlAlt && bracketR){ e.preventDefault(); e.stopPropagation(); control({action:'nextConnection'}); return true; }
+  if(onlyCtrlAlt && (e.code==='KeyO' || (e.key||'').toLowerCase()==='o')){ e.preventDefault(); e.stopPropagation(); openConnections(); return true; }
+  if(onlyCtrlAlt && (e.code==='KeyE' || (e.key||'').toLowerCase()==='e')){ e.preventDefault(); e.stopPropagation(); openRenameConnection(currentConnectionName()); return true; }
+  if(onlyCtrlAlt && (e.code==='KeyC' || (e.key||'').toLowerCase()==='c')){ e.preventDefault(); e.stopPropagation(); newConnection(); return true; }
   if(e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey){
     // Prefer e.code over e.key because some keyboard layouts (US-Intl,
     // macOS Option, AltGr layouts) compose Alt+letter into special chars,
