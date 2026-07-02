@@ -34,6 +34,7 @@ const (
 	modeConnections
 	modeQuitConfirm
 	modeDeleteConfirm
+	modeScrollSearch
 )
 
 type connectionState struct {
@@ -88,6 +89,7 @@ type state struct {
 	connMoving         bool
 	mouseCapture       bool               // when true, mouse events are forwarded to the child PTY (app-mode)
 	sel                selection          // in-progress / completed mouse selection over the focused buffer
+	search             scrollSearch       // vi-style scrollback search ('/') and line jump (':')
 	sshClient          *ssh_client.Client // non-nil starts SSH-backed sessions
 	onMetaChange       func()             // called when sessions are added/removed/focused
 	wsTransport        *transport.WSTransport
@@ -440,9 +442,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wsControlMsg:
 		switch msg.Action {
 		case "focus":
-			s.manager.Focus(msg.ID)
-			s.refreshFocused()
-			s.notifyMeta()
+			// Only the client that actually changes the focus is the active
+			// one; its own follow-up resize sets the authoritative size. When
+			// another client is merely catching up to a focus someone else
+			// initiated (msg.ID already focused), do NOT refreshFocused —
+			// that would re-push the local TUI size and clobber the
+			// initiator's dimensions ("last one wins"). The transport layer
+			// still sends this client its snapshot regardless.
+			if msg.ID != s.manager.FocusedIndex() {
+				s.manager.Focus(msg.ID)
+				s.refreshFocused()
+				s.notifyMeta()
+			}
 		case "new":
 			s.handleWSNew(m, transport.ControlMsg(msg))
 		case "kill":
@@ -569,6 +580,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					vp.SetContent(sess.Screen().Render())
 					vp.GotoBottom()
 					s.clearSelection()
+					s.clearSearch()
 				} else if s.scrollbackMode[idx] && !alt {
 					// User is browsing scrollback: keep the full content so
 					// YOffset stays meaningful relative to it.
@@ -580,6 +592,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						s.scrollbackMode[idx] = false
 						vp.SetContent(sess.Screen().Render())
 						anchorViewportToCursor(vp, sess)
+						s.clearSearch()
 					}
 				} else {
 					// Hot path: only the visible screen, bounded cols x rows
@@ -684,8 +697,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Mouse-capture mode: forward to the child PTY for apps like btop,
-		// htop, vim, lazygit. When disabled, Bubble Tea leaves mouse selection
-		// to the outer terminal by not enabling mouse reporting.
+		// htop, vim, lazygit. When disabled (select mode), the block below
+		// owns the wheel (scrollback) and left-drag (selection/copy) instead.
 		if s.mouseCapture {
 			if !inPane {
 				return m, nil
@@ -707,6 +720,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_, _ = sess.Write(seq)
 			}
 			return m, nil
+		}
+		// Select mode: the local UI owns the mouse. The wheel drives the
+		// scrollback buffer (same movement as Ctrl+Alt+PgUp/PgDown), and
+		// left-drag builds a selection that is copied to the clipboard on
+		// release. Clamp coordinates so a drag/release that drifts into the
+		// tab/status bar still updates and finishes the selection.
+		clampX := ev.X
+		if clampX < 0 {
+			clampX = 0
+		}
+		if clampX >= s.width {
+			clampX = s.width - 1
+		}
+		clampY := ev.Y
+		if clampY < 0 {
+			clampY = 0
+		}
+		if clampY >= paneRows {
+			clampY = paneRows - 1
+		}
+		switch ev.Button {
+		case tea.MouseWheelUp:
+			if inPane {
+				s.scrollFocused(-3)
+			}
+			return m, nil
+		case tea.MouseWheelDown:
+			if inPane {
+				s.scrollFocused(3)
+			}
+			return m, nil
+		}
+		// Shift+drag bypasses our app-level selection so the terminal's own
+		// native selection/copy takes over. Most terminals already route
+		// Shift-modified mouse events to native selection while reporting is
+		// on; skipping here guarantees we never fight it (and never leave a
+		// stray app selection behind).
+		if ev.Mod.Contains(tea.ModShift) {
+			if s.sel.active || s.sel.hasRange {
+				s.clearSelection()
+			}
+			return m, nil
+		}
+		switch ev.Action {
+		case mousePress:
+			if ev.Button == tea.MouseLeft && inPane {
+				s.startSelection(clampX, clampY)
+			}
+			// Right-click copies the current selection to the clipboard,
+			// then clears the selection and returns to the live screen.
+			if ev.Button == tea.MouseRight {
+				cmd := s.copySelection()
+				s.clearSelection()
+				s.bottomFocused()
+				return m, cmd
+			}
+		case mouseMotion:
+			if s.sel.active {
+				s.updateSelection(clampX, clampY)
+			}
+		case mouseRelease:
+			if s.sel.active {
+				s.updateSelection(clampX, clampY)
+				return m, s.finishSelection()
+			}
 		}
 		return m, nil
 
@@ -746,8 +824,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := s.handleDeleteConfirmKey(msg)
 			return m, cmd
 		}
+		if s.mode == modeScrollSearch {
+			return m, s.handleScrollSearchKey(msg)
+		}
 		if handled, cmd := s.handleShortcut(m, msg); handled {
 			return m, cmd
+		}
+		// vi-style scrollback navigation ('/', ':', 'n', 'N') is consumed
+		// only while the focused session is scrolled into its buffer.
+		if s.maybeScrollSearchTrigger(msg) {
+			return m, nil
 		}
 		// Any other keypress clears a stale transient status toast.
 		s.statusMsg = ""
@@ -776,6 +862,16 @@ func (m Model) View() tea.View {
 	view.AltScreen = true
 	if m.s.mouseCapture {
 		view.MouseMode = tea.MouseModeAllMotion
+	} else {
+		// Select mode still needs mouse reporting so we receive wheel events
+		// (scrollback) and drag events (selection/copy). CellMotion (1002)
+		// reports press/release + motion-while-pressed + wheel, which is all
+		// we need and far less chatty than AllMotion. Enabling reporting
+		// disables the terminal's native click-drag selection, so we own
+		// selection ourselves (see the MouseMsg handler + overlaySelection);
+		// Shift+drag still falls through to native selection in most
+		// terminals.
+		view.MouseMode = tea.MouseModeCellMotion
 	}
 	view.Cursor = m.cursor()
 	return view
@@ -946,6 +1042,7 @@ func (s *state) bottomFocused() {
 			}
 		}
 		s.scrollbackMode[idx] = false
+		s.clearSearch()
 	}
 	s.viewports[idx] = vp
 }
@@ -969,6 +1066,7 @@ func (s *state) refreshFocused() {
 			vp.SetContent(sess.Screen().Render())
 			vp.GotoBottom()
 			s.scrollbackMode[idx] = false
+			s.clearSearch()
 			s.viewports[idx] = vp
 			s.maybePromptExited(sess)
 			return
@@ -1131,9 +1229,11 @@ func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	case shortcutMouse:
 		s.mouseCapture = !s.mouseCapture
 		s.clearSelection()
-		if !s.mouseCapture {
-			return true, resetTerminalInputModes
-		}
+		// Both modes keep mouse reporting on (app-mode forwards to the child,
+		// select-mode owns wheel+selection). View() switches MouseMode and the
+		// renderer emits the needed enable/disable transitions, so we must NOT
+		// raw-reset mouse modes here — doing so would disable reporting after
+		// the renderer already enabled it, silently breaking wheel scroll.
 		return true, nil
 	}
 	// Ctrl+Alt+<digit> (or the more portable Alt+<digit>): jump to session.
@@ -1754,6 +1854,10 @@ func (m Model) renderPane() string {
 	var pane string
 	if vp, ok := s.viewports[idx]; ok {
 		pane = s.renderPaneContent(vp, paneCols, paneRows)
+		if !s.mouseCapture {
+			pane = s.overlaySelection(pane, paneCols, paneRows)
+		}
+		pane = s.overlaySearch(pane, paneCols, paneRows)
 		if s.scrollbackMode[idx] && !vp.AtBottom() {
 			pane = overlayScrollIndicator(pane, vp, paneCols, paneRows)
 		}
@@ -1988,7 +2092,12 @@ func (m Model) renderHelpModal() string {
 		"Ctrl+Alt+PgUp/PgDown page scrollback",
 		"Ctrl+Alt+Up/Down     line scrollback",
 		"Ctrl+Alt+Home/End    top/bottom of scrollback",
+		"/ (in scrollback)    search buffer; n / N next/prev match",
+		": (in scrollback)    jump to line number",
 		"Ctrl+Alt+M           toggle mouse mode (select ↔ app)",
+		"Wheel (select mode)  scroll the scrollback buffer",
+		"Right-click          copy selection, exit scrollback",
+		"Shift+drag           native terminal selection / copy",
 		"Ctrl+Alt+Q           quit",
 		"",
 		"Esc or Enter closes this help",
@@ -2215,6 +2324,18 @@ func (m Model) renderStatusBar() string {
 	}
 	if s.mode == modeExitPrompt {
 		help := helpStyle.Render(" Session exited — choose action in modal")
+		left := status
+		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+			left += statusBarStyle.Render(strings.Repeat(" ", pad))
+		}
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
+	}
+	if s.mode == modeScrollSearch {
+		prefix := "/"
+		if s.search.lineJump {
+			prefix = ":"
+		}
+		help := helpStyle.Render(" " + prefix + renderWithCursor(s.search.input, len([]rune(s.search.input))) + "  Enter go  Esc cancel")
 		left := status
 		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))

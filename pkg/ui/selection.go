@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -29,15 +30,36 @@ func (sel selection) normalized() (sl, sc, el, ec int) {
 	return
 }
 
+// paneRowBase returns the BufferLines index that corresponds to pane row 0.
+//
+// In scrollback mode the viewport content is the full buffer (scrollback +
+// screen), so the base is simply the viewport's YOffset. In the live path the
+// viewport content is only the current screen (Render()), which is the *tail*
+// of BufferLines; the base must therefore be shifted by the scrollback length
+// (len(BufferLines) - visibleScreenRows) so mouse rows map onto the visible
+// screen rather than the top of scrollback.
+func (s *state) paneRowBase(idx int, vp *viewport.Model) int {
+	base := vp.YOffset()
+	if !s.scrollbackMode[idx] {
+		if sess := s.manager.Focused(); sess != nil {
+			_, rows := paneSize(s.width, s.height)
+			if off := len(sess.Screen().BufferLines()) - rows; off > 0 {
+				base += off
+			}
+		}
+	}
+	return base
+}
+
 // bufferRowFromMouse maps a mouse event Y inside the pane to a buffer line
-// index, using the viewport's current YOffset.
+// index.
 func (s *state) bufferRowFromMouse(yInPane int) int {
 	idx := s.manager.FocusedIndex()
 	vp, ok := s.viewports[idx]
 	if !ok {
 		return -1
 	}
-	return vp.YOffset() + yInPane
+	return s.paneRowBase(idx, vp) + yInPane
 }
 
 // startSelection begins a fresh selection at the given mouse coordinates
@@ -91,6 +113,43 @@ func (s *state) finishSelection() tea.Cmd {
 	return tea.SetClipboard(text)
 }
 
+// clampRange bounds startX and endX into [0, n] and guarantees endX >= startX,
+// so slicing runes[startX:endX] is always safe. The start column can legally
+// exceed a short line's length (the mouse was pressed past its text, common
+// when selecting across scrollback), and without clamping start the
+// endX = startX fallback below could exceed the slice and panic.
+func clampRange(startX, endX, n int) (int, int) {
+	if startX < 0 {
+		startX = 0
+	}
+	if startX > n {
+		startX = n
+	}
+	if endX > n {
+		endX = n
+	}
+	if endX < startX {
+		endX = startX
+	}
+	return startX, endX
+}
+
+// copySelection copies the current completed selection (if any) to the system
+// clipboard without requiring a left-button release. This backs the
+// right-click-to-copy gesture, which works regardless of scroll position.
+func (s *state) copySelection() tea.Cmd {
+	if !s.sel.hasRange {
+		return nil
+	}
+	text := s.selectionText()
+	if text == "" {
+		return nil
+	}
+	copyToClipboard(text)
+	debugLog("copySelection: copied %d bytes", len(text))
+	return tea.SetClipboard(text)
+}
+
 // clearSelection drops any current selection (e.g. after content changes).
 func (s *state) clearSelection() {
 	s.sel = selection{}
@@ -128,15 +187,7 @@ func (s *state) selectionText() string {
 		if row == el {
 			endX = ec + 1 // inclusive of cursor cell
 		}
-		if startX < 0 {
-			startX = 0
-		}
-		if endX > len(runes) {
-			endX = len(runes)
-		}
-		if endX < startX {
-			endX = startX
-		}
+		startX, endX = clampRange(startX, endX, len(runes))
 		b.WriteString(string(runes[startX:endX]))
 		if row < el && !lines[row].SoftWrap {
 			b.WriteByte('\n')
@@ -168,7 +219,7 @@ func (s *state) overlaySelection(pane string, paneCols, paneRows int) string {
 	if !ok {
 		return pane
 	}
-	yoff := vp.YOffset()
+	yoff := s.paneRowBase(idx, vp)
 	paneLines := strings.Split(pane, "\n")
 	for i := 0; i < len(paneLines) && i < paneRows; i++ {
 		row := yoff + i
@@ -192,15 +243,7 @@ func (s *state) overlaySelection(pane string, paneCols, paneRows int) string {
 		if row == el {
 			selEnd = ec + 1
 		}
-		if selStart < 0 {
-			selStart = 0
-		}
-		if selEnd > len(runes) {
-			selEnd = len(runes)
-		}
-		if selEnd < selStart {
-			selEnd = selStart
-		}
+		selStart, selEnd = clampRange(selStart, selEnd, len(runes))
 		var b strings.Builder
 		b.WriteString(string(runes[:selStart]))
 		b.WriteString("\x1b[7m")

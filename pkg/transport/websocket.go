@@ -453,6 +453,10 @@ body.ws-connecting #reconnect-overlay,body.ws-disconnected #reconnect-overlay{di
 .conn-pill.active{background:color-mix(in srgb,var(--accent-violet) 72%,var(--panel));color:#fff;border-color:var(--accent-violet)}
 #modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
 #modal-overlay.open{display:flex}
+/* While the session-tied exit modal is open, keep the tab bar and status bar
+   above the dimming overlay so their session/connection switch buttons stay
+   clickable — switching context is the intended way to leave the modal. */
+body.exit-modal-open #tabbar,body.exit-modal-open #statusbar{position:relative;z-index:110}
 #modal{background:var(--panel);border:1px solid var(--border-strong);border-radius:10px;padding:16px;min-width:320px;max-width:620px;width:90%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px #000a;color:var(--text);font-family:var(--font)}
 #modal-body{overflow-y:auto;min-height:0;flex:1 1 auto;margin:-4px -4px 0;padding:4px}
 #modal h2{font-size:13px;color:var(--text-muted);margin-bottom:10px;font-weight:normal;text-transform:uppercase;letter-spacing:.08em}
@@ -629,8 +633,16 @@ let activeConnection = '';
 let serverName = '';
 let filteredSessions = [];
 let focusedID = 0;
+// True only between the moment this client initiates a connection switch and
+// when it adopts the resulting metadata broadcast. It lets the *initiating*
+// client push its size as authoritative while other clients that merely adopt
+// the broadcast leave the initiator's size untouched (avoids "last one wins").
+let weInitiatedSwitch = false;
 let modalOpen = false;
 let modalMode = 'sessions';
+// The exit modal is tied to a specific session (like the TUI's per-session
+// exit prompt), not global. -1 means no exit modal is showing.
+let exitModalSession = -1;
 let modalCursor = 0;
 let sessionFilter = '';
 let sessionFiltering = false;
@@ -743,7 +755,7 @@ function setConnectionState(state){
 }
 
 function send(data){ if(ws && ws.readyState===1) ws.send(data); }
-function control(obj){ const b=new TextEncoder().encode(JSON.stringify(obj)); const m=new Uint8Array(1+b.length); m[0]=0x01; m.set(b,1); send(m); }
+function control(obj){ if(obj && (obj.action==='focusConnection'||obj.action==='prevConnection'||obj.action==='nextConnection'||obj.action==='newConnection'||obj.action==='removeConnection')){ weInitiatedSwitch = true; } const b=new TextEncoder().encode(JSON.stringify(obj)); const m=new Uint8Array(1+b.length); m[0]=0x01; m.set(b,1); send(m); }
 function keystroke(str){ const b=new TextEncoder().encode(str); const m=new Uint8Array(1+b.length); m[0]=0x00; m.set(b,1); send(m); }
 
 const terminalWriter = (() => {
@@ -833,6 +845,9 @@ function startWebSocket(){
       activeConnection = meta.activeConnection || '';
       serverName = meta.server || '';
       if(typeof meta.focusedId === 'number' && (focusedID !== meta.focusedId || prevConnection !== activeConnection)){
+        const connChanged = (prevConnection !== activeConnection);
+        const initiated = weInitiatedSwitch;
+        weInitiatedSwitch = false;
         focusedID = meta.focusedId;
         // Drain any still-queued bytes from the previous session before
         // clearing, otherwise leftover ESC-mid-sequence bytes will be
@@ -840,7 +855,15 @@ function startWebSocket(){
         terminalWriter.reset();
         term.reset();
         control({action:'focus',id:focusedID});
-        sendResize();
+        // Only resize when THIS client initiated the switch. A session focus
+        // is initiated locally via focusSession() (which resizes directly and
+        // never reaches this branch), so any session-only change here is an
+        // adopter catching up and must not resize. A connection switch does
+        // not know the new focusedId until this broadcast, so its initiator
+        // resizes here — but only if it was the one that asked for it.
+        if(connChanged && initiated){
+          sendResize();
+        }
         term.focus();
       }
     }
@@ -855,6 +878,13 @@ function updateLabel(){
   const s = sessions.find(s=>s.id===focusedID);
   renderTabs();
   updateStatusBar();
+  // The exit modal belongs to one session. If we've switched to a different
+  // session (or that session is no longer exited), dismiss the stale modal so
+  // it isn't shown over an unrelated session — matching the TUI, where the
+  // exit prompt is tied to the focused session rather than being global.
+  if(modalOpen && modalMode==='exit' && (focusedID !== exitModalSession || !(s && s.exited))){
+    closeModal();
+  }
   if(s && s.exited && !modalOpen) openExitModal(s.id);
 }
 
@@ -1093,6 +1123,7 @@ function openRenameConnection(name){
 function openExitModal(sessionID){
   modalOpen = true;
   modalMode = 'exit';
+  exitModalSession = sessionID;
   focusedID = sessionID;
   document.getElementById('modal-title').textContent = 'Session Exited';
   document.getElementById('session-filter').style.display = 'none';
@@ -1101,7 +1132,8 @@ function openExitModal(sessionID){
   document.getElementById('session-list').style.display = 'none';
   document.getElementById('settings-form').style.display = 'none';
   document.getElementById('exit-form').style.display = '';
-  document.getElementById('modal-footer').textContent = 'Enter confirm   ←/→ choose   Esc close';
+  document.body.classList.add('exit-modal-open');
+  document.getElementById('modal-footer').textContent = 'Enter confirm   ←/→ choose   (switch session/connection to leave)';
   setExitChoice(0);
   document.getElementById('modal-overlay').classList.add('open');
   updateStatusBar();
@@ -1190,6 +1222,8 @@ function openKeysPanel(open){
 
 function closeModal(){
   modalOpen = false;
+  exitModalSession = -1;
+  document.body.classList.remove('exit-modal-open');
   sessionFiltering = false;
   sessionRenaming = false;
   renameSessionTarget = -1;
@@ -1294,7 +1328,7 @@ function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace
 // Keyboard nav inside modal
 document.getElementById('modal-overlay').addEventListener('keydown', e => {
   if(!modalOpen) return;
-  if(e.key==='Escape' && modalMode !== 'sessions' && modalMode !== 'connections' && modalMode !== 'new'){ e.preventDefault(); closeModal(); return; }
+  if(e.key==='Escape' && modalMode !== 'sessions' && modalMode !== 'connections' && modalMode !== 'new' && modalMode !== 'exit'){ e.preventDefault(); closeModal(); return; }
   if(modalMode === 'rename'){
     if(e.key==='Enter'){
       e.preventDefault();
@@ -1391,6 +1425,10 @@ document.getElementById('session-filter').addEventListener('input', () => { moda
 
 // Close on backdrop click
 document.getElementById('modal-overlay').addEventListener('click', e => {
+  // The exit modal is tied to its session: it must only be dismissed by its
+  // own respawn/remove buttons or by switching session/connection — never by
+  // a stray backdrop click. Other modals still close on backdrop click.
+  if(modalMode==='exit') return;
   if(e.target === document.getElementById('modal-overlay')) closeModal();
 });
 
