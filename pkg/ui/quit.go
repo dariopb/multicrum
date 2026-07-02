@@ -28,12 +28,15 @@ func (s *state) handleQuitConfirmKey(msg tea.KeyPressMsg) tea.Cmd {
 
 func (s *state) shutdownAll() tea.Cmd {
 	for _, conn := range s.connections {
-		if conn.manager == nil {
-			continue
+		if conn.manager != nil {
+			_ = conn.manager.CloseAll()
 		}
-		for _, sess := range conn.manager.Sessions() {
-			_ = sess.Close()
-		}
+	}
+	if s.wsTransport != nil {
+		_ = s.wsTransport.Close()
+	}
+	if s.inputMux != nil {
+		_ = s.inputMux.Close()
 	}
 	return tea.Quit
 }

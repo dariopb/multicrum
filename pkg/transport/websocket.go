@@ -1330,6 +1330,7 @@ document.getElementById('modal-overlay').addEventListener('keydown', e => {
       e.preventDefault();
       if(exitChoice===1 && sessions.length<=1 && !confirm('Remove the last session and close this connection/server?')) return;
       control({action:'exit',id:focusedID,choice:exitChoice===0?'respawn':'remove'});
+      if(exitChoice===0) sendResize();
       closeModal();
       return;
     }
@@ -1394,7 +1395,7 @@ document.getElementById('modal-overlay').addEventListener('click', e => {
 });
 
 document.querySelectorAll('input[name="new-mode"]').forEach((el,i)=>el.onchange=()=>setNewChoice(i));
-document.getElementById('exit-respawn').onclick = () => { setExitChoice(0); control({action:'exit',id:focusedID,choice:'respawn'}); closeModal(); };
+document.getElementById('exit-respawn').onclick = () => { setExitChoice(0); control({action:'exit',id:focusedID,choice:'respawn'}); sendResize(); closeModal(); };
 document.getElementById('exit-remove').onclick = () => { setExitChoice(1); if(sessions.length<=1 && !confirm('Remove the last session and close this connection/server?')) return; control({action:'exit',id:focusedID,choice:'remove'}); closeModal(); };
 document.getElementById('set-theme').onchange = e => applySetting('theme', e.target.value);
 document.getElementById('set-accent').oninput = e => applySetting('accent', e.target.value);

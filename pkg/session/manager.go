@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -228,6 +229,27 @@ func (m *SessionManager) Respawn(index int) error {
 	cols, rows := m.cols, m.rows
 	m.mu.Unlock()
 	return s.Respawn(cols, rows)
+}
+
+// CloseAll stops every session and clears the manager state.
+func (m *SessionManager) CloseAll() error {
+	m.mu.Lock()
+	sessions := append([]*Session(nil), m.sessions...)
+	m.sessions = nil
+	m.focused = 0
+	m.updateTerminalRepliesLocked()
+	m.mu.Unlock()
+
+	var errs []error
+	for _, s := range sessions {
+		if err := s.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 // ByID returns the session with the given index (or nil).

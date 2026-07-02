@@ -3,6 +3,8 @@ package session
 import (
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"multicrum/pkg/ssh_client"
@@ -119,10 +121,13 @@ func (s *Session) Title() string {
 	if s.title != "" {
 		return s.title
 	}
+	if strings.TrimSpace(s.cmdLine) != "" {
+		return strings.TrimSpace(s.cmdLine)
+	}
 	if len(s.cmd) == 0 {
 		return "?"
 	}
-	return s.cmd[0]
+	return filepath.Base(s.cmd[0])
 }
 
 // SetTitle overrides the tab label for this session.

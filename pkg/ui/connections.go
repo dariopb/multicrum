@@ -124,9 +124,13 @@ func (s *state) removeConnection(index int) {
 	if len(s.connections) <= 1 || index < 0 || index >= len(s.connections) {
 		return
 	}
-	for _, sess := range s.connections[index].manager.Sessions() {
-		_ = sess.Close()
+	conn := s.connections[index]
+	if conn.manager != nil {
+		_ = conn.manager.CloseAll()
 	}
+	conn.viewports = nil
+	conn.altScreens = nil
+	conn.scrollbackMode = nil
 	s.connections = append(s.connections[:index], s.connections[index+1:]...)
 	if s.activeConn >= len(s.connections) {
 		s.activeConn = len(s.connections) - 1

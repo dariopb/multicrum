@@ -54,6 +54,15 @@ func (s *state) handleWSExit(msg transport.ControlMsg) {
 	}
 	if choice == "respawn" {
 		if err := s.manager.Respawn(id); err == nil {
+			// Push the local TUI's pane size after respawn so the freshly
+			// started PTY is consistent with the in-process viewer. The
+			// browser will fit() and overwrite this with its own size once
+			// it sees the snapshot — same last-resizer-wins behavior used
+			// elsewhere — but if the browser tab is closed when respawn
+			// happens, this prevents the new PTY from sitting at the stale
+			// cached cols/rows.
+			cols, rows := paneSize(s.width, s.height)
+			s.manager.ResizeOne(id, cols, rows)
 			s.resetViewport(id, s.width, s.height)
 			s.notifyMeta()
 		}

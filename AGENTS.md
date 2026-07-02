@@ -31,6 +31,10 @@ go run ./cmd/multicrum/ --cmd "bash" --ws :9999 --token mytoken
 
 Go is expected to be available in `PATH`. Use `go build -v ./cmd/multicrum/` for build verification; do not use hard-coded local Go installation paths.
 
+## Commit Messages
+
+For broad commits, use a detailed multi-bullet commit body summarizing the major areas changed, without being too verbose.
+
 ## Architecture & Data Flow
 
 ```text
@@ -174,6 +178,18 @@ Rules:
 - On new session creation, call `resetViewport()` for the new focused index, not just `ensureViewport()`, so a reused index cannot show stale content.
 - Deleting a session removes its current viewport key; remaining sessions are reindexed by `SessionManager.Kill()`.
 - Killing the final remaining session is intentionally blocked in both manager/UI paths.
+
+## Resize Synchronization Across Viewers
+
+A session can be observed by multiple viewers at different sizes — the local TUI, one or more attached clients (over the local Unix-socket server), and one or more browsers connected to `--ws`. The PTY/ConPTY only has one size, so multicrum uses a "last-resizer-wins" rule: whichever surface most recently issued a resize is the authoritative size.
+
+`SessionManager` caches a `cols/rows` pair updated by `ResizeAll` and used by `New`/`Respawn`. `ResizeOne` (used for browser-driven resizes) does **not** update that cache, so it is intentionally per-session. To keep the active viewer consistent across focus/respawn boundaries:
+
+- `tea.WindowSizeMsg` calls `ResizeAll(cols,rows)` on **every** connection's manager (not just the active one), so background connections don't drift to stale init sizes when later focused or when `New`/`Respawn` runs there.
+- `state.refreshFocused()` calls `ResizeOne(idx, paneCols, paneRows)` on the now-focused session so the local viewer sees the session at its own dimensions immediately. Browser viewers will then `fit()` and re-resize via `wsResizeMsg` — last-resizer-wins still holds.
+- `state.resolveExitPrompt()` (TUI) and `handleWSExit()` (WS) call `ResizeOne(id, paneCols, paneRows)` after `manager.Respawn(id)` so the freshly started PTY is in sync with the viewer that asked for the respawn. The browser JS exit handler also issues `sendResize()` after sending `action:"exit", choice:"respawn"`, so a browser-initiated respawn sizes the new PTY to the browser xterm.
+
+When adding new code paths that mutate the session set (focus change, new session, respawn, move, connection switch), always re-push the active viewer's pane size to the affected session. Otherwise viewers will diverge into "two/three buffer representations" — different layouts in TUI vs. browser, broken popup placement, and offset cursors.
 
 ## VTScreen Rendering and Replay
 

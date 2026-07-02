@@ -409,7 +409,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.width = msg.Width
 		s.height = msg.Height
 		cols, rows := paneSize(s.width, s.height)
-		s.manager.ResizeAll(cols, rows)
+		// Resize every connection's manager so each one's cached cols/rows
+		// (used by Respawn/New) tracks the current TUI size — otherwise a
+		// background connection keeps its stale init size and any session
+		// created or respawned there starts at the wrong dimensions.
+		for _, conn := range s.connections {
+			if conn.manager != nil {
+				conn.manager.ResizeAll(cols, rows)
+			}
+		}
 		for idx, vp := range s.viewports {
 			vp.SetWidth(cols)
 			vp.SetHeight(rows)
@@ -945,6 +953,16 @@ func (s *state) bottomFocused() {
 func (s *state) refreshFocused() {
 	idx := s.manager.FocusedIndex()
 	s.ensureViewport(idx, s.width, s.height)
+	// Re-push the current TUI pane size to whichever session just became
+	// focused. Without this, a session that another viewer (a browser tab,
+	// or another attached TUI client) had previously resized to its own
+	// dimensions would stay at that stale size when the local viewer
+	// switches to it — producing the "two/three buffer representations"
+	// drift across viewers. The "last resizer wins" model already lets a
+	// browser fit() override us right after; this just guarantees the
+	// active viewer at the moment of focus is consistent.
+	cols, rows := paneSize(s.width, s.height)
+	s.manager.ResizeOne(idx, cols, rows)
 	for _, sess := range s.manager.Sessions() {
 		if sess.Index() == idx {
 			vp := s.viewports[idx]
@@ -1021,11 +1039,18 @@ func (s *state) handleGlobalShortcut(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		s.focusConnection(s.activeConn + 1)
 		return true, nil
 	}
-	if key == shortcutNew {
-		s.openNewSessionModal(nil)
-		return true, nil
+	if handled, cmd := s.dispatchShortcut(key, nil); handled {
+		return true, cmd
 	}
-	if key == shortcutNext {
+	return false, nil
+}
+
+func (s *state) dispatchShortcut(key string, defaultCmd []string) (bool, tea.Cmd) {
+	switch key {
+	case shortcutNew:
+		s.openNewSessionModal(defaultCmd)
+		return true, nil
+	case shortcutNext:
 		if s.manager != nil && s.manager.Len() > 0 {
 			s.mode = modeNormal
 			s.manager.Focus((s.manager.FocusedIndex() + 1) % s.manager.Len())
@@ -1033,8 +1058,7 @@ func (s *state) handleGlobalShortcut(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			s.notifyMeta()
 		}
 		return true, nil
-	}
-	if key == shortcutPrev {
+	case shortcutPrev:
 		if s.manager != nil && s.manager.Len() > 0 {
 			s.mode = modeNormal
 			s.manager.Focus((s.manager.FocusedIndex() - 1 + s.manager.Len()) % s.manager.Len())
@@ -1042,8 +1066,7 @@ func (s *state) handleGlobalShortcut(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			s.notifyMeta()
 		}
 		return true, nil
-	}
-	if key == shortcutQuit {
+	case shortcutQuit:
 		s.mode = modeQuitConfirm
 		s.exitChoice = 0
 		return true, nil
@@ -1053,12 +1076,12 @@ func (s *state) handleGlobalShortcut(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 
 func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	key := msg.Keystroke()
+	if handled, cmd := s.dispatchShortcut(key, m.agentCmd); handled {
+		return true, cmd
+	}
 	switch key {
 	case shortcutHelp:
 		s.mode = modeHelp
-		return true, nil
-	case shortcutNew:
-		s.openNewSessionModal(m.agentCmd)
 		return true, nil
 	case shortcutKill:
 		if s.manager.Len() > 1 {
@@ -1111,16 +1134,6 @@ func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		if !s.mouseCapture {
 			return true, resetTerminalInputModes
 		}
-		return true, nil
-	case shortcutNext:
-		s.manager.Focus((s.manager.FocusedIndex() + 1) % s.manager.Len())
-		s.refreshFocused()
-		s.notifyMeta()
-		return true, nil
-	case shortcutPrev:
-		s.manager.Focus((s.manager.FocusedIndex() - 1 + s.manager.Len()) % s.manager.Len())
-		s.refreshFocused()
-		s.notifyMeta()
 		return true, nil
 	}
 	// Ctrl+Alt+<digit> (or the more portable Alt+<digit>): jump to session.
@@ -1191,6 +1204,12 @@ func (s *state) resolveExitPrompt(m Model) tea.Cmd {
 			s.errMsg = fmt.Sprintf("respawn failed: %v", err)
 			return nil
 		}
+		// Respawn rebuilds the VT screen at the manager's cached cols/rows.
+		// Push the active TUI viewer's pane size on top so the new PTY is
+		// in sync with what the user is looking at, even if a browser had
+		// previously sized this session differently via ResizeOne.
+		cols, rows := paneSize(s.width, s.height)
+		s.manager.ResizeOne(id, cols, rows)
 		s.resetViewport(id, s.width, s.height)
 		s.notifyMeta()
 		return nil
