@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
@@ -74,6 +76,28 @@ func main() {
 				Value: "multicrum.yaml",
 				Usage: "path to layout YAML file; loaded on startup if it exists, saved with Ctrl+Alt+P",
 			},
+			&cli.BoolFlag{
+				Name:   "owner",
+				Hidden: true,
+			},
+		},
+		Commands: []*cli.Command{
+			{
+				Name:    "list",
+				Aliases: []string{"ls"},
+				Usage:   "list local multicrum servers",
+				Action:  listServers,
+			},
+			{
+				Name:   "status",
+				Usage:  "show the status of a local multicrum server",
+				Action: statusServer,
+			},
+			{
+				Name:   "stop",
+				Usage:  "stop a local multicrum server and its sessions",
+				Action: stopServer,
+			},
 		},
 		Action: run,
 	}
@@ -84,17 +108,31 @@ func main() {
 	}
 }
 
-func run(_ context.Context, c *cli.Command) error {
-	serverName := c.String("server")
-	if serverName == "" {
-		serverName = "default"
+func run(ctx context.Context, c *cli.Command) error {
+	serverName := normalizedServerName(c)
+	socketPath, err := localserver.SocketPath(serverName)
+	if err != nil {
+		return err
 	}
-	if socketPath, err := localserver.SocketPath(serverName); err == nil {
-		if attached, attachErr := localserver.TryAttach(socketPath, serverName, os.Stdin, os.Stdout); attached {
-			return attachErr
-		}
+	if c.Bool("owner") {
+		return runOwner(ctx, c, serverName, socketPath, true)
 	}
+	if attached, attachErr := localserver.TryAttach(socketPath, serverName, os.Stdin, os.Stdout); attached {
+		return attachErr
+	}
+	if err := startDetachedOwner(os.Args, serverName); err != nil {
+		return err
+	}
+	if err := waitForServer(socketPath, serverName, 5*time.Second); err != nil {
+		return err
+	}
+	if attached, attachErr := localserver.TryAttach(socketPath, serverName, os.Stdin, os.Stdout); attached {
+		return attachErr
+	}
+	return fmt.Errorf("server %q started but could not be attached", serverName)
+}
 
+func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string, detachedOwner bool) error {
 	agentCmdLine := c.String("cmd")
 	agentCmd := ui.ParseCmdLine(agentCmdLine)
 	if len(agentCmd) == 0 {
@@ -103,8 +141,10 @@ func run(_ context.Context, c *cli.Command) error {
 	}
 
 	cols, rows := 220, 48
-	if w, h, err := termSize(); err == nil {
-		cols, rows = w, h
+	if !detachedOwner {
+		if w, h, err := termSize(); err == nil {
+			cols, rows = w, h
+		}
 	}
 
 	var sshClient *ssh_client.Client
@@ -140,35 +180,45 @@ func run(_ context.Context, c *cli.Command) error {
 		}
 	}
 
-	inputMux := ui.NewInputMux(os.Stdin)
-	model.SetInputMux(inputMux)
-	var p *tea.Program
-	socketPath, socketErr := localserver.SocketPath(serverName)
-	var owner *localserver.Owner
-	if socketErr == nil {
-		owner, _ = localserver.Listen(socketPath, serverName, inputMux, func(n int) {
-			if p != nil {
-				p.Send(ui.LocalClientCountMsg(n))
-			}
-		}, func(cols, rows int) {
-			if p != nil {
-				p.Send(tea.WindowSizeMsg{Width: cols, Height: rows})
-			}
-		})
-		defer owner.Close()
+	var input io.Reader
+	if !detachedOwner {
+		input = os.Stdin
 	}
-	output := io.Writer(os.Stdout)
-	if owner != nil {
+	inputMux := ui.NewInputMux(input)
+	model.SetInputMux(inputMux)
+	owner, err := localserver.ListenWithSettings(socketPath, serverName, inputMux, serverSettings(c, agentCmdLine))
+	if err != nil {
+		return err
+	}
+	defer owner.Close()
+
+	var output io.Writer = owner
+	if !detachedOwner {
 		output = localserver.FanoutWriter{Primary: os.Stdout, Mirror: owner}
 	}
 
+	var p *tea.Program
 	p = tea.NewProgram(
 		model,
+		tea.WithContext(ctx),
 		tea.WithColorProfile(colorprofile.TrueColor),
 		tea.WithInput(inputMux),
 		tea.WithOutput(ui.NewKeyboardStripWriter(output)),
 	)
 	model.SetProgram(p)
+	owner.SetCallbacks(func(n int) {
+		if p != nil {
+			go p.Send(ui.LocalClientCountMsg(n))
+		}
+	}, func(cols, rows int) {
+		if p != nil {
+			go p.Send(tea.WindowSizeMsg{Width: cols, Height: rows})
+		}
+	}, func(action string) {
+		if action == "stop" && p != nil {
+			go p.Kill()
+		}
+	})
 
 	wsAddr := c.String("ws")
 	if wsAddr != "" {
@@ -180,6 +230,163 @@ func run(_ context.Context, c *cli.Command) error {
 		fmt.Fprintf(os.Stderr, "xterm.js UI on http://%s/\n", wsAddr)
 	}
 
-	_, err := p.Run()
+	_, err = p.Run()
 	return err
+}
+
+func serverSettings(c *cli.Command, command string) localserver.ServerSettings {
+	return localserver.ServerSettings{
+		Command:                  command,
+		SSH:                      c.String("ssh"),
+		SSHKey:                   c.String("ssh-key"),
+		SSHUseDefaultKeys:        c.Bool("ssh-use-default-keys"),
+		SSHAgent:                 c.Bool("ssh-agent"),
+		SSHKnownHosts:            c.String("ssh-known-hosts"),
+		SSHInsecureIgnoreHostKey: c.Bool("ssh-insecure-ignore-host-key"),
+		WS:                       c.String("ws"),
+		TokenSet:                 c.String("token") != "",
+		Config:                   c.String("config"),
+	}
+}
+
+func listServers(_ context.Context, _ *cli.Command) error {
+	names, err := localserver.ListServers()
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		fmt.Fprintln(os.Stdout, "no local servers")
+		return nil
+	}
+	for _, name := range names {
+		path, err := localserver.SocketPath(name)
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "%s\tunknown\n", name)
+			continue
+		}
+		status, err := localserver.ServerStatus(path, name)
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "%s\tstale\t%s\n", name, path)
+			continue
+		}
+		fmt.Fprintf(os.Stdout, "%s\tactive\tpid=%d\t%s\t%s\n", name, status.ServerPID, path, formatSettings(status.Settings))
+	}
+	return nil
+}
+
+func statusServer(_ context.Context, c *cli.Command) error {
+	serverName := normalizedServerName(c)
+	path, err := localserver.SocketPath(serverName)
+	if err != nil {
+		return err
+	}
+	status, err := localserver.ServerStatus(path, serverName)
+	if err != nil {
+		return fmt.Errorf("server %q is not running", serverName)
+	}
+	fmt.Fprintf(os.Stdout, "%s active pid=%d socket=%s\n", status.Server, status.ServerPID, path)
+	if settings := formatSettings(status.Settings); settings != "" {
+		fmt.Fprintf(os.Stdout, "settings: %s\n", settings)
+	}
+	return nil
+}
+
+func formatSettings(settings localserver.ServerSettings) string {
+	var parts []string
+	if settings.Command != "" {
+		parts = append(parts, "cmd="+settings.Command)
+	}
+	if settings.Config != "" {
+		parts = append(parts, "config="+settings.Config)
+	}
+	if settings.WS != "" {
+		parts = append(parts, "ws="+settings.WS)
+	}
+	if settings.TokenSet {
+		parts = append(parts, "token=set")
+	}
+	if settings.SSH != "" {
+		parts = append(parts, "ssh="+settings.SSH)
+	}
+	if settings.SSHKey != "" {
+		parts = append(parts, "ssh-key="+settings.SSHKey)
+	}
+	if settings.SSHUseDefaultKeys {
+		parts = append(parts, "ssh-use-default-keys=true")
+	}
+	if settings.SSHAgent {
+		parts = append(parts, "ssh-agent=true")
+	}
+	if settings.SSHKnownHosts != "" {
+		parts = append(parts, "ssh-known-hosts="+settings.SSHKnownHosts)
+	}
+	if settings.SSHInsecureIgnoreHostKey {
+		parts = append(parts, "ssh-insecure-ignore-host-key=true")
+	}
+	return strings.Join(parts, " ")
+}
+
+func stopServer(_ context.Context, c *cli.Command) error {
+	serverName := normalizedServerName(c)
+	path, err := localserver.SocketPath(serverName)
+	if err != nil {
+		return err
+	}
+	status, err := localserver.StopServer(path, serverName)
+	if err != nil {
+		return fmt.Errorf("server %q is not running", serverName)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := localserver.ServerStatus(path, serverName); err != nil {
+			fmt.Fprintf(os.Stdout, "%s stopped pid=%d\n", status.Server, status.ServerPID)
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if process, err := os.FindProcess(status.ServerPID); err == nil {
+		_ = process.Kill()
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := localserver.ServerStatus(path, serverName); err != nil {
+			_ = os.Remove(path)
+			fmt.Fprintf(os.Stdout, "%s stopped pid=%d\n", status.Server, status.ServerPID)
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("server %q did not stop before timeout", serverName)
+}
+
+func waitForServer(path, server string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if _, err := localserver.ServerStatus(path, server); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("server %q did not become ready: %w", server, lastErr)
+}
+
+func normalizedServerName(c *cli.Command) string {
+	serverName := c.String("server")
+	if serverName == "" {
+		serverName = "default"
+	}
+	return serverName
+}
+
+func ownerArgs(args []string) []string {
+	out := append([]string(nil), args...)
+	for _, arg := range out[1:] {
+		if arg == "--owner" {
+			return out
+		}
+	}
+	return append(out, "--owner")
 }

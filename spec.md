@@ -30,9 +30,15 @@ go test ./...
 ./multicrum --cmd bash
 
 # Attach to or create a named server
+# If no server exists, this starts a detached owner daemon and attaches.
 ./multicrum --server work --cmd bash
 ./multicrum --srv work
 ./multicrum -S work
+
+# Lifecycle commands
+./multicrum list
+./multicrum status --server work
+./multicrum stop --server work
 
 # TUI plus browser UI
 ./multicrum --server work --cmd bash --ws :9999 --token mytoken
@@ -44,7 +50,10 @@ CLI entry point: `cmd/multicrum/main.go`.
 | Flag | Default | Purpose |
 |---|---:|---|
 | `--cmd` | `bash` | Default command for sessions; parsed with `ui.ParseCmdLine`. Also used as default remote command when `--ssh` is set. |
-| `--server`, `--srv`, `-S` | `default` | Named local long-running server to attach/create. |
+| `--server`, `--srv`, `-S` | `default` | Named local long-running server to attach/create. First instance auto-starts a detached owner daemon. |
+| `list`, `ls` | n/a | List local servers, PID/socket path, and startup settings. |
+| `status` | n/a | Show one server's status and startup settings. |
+| `stop` | n/a | Stop one server and disconnect its sessions/clients. |
 | `--config` | `multicrum.yaml` | Layout/config YAML path loaded on owner startup and saved with `Ctrl+Alt+P`. |
 | `--ssh` | empty | SSH target for default SSH-backed sessions. |
 | `-i`, `--ssh-key` | empty | Explicit SSH identity file. |
@@ -157,21 +166,31 @@ Module Go version: `go 1.25.0`.
 
 ## Startup and Long-Running Server Flow
 
-`cmd/multicrum/main.go` implements attach-or-own semantics:
+`cmd/multicrum/main.go` implements attach-or-daemon semantics:
 
 1. Parse `--server` (`default` when empty).
 2. Resolve the Unix socket path with `localserver.SocketPath(serverName)`.
 3. Try `localserver.TryAttach(...)`.
    - If it attaches, the process becomes an attach client and returns when detached/disconnected.
-   - Attached clients use raw terminal mode, forward stdin frames, receive owner-rendered TUI output frames, and forward resize frames.
-4. If attach fails, the process becomes the owner/server:
-   - construct `ui.Model`, set server name and config path,
-   - load YAML config and call `model.SetConfigConnections(cfg)`,
-   - create `ui.InputMux(os.Stdin)` and pass it to Bubble Tea via `tea.WithInput`,
-   - start `localserver.Listen(...)`,
-   - wrap stdout with `localserver.FanoutWriter` when an owner exists,
-   - wrap output again with `ui.NewKeyboardStripWriter`,
-   - start optional WebSocket UI with `ui.StartWSTransport`.
+   - Attached clients use raw terminal mode, forward stdin frames, receive owner-rendered TUI output frames, map bare LF output to CRLF for raw terminals, and forward resize frames.
+4. If attach fails, spawn a detached hidden owner process by re-execing the current binary with hidden `--owner`.
+5. The parent waits for the server socket to become ready, then attaches the current terminal as the first client.
+6. The detached owner:
+   - constructs `ui.Model`, sets server name and config path,
+   - loads YAML config and calls `model.SetConfigConnections(cfg)`,
+   - creates `ui.InputMux(nil)` so only attached-client frames feed Bubble Tea,
+   - starts `localserver.ListenWithSettings(...)`, including startup settings for status/list,
+   - writes Bubble Tea output to the local server owner writer,
+   - wraps output with `ui.NewKeyboardStripWriter`,
+   - starts optional WebSocket UI with `ui.StartWSTransport`.
+
+Lifecycle commands:
+
+- `multicrum list` / `multicrum ls` enumerates socket files and probes live servers.
+- `multicrum status --server NAME` reports PID, socket path, and startup settings.
+- `multicrum stop --server NAME` sends a local control request to stop a server; it falls back to killing the recorded PID if graceful shutdown times out.
+
+Startup settings exposed in status/list include command, config path, WebSocket bind address, token presence (`token=set`, never the token value), and SSH options.
 
 Windows local-server support is currently stubbed: localserver functions return clear unsupported errors. PTY sessions themselves still support Windows through ConPTY.
 
@@ -209,8 +228,8 @@ Frame types in `pkg/localserver/frame.go`:
 | `0x03` | `FrameClientHello` | attach → owner | JSON `ClientHello` |
 | `0x04` | `FrameServerHello` | owner → attach | JSON `ServerHello` |
 | `0x05` | `FrameResize` | attach → owner | JSON `Resize` |
-| `0x06` | `FrameControl` | reserved | currently unused |
-| `0x07` | `FrameControlAck` | reserved | currently unused |
+| `0x06` | `FrameControl` | control client → owner | JSON `ControlRequest` (`stop`) |
+| `0x07` | `FrameControlAck` | owner → control client | JSON `ControlAck` |
 
 Protocol structs in `pkg/localserver/protocol.go`:
 
@@ -229,15 +248,38 @@ type ClientHello struct {
 }
 
 type ServerHello struct {
-    Protocol  string `json:"protocol"`
-    Version   int    `json:"version"`
-    Server    string `json:"server"`
-    ServerPID int    `json:"serverPid"`
+    Protocol  string         `json:"protocol"`
+    Version   int            `json:"version"`
+    Server    string         `json:"server"`
+    ServerPID int            `json:"serverPid"`
+    Settings  ServerSettings `json:"settings"`
+}
+
+type ServerSettings struct {
+    Command                  string `json:"command,omitempty"`
+    SSH                      string `json:"ssh,omitempty"`
+    SSHKey                   string `json:"sshKey,omitempty"`
+    SSHUseDefaultKeys        bool   `json:"sshUseDefaultKeys,omitempty"`
+    SSHAgent                 bool   `json:"sshAgent,omitempty"`
+    SSHKnownHosts            string `json:"sshKnownHosts,omitempty"`
+    SSHInsecureIgnoreHostKey bool   `json:"sshInsecureIgnoreHostKey,omitempty"`
+    WS                       string `json:"ws,omitempty"`
+    TokenSet                 bool   `json:"tokenSet,omitempty"`
+    Config                   string `json:"config,omitempty"`
 }
 
 type Resize struct {
     Cols int `json:"cols"`
     Rows int `json:"rows"`
+}
+
+type ControlRequest struct {
+    Action string `json:"action"`
+}
+
+type ControlAck struct {
+    OK    bool   `json:"ok"`
+    Error string `json:"error,omitempty"`
 }
 ```
 

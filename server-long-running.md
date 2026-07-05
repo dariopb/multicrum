@@ -7,7 +7,11 @@ This feature is implemented as a first-pass shared-TUI server model.
 `multicrum --server NAME` now means:
 
 1. Try to attach this process to an existing local owner for `NAME` over a Unix domain socket.
-2. If no live owner exists, become the owner/server for `NAME`.
+2. If no live owner exists, spawn a detached owner daemon for `NAME`.
+3. Wait for the daemon's socket to become ready.
+4. Attach the current terminal as a client.
+
+The visible terminal is therefore always an attach client for named servers. Closing or detaching that terminal does not kill the server sessions; reconnect later with the same `--server NAME`.
 
 A named server owns an ordered set of logical connections. Each connection owns an ordered set of sessions.
 
@@ -27,7 +31,10 @@ Supported flags relevant to this feature:
 
 | Flag | Default | Purpose |
 |---|---:|---|
-| `--server`, `--srv`, `-S` | `default` | Named local server/socket namespace to attach/create. |
+| `--server`, `--srv`, `-S` | `default` | Named local server/socket namespace to attach/create. First instance auto-starts a detached owner daemon. |
+| `list`, `ls` | n/a | List local servers with status, PID/socket path, and startup settings. |
+| `status` | n/a | Show one server's status and startup settings. |
+| `stop` | n/a | Stop one server and disconnect its sessions/clients. |
 | `--config` | `multicrum.yaml` | YAML config tree loaded by the owner and saved with `Ctrl+Alt+P`. |
 | `--cmd` | `bash` | Default command for sessions when config has none or when creating a default session. |
 | `--ws` | empty | Optional WebSocket/xterm.js browser UI served by the owner. |
@@ -39,16 +46,25 @@ Startup algorithm implemented:
 2. Resolve socket path with `localserver.SocketPath(serverName)`.
 3. Call `localserver.TryAttach(socketPath, serverName, os.Stdin, os.Stdout)`.
 4. If attach succeeds, this process becomes an attach client and exits when detached/disconnected.
-5. If attach does not succeed, continue as owner:
-   - parse default command with `ui.ParseCmdLine`, falling back to `[]string{"bash"}`,
-   - construct `ui.NewModelWithSSH`,
-   - set server name and config path,
-   - load config with `config.Load` and call `model.SetConfigConnections(cfg)`,
-   - create `ui.InputMux(os.Stdin)` and pass it to Bubble Tea via `tea.WithInput`,
-   - start `localserver.Listen` if socket path is available,
-   - wrap output in `localserver.FanoutWriter` and `ui.NewKeyboardStripWriter`,
-   - optionally start browser UI via `ui.StartWSTransport`,
-   - run Bubble Tea.
+5. If attach does not succeed, re-exec the current binary with hidden `--owner`, detached from the controlling terminal.
+6. The parent waits until `localserver.ServerStatus` succeeds, then attaches as the first client.
+7. The detached owner:
+   - parses default command with `ui.ParseCmdLine`, falling back to `[]string{"bash"}`,
+   - constructs `ui.NewModelWithSSH`,
+   - sets server name and config path,
+   - loads config with `config.Load` and calls `model.SetConfigConnections(cfg)`,
+   - creates `ui.InputMux(nil)` so only attached-client frames feed Bubble Tea,
+   - starts `localserver.ListenWithSettings`, recording startup settings for lifecycle commands,
+   - writes Bubble Tea output to the local server owner writer and `ui.NewKeyboardStripWriter`,
+   - optionally starts browser UI via `ui.StartWSTransport`,
+   - runs Bubble Tea.
+
+Lifecycle behavior:
+
+- `list` / `ls` enumerates local socket files and probes each server.
+- `status --server NAME` reports PID, socket path, and startup settings.
+- `stop --server NAME` sends a `FrameControl` stop request and falls back to killing the recorded PID if graceful shutdown times out.
+- `status` and `list` expose command/config/ws/SSH startup settings; token values are redacted as `token=set`.
 
 ## Local Server Package
 

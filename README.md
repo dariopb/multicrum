@@ -14,7 +14,7 @@ The child program or remote shell is treated as a black-box terminal: the app fo
 
 ## Features
 
-- Long-running named local servers; later `multicrum` processes attach to the same server over a Unix socket.
+- Long-running named local servers: the first `multicrum --server NAME` auto-starts a detached owner daemon, and later processes attach to it over a Unix socket.
 - Multiple connections/workspaces per server, each with its own tabs / sessions.
 - Local commands via PTY on Unix and ConPTY on Windows.
 - SSH sessions with `user@host[:port]`, explicit port, password, explicit key, SSH agent, `~/.ssh/config`, and known-host verification.
@@ -55,6 +55,18 @@ Attach to or create a separate named server:
 ./multicrum --server work --cmd bash
 ./multicrum --server work
 ```
+
+If no live `work` server exists, the first command starts a detached owner daemon, waits for its Unix socket, then attaches the current terminal as a client. Closing or detaching that client does not stop the sessions; run `./multicrum --server work` later to reconnect.
+
+Lifecycle commands:
+
+```bash
+./multicrum list
+./multicrum status --server work
+./multicrum stop --server work
+```
+
+`list` and `status` show the server PID, socket path, and startup settings such as command, config path, WebSocket address, token presence, and SSH options. Token values are never printed; only `token=set` is shown.
 
 Local command:
 
@@ -110,6 +122,9 @@ http://localhost:9999/?token=mytoken
 |---|---|
 | `--cmd` | Local command, or remote command when `--ssh` is set. Default: `bash`. |
 | `--server`, `--srv`, `-S` | Named local long-running server to attach/create. Default: `default`. |
+| `list`, `ls` | List local servers, status, PID, socket path, and startup settings. |
+| `status` | Show status and startup settings for one server. |
+| `stop` | Stop one server and disconnect its sessions/clients. |
 | `--ssh` | SSH target: `host`, `user@host`, `host:port`, `user@host:port`. |
 | `-i`, `--ssh-key` | Explicit identity file. Overrides config/default identities. |
 | `--ssh-passwd` | Explicit password / keyboard-interactive password. Overrides config/default identities. |
