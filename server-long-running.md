@@ -11,7 +11,7 @@ This feature is implemented as a first-pass shared-TUI server model.
 3. Wait for the daemon's socket to become ready.
 4. Attach the current terminal as a client.
 
-The visible terminal is therefore always an attach client for named servers. Closing or detaching that terminal does not kill the server sessions; reconnect later with the same `--server NAME`.
+The visible terminal is therefore always an attach client for named servers. Closing or detaching that terminal does not kill the server sessions; reconnect later with the same `--server NAME`. Unix uses Unix sockets; Windows uses a per-user loopback TCP listener recorded in an address file.
 
 A named server owns an ordered set of logical connections. Each connection owns an ordered set of sessions.
 
@@ -88,6 +88,7 @@ pkg/localserver/
 `SocketPath(server)` sanitizes the server display name for filesystem use and returns:
 
 ```text
+# Unix
 $XDG_RUNTIME_DIR/multicrum/<safe-server>.sock
 ```
 
@@ -97,7 +98,13 @@ Fallback when `XDG_RUNTIME_DIR` is empty:
 /tmp/multicrum-$UID/multicrum/<safe-server>.sock
 ```
 
-The parent directory is created with `0700`. Connection names never affect socket paths.
+Windows stores the loopback TCP listener address here:
+
+```text
+%LOCALAPPDATA%\multicrum\<safe-server>.addr
+```
+
+The parent directory is created with `0700`. Connection names never affect socket/address paths.
 
 ### Frame protocol
 

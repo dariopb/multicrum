@@ -17,6 +17,7 @@ The child program or remote shell is treated as a black-box terminal: the app fo
 - Long-running named local servers: the first `multicrum --server NAME` auto-starts a detached owner daemon, and later processes attach to it over a Unix socket.
 - Multiple connections/workspaces per server, each with its own tabs / sessions.
 - Local commands via PTY on Unix and ConPTY on Windows.
+- Named server attach/daemon lifecycle on Unix and Windows.
 - SSH sessions with `user@host[:port]`, explicit port, password, explicit key, SSH agent, `~/.ssh/config`, and known-host verification.
 - `Ctrl+Alt+T` new-session modal:
   - default: same current/default session behavior,
@@ -26,6 +27,7 @@ The child program or remote shell is treated as a black-box terminal: the app fo
 - Layout save/load for local sessions and SSH sessions, including remote commands.
 - Optional xterm.js browser UI over WebSocket.
 - Mouse selection/copy mode that preserves soft-wrapped logical lines.
+- Terminal-accurate resize: output reflows (re-wraps) when the pane is made narrower or wider — characters cropped by a shrink are restored on a later widen — and scrollback stays consistent while scrolling with the mouse wheel or `Ctrl+PgUp`/`Ctrl+PgDn`. Prompt redraws and progress bars overwrite in place instead of leaving duplicate lines.
 
 ## Build
 
@@ -56,7 +58,7 @@ Attach to or create a separate named server:
 ./multicrum --server work
 ```
 
-If no live `work` server exists, the first command starts a detached owner daemon, waits for its Unix socket, then attaches the current terminal as a client. Closing or detaching that client does not stop the sessions; run `./multicrum --server work` later to reconnect.
+If no live `work` server exists, the first command starts a detached owner daemon, waits for its local endpoint, then attaches the current terminal as a client. Closing or detaching that client does not stop the sessions; run `./multicrum --server work` later to reconnect.
 
 Lifecycle commands:
 
@@ -66,7 +68,7 @@ Lifecycle commands:
 ./multicrum stop --server work
 ```
 
-`list` and `status` show the server PID, socket path, and startup settings such as command, config path, WebSocket address, token presence, and SSH options. Token values are never printed; only `token=set` is shown.
+`list` and `status` show the server PID, local endpoint path, and startup settings such as command, config path, WebSocket address, token presence, and SSH options. Token values are never printed; only `token=set` is shown. Unix uses Unix sockets; Windows stores a per-user loopback TCP address file under the multicrum runtime directory.
 
 Local command:
 

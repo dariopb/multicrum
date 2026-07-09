@@ -87,6 +87,8 @@ type state struct {
 	connFilterCursor   int
 	connFiltering      bool
 	connMoving         bool
+	sessionHitboxes    []mouseHitbox
+	connectionHitboxes []mouseHitbox
 	mouseCapture       bool               // when true, mouse events are forwarded to the child PTY (app-mode)
 	sel                selection          // in-progress / completed mouse selection over the focused buffer
 	search             scrollSearch       // vi-style scrollback search ('/') and line jump (':')
@@ -324,17 +326,34 @@ func (m Model) Init() tea.Cmd {
 }
 
 func resetTerminalInputModes() tea.Msg {
+	// Reset only legacy/stray input modes a previous child or session may
+	// have left enabled. We deliberately do NOT reset the button-event
+	// (1002), any-event (1003) or SGR-extended (1006) mouse modes here:
+	// bubbletea's renderer owns those via View().MouseMode and enables them
+	// on the first flush. Resetting them here runs after that first flush and
+	// silently disables mouse reporting at startup (wheel/selection dead until
+	// the user toggles mouse mode twice, which forces the renderer to re-emit
+	// the enable). See the mouse-mode notes in AGENTS.md/spec.md.
 	return tea.RawMsg{Msg: ansi.ResetModeMouseX10 +
 		ansi.ResetModeMouseNormal +
-		ansi.ResetModeMouseButtonEvent +
-		ansi.ResetModeMouseAnyEvent +
-		ansi.ResetModeMouseExtSgr +
 		ansi.ResetModifyOtherKeys +
 		ansi.KittyKeyboard(0, 1) +
 		ansi.DisableKittyKeyboard}
 }
 
 type startFirstSessionMsg struct{}
+
+// mouseEnableSequence returns the CSI sequence that enables the mouse-reporting
+// mode matching the current capture state, so a freshly attached client's
+// terminal starts receiving wheel/motion events without waiting for a
+// MouseMode change. It mirrors what bubbletea's renderer emits for
+// View().MouseMode (CellMotion in select mode, AllMotion in app mode).
+func (s *state) mouseEnableSequence() string {
+	if s.mouseCapture {
+		return ansi.SetModeMouseAnyEvent + ansi.SetModeMouseExtSgr
+	}
+	return ansi.SetModeMouseButtonEvent + ansi.SetModeMouseExtSgr
+}
 
 // Update handles all incoming messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -404,7 +423,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case localClientCountMsg:
+		attached := int(msg) > s.localClients
 		s.localClients = int(msg)
+		if attached {
+			// A newly attached client's terminal has not seen the mouse-enable
+			// sequence: bubbletea's renderer only emits it on the first flush /
+			// a MouseMode change, and for a detached owner that first flush
+			// happened with no client connected (or before this client
+			// attached), so the enable was lost. Re-assert it (and repaint) so
+			// wheel/selection work immediately without toggling mouse mode.
+			return m, tea.Batch(tea.ClearScreen, func() tea.Msg {
+				return tea.RawMsg{Msg: s.mouseEnableSequence()}
+			})
+		}
 		return m, tea.ClearScreen
 
 	case tea.WindowSizeMsg:
@@ -424,6 +455,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			vp.SetWidth(cols)
 			vp.SetHeight(rows)
 			s.viewports[idx] = vp
+		}
+		// Re-render the visible session now. WindowSizeMsg only adjusts the
+		// viewport geometry; without re-pushing content the viewport keeps the
+		// text it wrapped at the previous width, so shrinking then widening
+		// leaves stale "ghost" rows on screen until the child happens to emit
+		// more output. The session screen has already reflowed in ResizeAll.
+		idx := s.manager.FocusedIndex()
+		s.ensureViewport(idx, s.width, s.height)
+		for _, sess := range s.manager.Sessions() {
+			if sess.Index() != idx {
+				continue
+			}
+			vp := s.viewports[idx]
+			if s.scrollbackMode[idx] && !sess.Screen().IsAltScreen() {
+				vp.SetContent(sess.Screen().RenderWithScrollback())
+			} else {
+				vp.SetContent(sess.Screen().Render())
+				anchorViewportToCursor(vp, sess)
+			}
+			s.viewports[idx] = vp
+			break
 		}
 		return m, nil
 
@@ -681,11 +733,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
+		ev := mouseEventFromMsg(msg)
+		debugMouse(ev)
+		if s.handleMouseScopeClick(ev) {
+			return m, nil
+		}
 		if s.mode != modeNormal {
 			return m, nil
 		}
-		ev := mouseEventFromMsg(msg)
-		debugMouse(ev)
 		_, paneRows := paneSize(s.width, s.height)
 		// Translate from whole-window coords to pane-relative coords. The
 		// pane starts at row 1 (row 0 is the tab bar). The status bar is
@@ -959,6 +1014,7 @@ func (s *state) ensureViewport(idx, w, h int) {
 func (s *state) resetViewport(idx, w, h int) {
 	cols, rows := paneSize(w, h)
 	vp := viewport.New(viewport.WithWidth(cols), viewport.WithHeight(rows))
+	vp.SoftWrap = true
 	vp.SetContent("")
 	s.viewports[idx] = &vp
 }
@@ -1699,6 +1755,8 @@ func (m Model) renderTabBar() string {
 	focused := s.manager.FocusedIndex()
 	sessions := s.manager.Sessions()
 
+	s.sessionHitboxes = nil
+
 	brand := brandStyle.Render("multicrum")
 	brandW := lipgloss.Width(brand)
 
@@ -1730,6 +1788,13 @@ func (m Model) renderTabBar() string {
 		total += w
 	}
 	if total <= s.width || s.width <= 0 {
+		x := 0
+		for i, w := range widths {
+			if i < len(sessions) {
+				s.sessionHitboxes = append(s.sessionHitboxes, mouseHitbox{Start: x, End: x + w, Index: sessions[i].Index()})
+			}
+			x += w
+		}
 		bar := lipgloss.JoinHorizontal(lipgloss.Top, append(tabs, newTab)...)
 		if pad := s.width - lipgloss.Width(bar) - brandW; pad > 0 {
 			bar += tabBarStyle.Render(strings.Repeat(" ", pad))
@@ -1826,10 +1891,18 @@ func (m Model) renderTabBar() string {
 	}
 
 	parts := make([]string, 0, end-start+4)
+	x := 0
 	if needLeft {
 		parts = append(parts, left)
+		x += leftW
 	}
-	parts = append(parts, tabs[start:end]...)
+	for i := start; i < end; i++ {
+		parts = append(parts, tabs[i])
+		if i < len(sessions) {
+			s.sessionHitboxes = append(s.sessionHitboxes, mouseHitbox{Start: x, End: x + widths[i], Index: sessions[i].Index()})
+		}
+		x += widths[i]
+	}
 	if needRight {
 		parts = append(parts, right)
 	}
@@ -1853,7 +1926,7 @@ func (m Model) renderPane() string {
 	paneCols, paneRows := paneSize(s.width, s.height)
 	var pane string
 	if vp, ok := s.viewports[idx]; ok {
-		pane = s.renderPaneContent(vp, paneCols, paneRows)
+		pane = s.renderPaneContent(vp, paneCols, paneRows, s.scrollbackMode[idx])
 		if !s.mouseCapture {
 			pane = s.overlaySelection(pane, paneCols, paneRows)
 		}
@@ -1894,12 +1967,25 @@ func (m Model) renderPane() string {
 // wrap one row and shift every subsequent row down by one — that's the
 // "dialog buttons are in the wrong place" bug. We pad/truncate to exactly
 // paneCols x paneRows ourselves so no wrapping is ever possible.
-func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int) string {
+func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int, wrap bool) string {
 	content := vp.GetContent()
 	if content == "" {
 		return blankPane(paneCols, paneRows)
 	}
 	all := strings.Split(content, "\n")
+	if wrap {
+		// In scrollback mode the content is the full logical history, whose
+		// lines can be wider than the pane. The viewport computes YOffset in
+		// *soft-wrapped* row space (see viewport.calculateLine), so we must
+		// expand each logical line into the same wrapped rows before applying
+		// YOffset — otherwise the offset indexes logical lines while the scroll
+		// math counts wrapped rows, and the two drift apart, duplicating and
+		// dropping rows as the user scrolls. This mirrors viewport.softWrap
+		// exactly (fixed paneCols chunks via ansi.Cut). We only do this for
+		// scrollback; the live/alt-screen path keeps its strict no-wrap
+		// behavior so cell-accurate grids (btop dialogs) never shift.
+		all = softWrapRows(all, paneCols)
+	}
 	yoff := vp.YOffset()
 	if yoff < 0 {
 		yoff = 0
@@ -1919,6 +2005,27 @@ func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int) st
 		out = append(out, strings.Repeat(" ", paneCols))
 	}
 	return strings.Join(out, "\n")
+}
+
+// softWrapRows expands logical lines into fixed-width wrapped rows exactly the
+// way the viewport's SoftWrap renderer does (chunks of maxWidth via ansi.Cut),
+// so a caller windowing by the viewport's YOffset stays row-aligned.
+func softWrapRows(lines []string, maxWidth int) []string {
+	if maxWidth <= 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		w := ansi.StringWidth(line)
+		if w <= maxWidth {
+			out = append(out, line)
+			continue
+		}
+		for idx := 0; idx < w; idx += maxWidth {
+			out = append(out, ansi.Cut(line, idx, maxWidth+idx))
+		}
+	}
+	return out
 }
 
 // anchorViewportToCursor scrolls vp so the vt cursor row is visible inside
@@ -2277,11 +2384,19 @@ func (m Model) renderSessionSelectorModal() string {
 func (m Model) renderStatusBar() string {
 	s := m.s
 	cols, rows := paneSize(s.width, s.height)
+	s.connectionHitboxes = nil
 	mouseTag := "mouse:select"
 	if s.mouseCapture {
 		mouseTag = "mouse:app"
 	}
-	status := statusKeyStyle.Render(fmt.Sprintf(" server:%s │ conn ", s.serverName)) + s.renderConnectionPills() + statusKeyStyle.Render(fmt.Sprintf(" │ %dx%d │ clients:%d │ %s ", cols, rows, s.localClients+1, mouseTag))
+	prefix := statusKeyStyle.Render(fmt.Sprintf(" server:%s │ conn ", s.serverName))
+	pills := s.renderConnectionPills()
+	prefixWidth := lipgloss.Width(prefix)
+	for i := range s.connectionHitboxes {
+		s.connectionHitboxes[i].Start += prefixWidth
+		s.connectionHitboxes[i].End += prefixWidth
+	}
+	status := prefix + pills + statusKeyStyle.Render(fmt.Sprintf(" │ %dx%d │ clients:%d │ %s ", cols, rows, s.localClients+1, mouseTag))
 	if s.mode == modeRenaming {
 		help := helpStyle.Render(" Rename: " + renderWithCursor(s.renameText, s.renameCursor) + "  Enter save  Esc cancel")
 		left := status

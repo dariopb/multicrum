@@ -172,7 +172,7 @@ Module Go version: `go 1.25.0`.
 2. Resolve the Unix socket path with `localserver.SocketPath(serverName)`.
 3. Try `localserver.TryAttach(...)`.
    - If it attaches, the process becomes an attach client and returns when detached/disconnected.
-   - Attached clients use raw terminal mode, forward stdin frames, receive owner-rendered TUI output frames, map bare LF output to CRLF for raw terminals, and forward resize frames.
+   - Attached clients use raw terminal mode, forward stdin frames, receive owner-rendered TUI output frames, map bare LF output to CRLF for raw terminals, and forward resize frames where supported.
 4. If attach fails, spawn a detached hidden owner process by re-execing the current binary with hidden `--owner`.
 5. The parent waits for the server socket to become ready, then attaches the current terminal as the first client.
 6. The detached owner:
@@ -192,7 +192,7 @@ Lifecycle commands:
 
 Startup settings exposed in status/list include command, config path, WebSocket bind address, token presence (`token=set`, never the token value), and SSH options.
 
-Windows local-server support is currently stubbed: localserver functions return clear unsupported errors. PTY sessions themselves still support Windows through ConPTY.
+Unix local servers use Unix sockets. Windows local servers use a per-user loopback TCP listener and store its address in `%LOCALAPPDATA%\multicrum\<server>.addr` (falling back through the user cache directory/temp dir). PTY sessions support Windows through ConPTY.
 
 ## Local Server Protocol
 
@@ -201,12 +201,17 @@ Package: `pkg/localserver`.
 Socket path:
 
 ```text
+# Unix:
 $XDG_RUNTIME_DIR/multicrum/<safe-server>.sock
-# fallback:
+# Unix fallback:
 /tmp/multicrum-$UID/multicrum/<safe-server>.sock
+
+# Windows:
+%LOCALAPPDATA%\multicrum\<safe-server>.addr
+# contains a 127.0.0.1:<port> loopback TCP address
 ```
 
-`SocketPath` sanitizes server names to filesystem-safe names using `path.go:sanitize` and creates the parent directory with `0700`.
+`SocketPath` sanitizes server names to filesystem-safe names using `path.go:sanitize` and creates the parent directory with `0700`. On Windows, the path is an address file rather than a socket file.
 
 Frame format:
 
@@ -692,6 +697,20 @@ WebSocket gotchas:
 - Last active resizer wins for the session being viewed.
 - If the VT screen is taller than the TUI pane, local viewport anchors to cursor rather than blindly going bottom.
 - Alt-screen transitions reset local scrollback mode and selection.
+- **Resize reflow.** The vt emulator does not reflow: shrinking width crops the
+  right edge of every row and the dropped characters are lost, so a later widen
+  would leave blank cells. On a size change `VTScreen.Resize` reconstructs the
+  visible screen by resetting the emulator (`RIS`) and replaying a bounded tail
+  of raw history at the new dimensions, which re-wraps lines and restores
+  characters an earlier shrink dropped. Only a screenful of history is replayed
+  (see `reflowTail`), keeping each resize sub-millisecond instead of the ~95 ms
+  a full 256 KiB replay took. Reflow is skipped on the alternate screen (those
+  apps redraw themselves on SIGWINCH), and terminal replies are suppressed
+  during the replay so replayed DSR/CPR queries are not forwarded to the child.
+- `tea.WindowSizeMsg` re-renders the focused viewport after resizing so the
+  reflowed content is shown immediately; without it the viewport keeps text
+  wrapped at the previous width and shows stale "ghost" rows until the next PTY
+  output.
 
 ## VTScreen Details
 
@@ -704,9 +723,12 @@ WebSocket gotchas:
 Important behavior:
 
 - `Render()` walks vt10x cells and emits ANSI SGR color sequences.
-- `RenderWithScrollback()` prepends semantic scrollback for local TUI browsing.
+- `RenderWithScrollback()` prepends semantic scrollback for local TUI browsing. It returns full, un-wrapped logical lines so copy/selection keep real line breaks; the scrollback pane re-wraps them to the pane width for display.
+- Logical-line capture treats a `CR`+`LF` pair as one line break, but a **lone** `CR` returns to column 0 and overwrites the current line in place (prompt redraws, progress bars). A bare `CR` does **not** commit a new logical line, so repeated prompt redraws no longer accumulate duplicate blank prompt lines in scrollback. The decision is deferred (`pendingCR`) so a `CR` at a read-buffer boundary is resolved by the next byte.
+- Scrollback pane rendering (`renderPaneContent`) windows content with the viewport's `YOffset`, which is measured in soft-wrapped row space. In scrollback mode it first expands each logical line into fixed-width wrapped rows (`softWrapRows`, mirroring `viewport.softWrap`) before applying `YOffset`; otherwise scrolling drifts and duplicates rows when lines are wider than the pane. The live/alt-screen path stays strictly no-wrap so cell-accurate grids (btop dialogs) never shift.
 - `SetReplyWriter()` forwards CPR/DSR replies back to child PTY/SSH.
 - `translateSCORC` rewrites bare `ESC[u` to `ESC 8` before feeding vt10x because the Charm vt emulator lacks SCORC handling; raw browser history keeps original bytes.
+- `Resize()` reflows the visible screen on a size change by replaying a bounded tail of raw history (see Rendering and Resize Semantics).
 
 ## Keyboard Escape Stripping
 
@@ -732,6 +754,16 @@ TUI mouse modes:
 
 - `mouse:select`: local selection/copy; soft-wrapped logical lines are joined using `VTScreen.BufferLines()` wrap metadata.
 - `mouse:app`: forward mouse events to the child only when it has enabled terminal mouse reporting.
+
+Both modes keep mouse reporting enabled (select mode uses `CellMotion`, app mode
+`AllMotion`); `Model.View()` sets `MouseMode` and bubbletea's renderer emits the
+enable/disable transitions. Two startup subtleties: (1) the input-mode reset in
+`Model.Init()` (`resetTerminalInputModes`) must not reset the renderer-owned mouse
+modes (1002/1003/1006), and (2) with a detached owner the renderer's one-time
+mouse-enable is written before any client attaches, so on each client attach the
+owner re-asserts the enable sequence (`state.mouseEnableSequence()`) for the newly
+connected terminal — otherwise wheel/selection stay dead until the user toggles
+mouse mode twice.
 
 Web mouse modes:
 

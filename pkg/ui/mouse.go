@@ -22,6 +22,12 @@ type mouseEvent struct {
 	Action mouseAction
 }
 
+type mouseHitbox struct {
+	Start int
+	End   int
+	Index int
+}
+
 func mouseEventFromMsg(msg tea.MouseMsg) mouseEvent {
 	m := msg.Mouse()
 	ev := mouseEvent{X: m.X, Y: m.Y, Button: m.Button, Mod: m.Mod}
@@ -34,6 +40,49 @@ func mouseEventFromMsg(msg tea.MouseMsg) mouseEvent {
 		ev.Action = mouseMotion
 	}
 	return ev
+}
+
+func hitboxAt(boxes []mouseHitbox, x int) (int, bool) {
+	for _, box := range boxes {
+		if x >= box.Start && x < box.End {
+			return box.Index, true
+		}
+	}
+	return 0, false
+}
+
+func (s *state) handleMouseScopeClick(ev mouseEvent) bool {
+	if ev.Action != mousePress || ev.Button != tea.MouseLeft {
+		return false
+	}
+	if ev.Y == 0 {
+		idx, ok := hitboxAt(s.sessionHitboxes, ev.X)
+		if !ok {
+			return false
+		}
+		s.mode = modeNormal
+		s.clearSelection()
+		if s.manager != nil && idx >= 0 && idx < s.manager.Len() && idx != s.manager.FocusedIndex() {
+			s.manager.Focus(idx)
+			s.refreshFocused()
+			s.notifyMeta()
+		}
+		return true
+	}
+	_, paneRows := paneSize(s.width, s.height)
+	if ev.Y == paneRows+1 {
+		idx, ok := hitboxAt(s.connectionHitboxes, ev.X)
+		if !ok {
+			return false
+		}
+		s.mode = modeNormal
+		s.clearSelection()
+		if idx >= 0 && idx < len(s.connections) && idx != s.activeConn {
+			s.focusConnection(idx)
+		}
+		return true
+	}
+	return false
 }
 
 // encodeMouseSGR converts a Bubble Tea mouse event into the SGR (1006) mouse

@@ -24,9 +24,18 @@ type VTScreen struct {
 	rows       int
 	dirty      bool
 	rawHistory []byte // raw PTY bytes capped at maxScrollback, for WS replay
-	reply      atomic.Pointer[io.Writer]
-	replyOnce  sync.Once
-	replies    atomic.Bool
+
+	logicalScrollback []logicalLine
+	pendingLines      []logicalLine
+	pendingRows       int
+	linePlain         strings.Builder
+	lineANSI          strings.Builder
+	pendingControl    []byte
+	pendingCR         bool
+
+	reply     atomic.Pointer[io.Writer]
+	replyOnce sync.Once
+	replies   atomic.Bool
 
 	appCursor     bool
 	mouseX10      bool
@@ -48,7 +57,7 @@ type CursorInfo struct {
 	Blink   bool
 }
 
-// BufferLine is one physical row of the terminal as plain text plus whether
+// BufferLine is one rendered row of the terminal as plain text plus whether
 // the row is soft-wrapped. The UI uses these to extract selection text with
 // correct line breaks.
 type BufferLine struct {
@@ -56,10 +65,15 @@ type BufferLine struct {
 	SoftWrap bool
 }
 
+type logicalLine struct {
+	ANSI  string
+	Plain string
+}
+
 // NewVTScreen creates a VT screen of given dimensions.
 func NewVTScreen(cols, rows int) *VTScreen {
 	e := vt.NewEmulator(cols, rows)
-	e.SetScrollbackSize(maxScrollbackLines)
+	e.SetScrollbackSize(maxScrollbackLines * 8)
 	s := &VTScreen{cols: cols, rows: rows, term: e, cursorVisible: true, cursorShape: vt.CursorBlock, cursorBlink: true}
 	e.SetCallbacks(vt.Callbacks{
 		EnableMode:       func(mode ansi.Mode) { s.setModeLocked(mode, true) },
@@ -135,6 +149,7 @@ func (s *VTScreen) Write(p []byte) {
 		s.rawHistory = s.rawHistory[len(s.rawHistory)-maxScrollback:]
 	}
 
+	s.captureLogicalLines(p)
 	_, _ = s.term.Write(translateSCORC(p))
 	s.dirty = true
 }
@@ -180,13 +195,275 @@ func containsESC(p []byte) bool {
 	return false
 }
 
+func (s *VTScreen) captureLogicalLines(p []byte) {
+	for _, b := range p {
+		if len(s.pendingControl) > 0 {
+			s.pendingControl = append(s.pendingControl, b)
+			if ansiSequenceComplete(s.pendingControl) {
+				s.captureControlSequence(s.pendingControl)
+				s.pendingControl = nil
+			}
+			continue
+		}
+		// Resolve a deferred carriage return. A CR immediately followed by LF
+		// is a single CRLF line break (the common PTY line ending produced by
+		// the terminal's ONLCR translation). A *lone* CR instead returns the
+		// cursor to column 0 so the bytes that follow overwrite the current
+		// line in place — this is how shells redraw their prompt and how
+		// progress bars/spinners update. Treating a lone CR as a line break
+		// (the previous behavior) committed a fresh logical line on every
+		// prompt redraw, so scrolled-back output filled with duplicated,
+		// blank-looking prompt lines that were absent from the live screen.
+		if s.pendingCR {
+			s.pendingCR = false
+			if b == '\n' {
+				s.finishLogicalLine()
+				continue
+			}
+			// Lone CR: overwrite the current (still-uncommitted) line.
+			s.linePlain.Reset()
+			s.lineANSI.Reset()
+		}
+		switch b {
+		case 0x1b:
+			s.pendingControl = append(s.pendingControl[:0], b)
+		case '\r':
+			s.pendingCR = true
+		case '\n':
+			s.finishLogicalLine()
+		case '\b':
+			trimLastRune(&s.linePlain)
+			trimLastRune(&s.lineANSI)
+		case '\t':
+			s.linePlain.WriteByte('\t')
+			s.lineANSI.WriteByte('\t')
+		default:
+			if b >= 0x20 || b >= 0x80 {
+				s.linePlain.WriteByte(b)
+				s.lineANSI.WriteByte(b)
+			}
+		}
+	}
+}
+
+func ansiSequenceComplete(seq []byte) bool {
+	if len(seq) == 0 || seq[0] != 0x1b {
+		return true
+	}
+	if len(seq) == 1 {
+		return false
+	}
+	switch seq[1] {
+	case '[':
+		if len(seq) < 3 {
+			return false
+		}
+		last := seq[len(seq)-1]
+		return last >= 0x40 && last <= 0x7e
+	case ']':
+		last := seq[len(seq)-1]
+		return last == 0x07 || (len(seq) >= 3 && seq[len(seq)-2] == 0x1b && last == '\\')
+	default:
+		return true
+	}
+}
+
+func (s *VTScreen) captureControlSequence(seq []byte) {
+	if isSGR(seq) {
+		s.lineANSI.Write(seq)
+	}
+}
+
+func isSGR(seq []byte) bool {
+	return len(seq) >= 3 && seq[0] == 0x1b && seq[1] == '[' && seq[len(seq)-1] == 'm'
+}
+
+func (s *VTScreen) finishLogicalLine() {
+	line := logicalLine{ANSI: s.lineANSI.String(), Plain: s.linePlain.String()}
+	s.pendingLines = append(s.pendingLines, line)
+	s.pendingRows += wrappedLineCount(line.Plain, s.cols)
+	s.linePlain.Reset()
+	s.lineANSI.Reset()
+	s.flushPendingLogicalLines()
+}
+
+func (s *VTScreen) flushPendingLogicalLines() {
+	for s.pendingRows > s.rows && len(s.pendingLines) > 0 {
+		line := s.pendingLines[0]
+		s.appendLogicalScrollback(line)
+		s.pendingLines = s.pendingLines[1:]
+		s.pendingRows -= wrappedLineCount(line.Plain, s.cols)
+	}
+}
+
+func (s *VTScreen) recalcPendingRows() {
+	s.pendingRows = 0
+	for _, line := range s.pendingLines {
+		s.pendingRows += wrappedLineCount(line.Plain, s.cols)
+	}
+}
+
+func (s *VTScreen) appendLogicalScrollback(line logicalLine) {
+	s.logicalScrollback = append(s.logicalScrollback, line)
+	if overflow := len(s.logicalScrollback) - maxScrollbackLines; overflow > 0 {
+		s.logicalScrollback = s.logicalScrollback[overflow:]
+	}
+}
+
+func wrappedLineCount(text string, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	n := len([]rune(text))
+	if n == 0 {
+		return 1
+	}
+	return (n + width - 1) / width
+}
+
+func appendWrappedBufferLines(out []BufferLine, text string, width int) []BufferLine {
+	runes := []rune(text)
+	if width <= 0 || len(runes) <= width {
+		return append(out, BufferLine{Text: text})
+	}
+	for len(runes) > width {
+		out = append(out, BufferLine{Text: string(runes[:width]), SoftWrap: true})
+		runes = runes[width:]
+	}
+	return append(out, BufferLine{Text: string(runes)})
+}
+
+func trimLastRune(b *strings.Builder) {
+	s := b.String()
+	if s == "" {
+		return
+	}
+	r := []rune(s)
+	b.Reset()
+	b.WriteString(string(r[:len(r)-1]))
+}
+
+func (s *VTScreen) writeLogicalRender(b *strings.Builder, includeScrollback bool) {
+	if includeScrollback {
+		for _, line := range s.logicalScrollback {
+			b.WriteString(line.ANSI)
+			b.WriteByte('\n')
+		}
+	}
+	for _, line := range s.pendingLines {
+		b.WriteString(line.ANSI)
+		b.WriteByte('\n')
+	}
+	if current := s.lineANSI.String(); current != "" {
+		b.WriteString(current)
+	}
+}
+
 // Resize adjusts the terminal dimensions.
 func (s *VTScreen) Resize(cols, rows int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if cols <= 0 || rows <= 0 {
+		return
+	}
+	changed := cols != s.cols || rows != s.rows
 	s.cols = cols
 	s.rows = rows
+	s.recalcPendingRows()
+	s.flushPendingLogicalLines()
 	s.term.Resize(cols, rows)
+	if changed {
+		s.reflowEmulatorLocked(cols, rows)
+	}
+	s.dirty = true
+}
+
+// reflowEmulatorLocked rebuilds the visible emulator screen by replaying the
+// raw PTY history at the new dimensions.
+//
+// The underlying vt emulator does not reflow: shrinking the width crops the
+// right edge of every row and that content is lost, so a later widen leaves
+// blank cells where the cropped characters used to be. Replaying the raw byte
+// stream re-wraps every line at the current width, which restores characters
+// dropped by an earlier shrink and reflows logical lines to fit — matching how
+// a real terminal behaves.
+//
+// Skipped while the child is on the alternate screen: alt-screen apps (vim,
+// btop, less) own an exact rows x cols grid and redraw themselves on the
+// SIGWINCH that accompanies a resize, so replaying their old absolute-coordinate
+// drawing at a new width would only flash a garbage frame before their redraw.
+func (s *VTScreen) reflowEmulatorLocked(cols, rows int) {
+	if len(s.rawHistory) == 0 || s.term.IsAltScreen() {
+		return
+	}
+	// Render() only shows the visible rows x cols screen, so we only need to
+	// replay enough of the tail to reconstruct it. Replaying the full history
+	// (capped at 256 KiB) on every resize tick was far too slow. Start the
+	// replay just after a newline boundary that leaves at least a screenful of
+	// logical lines ahead of it — each logical line yields >= 1 physical row,
+	// so rows+pad newlines guarantee the visible screen fills without leaving
+	// blank ghost rows at the top.
+	tail := reflowTail(s.rawHistory, rows)
+
+	// Suppress terminal replies while replaying: the history may contain DSR/CPR
+	// queries whose responses would otherwise be forwarded to the child as if it
+	// had just asked for them.
+	prevReplies := s.replies.Swap(false)
+	s.term.ClearScrollback()
+	// RIS (ESC c) fully resets the emulator so the replay reconstructs state
+	// from scratch instead of appending to the cropped screen.
+	_, _ = s.term.Write([]byte{0x1b, 'c'})
+	s.term.Resize(cols, rows)
+	_, _ = s.term.Write(translateSCORC(tail))
+	s.replies.Store(prevReplies)
+}
+
+// reflowTail returns the suffix of raw history to replay so the visible screen
+// can be reconstructed cheaply. It walks backwards to a newline boundary that
+// keeps at least rows+reflowPadRows logical lines ahead of it, bounded by
+// reflowMaxTail bytes so pathological escape-heavy streams can't blow up cost.
+func reflowTail(raw []byte, rows int) []byte {
+	const (
+		reflowPadRows = 8
+		reflowMaxTail = 96 * 1024
+	)
+	wantLines := rows + reflowPadRows
+	limit := len(raw)
+	if limit > reflowMaxTail {
+		limit = reflowMaxTail
+	}
+	start := len(raw)
+	lines := 0
+	hitCap := true
+	for i := len(raw) - 1; i >= len(raw)-limit; i-- {
+		if raw[i] == '\n' {
+			lines++
+			if lines >= wantLines {
+				start = i + 1
+				hitCap = false
+				break
+			}
+		}
+		start = i
+	}
+	tail := raw[start:]
+	// When the byte cap cut us off mid-stream, trim forward to the first
+	// newline so replay doesn't begin in the middle of a line or escape.
+	if hitCap && len(raw) > limit {
+		if nl := indexByte(tail, '\n'); nl >= 0 && nl+1 < len(tail) {
+			tail = tail[nl+1:]
+		}
+	}
+	return tail
+}
+
+func indexByte(p []byte, b byte) int {
+	for i := range p {
+		if p[i] == b {
+			return i
+		}
+	}
+	return -1
 }
 
 // Render returns the current screen with ANSI SGR sequences preserved.
@@ -212,14 +489,10 @@ func (s *VTScreen) RenderWithScrollback() string {
 	}
 
 	var b strings.Builder
-	if sb := s.term.Scrollback(); sb != nil {
-		lines := sb.Lines()
-		for _, line := range lines {
-			b.WriteString(line.Render())
-			b.WriteByte('\n')
-		}
+	s.writeLogicalRender(&b, true)
+	if b.Len() == 0 {
+		b.WriteString(s.term.Render())
 	}
-	b.WriteString(s.term.Render())
 	return b.String()
 }
 
@@ -230,21 +503,31 @@ func (s *VTScreen) BufferLines() []BufferLine {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	alt := s.term.IsAltScreen()
-	sbLen := 0
-	if !alt {
-		sbLen = s.term.ScrollbackLen()
-	}
-	out := make([]BufferLine, 0, sbLen+s.rows)
-	if !alt {
-		if sb := s.term.Scrollback(); sb != nil {
-			for _, line := range sb.Lines() {
-				out = append(out, BufferLine{Text: line.String()})
-			}
+	out := make([]BufferLine, 0, len(s.logicalScrollback)+len(s.pendingLines)+s.rows)
+	if !s.term.IsAltScreen() {
+		for _, line := range s.logicalScrollback {
+			out = appendWrappedBufferLines(out, line.Plain, s.cols)
+		}
+		for _, line := range s.pendingLines {
+			out = appendWrappedBufferLines(out, line.Plain, s.cols)
+		}
+		if current := s.linePlain.String(); current != "" {
+			out = appendWrappedBufferLines(out, current, s.cols)
 		}
 	}
-	for y := 0; y < s.rows; y++ {
-		out = append(out, BufferLine{Text: strings.TrimRight(s.plainRowAtLocked(y), " ")})
+	if len(out) < s.rows {
+		start := 0
+		if len(out) > 0 {
+			start = len(out)
+		}
+		for y := start; y < s.rows; y++ {
+			out = append(out, BufferLine{Text: strings.TrimRight(s.plainRowAtLocked(y), " ")})
+		}
+	}
+	if len(out) == 0 {
+		for y := 0; y < s.rows; y++ {
+			out = append(out, BufferLine{Text: strings.TrimRight(s.plainRowAtLocked(y), " ")})
+		}
 	}
 	if n := len(out); n > 0 {
 		out[n-1].SoftWrap = false
