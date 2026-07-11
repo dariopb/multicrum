@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"multicrum/pkg/session"
 )
 
@@ -45,6 +47,7 @@ func TestLiveSelectionUsesRenderedViewportSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
+
 	defer m.s.manager.CloseAll()
 
 	m.s.ensureViewport(0, 80, 24)
@@ -59,5 +62,83 @@ func TestLiveSelectionUsesRenderedViewportSnapshot(t *testing.T) {
 	lines := m.s.selectionLines(0, vp)
 	if len(lines) != 1 || lines[0].Text != "rendered row" {
 		t.Fatalf("selection source = %#v, want rendered viewport row", lines)
+	}
+}
+
+func TestScrollbackSelectionUsesDisplayedWrappedRows(t *testing.T) {
+	for _, layout := range []connectionLayout{connectionLayoutBottom, connectionLayoutLeft} {
+		t.Run(string(layout), func(t *testing.T) {
+			m := NewModel([]string{"bash"}, 40, 10)
+			m.s.connectionLayout = layout
+			m.s.manager = session.NewManager(40, 8, nil, nil)
+			m.s.connections[0].manager = m.s.manager
+			if _, err := m.s.manager.New([]string{"sh"}); err != nil {
+				t.Fatalf("new session: %v", err)
+			}
+			defer m.s.manager.CloseAll()
+			m.s.ensureViewport(0, 40, 10)
+			vp := m.s.viewports[0]
+			paneWidth := m.s.geometry().Pane.Width
+			content := "\x1b[32m" + strings.Repeat("abcdefghij", 6) + "\x1b[0m\nlast"
+			m.s.setScrollbackContent(0, vp, content)
+			m.s.scrollbackMode[0] = true
+			vp.SetHeight(4)
+			vp.GotoTop()
+
+			lines := m.s.selectionLines(0, vp)
+			if len(lines) < 2 || !lines[0].SoftWrap {
+				t.Fatalf("selection rows = %#v, want wrapped display rows", lines)
+			}
+
+			m.s.startSelection(paneWidth-2, 0)
+			m.s.updateSelection(2, 1)
+			want := lines[0].Text[paneWidth-2:] + lines[1].Text[:3]
+			if got := m.s.selectionText(); got != want {
+				t.Fatalf("selectionText() = %q, want %q", got, want)
+			}
+
+			pane := m.s.renderPaneContent(0, vp, paneWidth, 4, true)
+			if got := m.s.overlaySelection(pane, paneWidth, 4); !strings.Contains(got, "\x1b[7m") {
+				t.Fatal("selection overlay did not highlight the displayed wrapped rows")
+			}
+		})
+	}
+}
+
+func TestRightClickCopiesSelectionOnPressOrRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  tea.MouseMsg
+	}{
+		{name: "press", msg: tea.MouseClickMsg{X: 2, Y: 1, Button: tea.MouseRight}},
+		{name: "release", msg: tea.MouseReleaseMsg{X: 2, Y: 1, Button: tea.MouseRight}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModel([]string{"bash"}, 40, 10)
+			m.s.manager = session.NewManager(40, 8, nil, nil)
+			m.s.connections[0].manager = m.s.manager
+			if _, err := m.s.manager.New([]string{"sh"}); err != nil {
+				t.Fatalf("new session: %v", err)
+			}
+			defer m.s.manager.CloseAll()
+			m.s.ensureViewport(0, 40, 10)
+			vp := m.s.viewports[0]
+			m.s.setScrollbackContent(0, vp, "selected text\nother")
+			m.s.scrollbackMode[0] = true
+			m.s.sel = selection{startL: 0, startC: 0, endL: 0, endC: 7, hasRange: true}
+
+			var copied string
+			m.s.clipboardWrite = func(text string) { copied = text }
+			_, cmd := m.Update(tc.msg)
+			if copied != "selected" {
+				t.Fatalf("copied text = %q, want %q", copied, "selected")
+			}
+			if cmd == nil {
+				t.Fatal("right-click did not return the terminal clipboard command")
+			}
+			if m.s.sel.hasRange || m.s.scrollbackMode[0] {
+				t.Fatal("successful copy did not clear selection and return to live mode")
+			}
+		})
 	}
 }

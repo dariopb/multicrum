@@ -20,23 +20,43 @@ func TestLoadMissingReturnsNil(t *testing.T) {
 func TestSaveLoadRoundtrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "layout.yaml")
 	in := &Config{
-		Server:           "default",
-		ActiveConnection: "work",
+		Server:              "default",
+		ActiveConnection:    "work",
+		ConnectionLayout:    "left",
+		ConnectionRailWidth: 22,
 		Connections: []ConnectionEntry{
 			{Name: "default", Sessions: []SessionEntry{{Cmd: []string{"bash"}}}},
 			{Name: "work", Sessions: []SessionEntry{{Title: "logs", CmdLine: "tail -f /var/log/syslog"}}},
 			{Name: "remote", Sessions: []SessionEntry{{Title: "ssh", CmdLine: "bash -l", SSH: &SSHEntry{Target: "user@example.com", Port: "2222", Key: "~/.ssh/id_ed25519", UseDefaultKeys: true, UseAgent: true}}}},
 		},
 	}
+
 	if err := Save(path, in); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+
 	out, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+
 	if !reflect.DeepEqual(out, in) {
 		t.Fatalf("roundtrip mismatch:\n in=%+v\nout=%+v", in, out)
+	}
+}
+
+func TestConnectionLayoutNormalizesToBottom(t *testing.T) {
+	for _, layout := range []string{"", "sideways", "BOTTOM"} {
+		cfg := (&Config{ConnectionLayout: layout}).Normalize()
+		if cfg.ConnectionLayout != "bottom" {
+			t.Fatalf("Normalize(%q) = %q, want bottom", layout, cfg.ConnectionLayout)
+		}
+	}
+	for _, layout := range []string{"bottom", "left"} {
+		cfg := (&Config{ConnectionLayout: layout}).Normalize()
+		if cfg.ConnectionLayout != layout {
+			t.Fatalf("Normalize(%q) = %q", layout, cfg.ConnectionLayout)
+		}
 	}
 }
 

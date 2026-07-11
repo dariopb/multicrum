@@ -25,7 +25,7 @@ func contextMenuOptionClick(m *Model) mouseEvent {
 	left, top, _, _ := m.contextMenuBounds()
 	return mouseEvent{
 		X:      left,
-		Y:      1 + top + 1, // whole-window row: pane origin + top border
+		Y:      top + 1, // first row below the top border
 		Button: tea.MouseLeft,
 		Action: mousePress,
 	}
@@ -41,7 +41,7 @@ func TestSessionTabContextMenuDispatchesFocusKey(t *testing.T) {
 	_ = m.renderTabBar()
 	target := m.s.sessionHitboxes[1]
 	if handled, _ := m.s.handleMouseScopeClick(*m, mouseEvent{
-		X: target.Start, Y: 0, Button: tea.MouseRight, Action: mousePress,
+		X: target.Bounds.X, Y: target.Bounds.Y, Button: tea.MouseRight, Action: mousePress,
 	}); !handled {
 		t.Fatal("right-click on session tab was not handled")
 	}
@@ -57,7 +57,7 @@ func TestSessionTabContextMenuDispatchesFocusKey(t *testing.T) {
 	}
 	left, top, _, _ := m.contextMenuBounds()
 	_ = m.s.handleContextMenuMouse(*m, mouseEvent{
-		X: left, Y: 1 + top + 1 + 2, Button: tea.MouseNone, Action: mouseMotion,
+		X: left, Y: top + 1 + 2, Button: tea.MouseNone, Action: mouseMotion,
 	})
 	if m.s.contextMenu.hover != 2 {
 		t.Fatalf("hover = %d, want Move option 2", m.s.contextMenu.hover)
@@ -70,7 +70,7 @@ func TestSessionTabContextMenuDispatchesFocusKey(t *testing.T) {
 	// dismissing it.
 	first := m.s.sessionHitboxes[0]
 	_ = m.s.handleContextMenuMouse(*m, mouseEvent{
-		X: first.Start, Y: 0, Button: tea.MouseRight, Action: mousePress,
+		X: first.Bounds.X, Y: first.Bounds.Y, Button: tea.MouseRight, Action: mousePress,
 	})
 	if m.s.mode != modeContextMenu || m.s.contextMenu.target != 0 {
 		t.Fatalf("replacement menu = %#v, mode = %v", m.s.contextMenu, m.s.mode)
@@ -109,10 +109,9 @@ func TestConnectionTabContextMenuDispatchesFocusKey(t *testing.T) {
 	m.s.syncActiveConnectionFields()
 
 	_ = m.renderStatusBar()
-	_, paneRows := paneSize(m.s.width, m.s.height)
 	target := m.s.connectionHitboxes[1]
 	if handled, _ := m.s.handleMouseScopeClick(*m, mouseEvent{
-		X: target.Start, Y: paneRows + 1, Button: tea.MouseRight, Action: mousePress,
+		X: target.Bounds.X, Y: target.Bounds.Y, Button: tea.MouseRight, Action: mousePress,
 	}); !handled {
 		t.Fatal("right-click on connection tab was not handled")
 	}

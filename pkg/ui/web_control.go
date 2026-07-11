@@ -61,8 +61,8 @@ func (s *state) handleWSExit(msg transport.ControlMsg) {
 			// elsewhere — but if the browser tab is closed when respawn
 			// happens, this prevents the new PTY from sitting at the stale
 			// cached cols/rows.
-			cols, rows := paneSize(s.width, s.height)
-			s.manager.ResizeOne(id, cols, rows)
+			geom := s.geometry()
+			s.manager.ResizeOne(id, geom.Pane.Width, geom.Pane.Height)
 			s.resetViewport(id, s.width, s.height)
 			s.notifyMeta()
 		}
@@ -73,6 +73,7 @@ func (s *state) handleWSExit(msg transport.ControlMsg) {
 			return
 		}
 		delete(s.viewports, id)
+		delete(s.scrollbackCache, id)
 		s.manager.Kill(id)
 		s.refreshFocused()
 		s.notifyMeta()

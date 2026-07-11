@@ -1,5 +1,14 @@
 package localserver
 
+import "github.com/charmbracelet/x/ansi"
+
+const terminalCleanupSequence = ansi.ResetModeMouseButtonEvent +
+	ansi.ResetModeMouseAnyEvent +
+	ansi.ResetModeMouseExtSgr +
+	ansi.ResetModeAltScreenSaveCursor +
+	ansi.EraseEntireScreen +
+	ansi.CursorHomePosition
+
 type ClientHello struct {
 	Protocol   string `json:"protocol"`
 	Version    int    `json:"version"`

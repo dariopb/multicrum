@@ -357,6 +357,7 @@ type ConnectionEntry struct {
 type Config struct {
     Server           string            `yaml:"server,omitempty"`
     ActiveConnection string            `yaml:"activeConnection,omitempty"`
+    ConnectionLayout string            `yaml:"connectionLayout,omitempty" json:"connectionLayout,omitempty"`
     Connections      []ConnectionEntry `yaml:"connections,omitempty"`
     Sessions         []SessionEntry    `yaml:"sessions,omitempty"` // legacy
 }
@@ -368,6 +369,8 @@ Loading rules:
 - Legacy top-level `sessions` is migrated into one `default` connection by `Config.Normalize()`.
 - Empty connection names become `connection-N`.
 - Missing active connection becomes the first loaded connection.
+- `connectionLayout` accepts `bottom` (default) and `left`; empty or unknown
+  values normalize to `bottom`.
 - `cmdline` is parsed into startup `Cmd` with `ui.ParseCmdLine` when loaded through `Model.SetConfigConnections`; this is required so config-defined commands do not fall back to the process default `--cmd` (`bash`).
 - `ssh` entries recreate SSH-backed sessions with their saved target, port, key, known-host settings, and remote command.
 - `cmdline` is preserved in session state for round-trip saves.
@@ -375,7 +378,7 @@ Loading rules:
 Saving rules:
 
 - `pkg/ui/layout_save.go` saves every connection, not just the active connection.
-- It writes `server`, `activeConnection`, and `connections[].sessions[]`.
+- It writes `server`, `activeConnection`, `connectionLayout`, and `connections[].sessions[]`.
 - For each session, it prefers `Session.CmdLine()` when present; otherwise it writes argv-style `cmd`.
 - SSH-backed sessions also write an `ssh` block with target, port, key, default-key/agent flags, known-hosts override, and insecure host-key flag.
 - Top-level legacy `sessions` is omitted when connections exist.

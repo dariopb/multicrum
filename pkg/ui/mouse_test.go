@@ -87,8 +87,8 @@ func TestMouseEventFromMsgWheel(t *testing.T) {
 
 func TestHitboxAt(t *testing.T) {
 	boxes := []mouseHitbox{
-		{Start: 2, End: 5, Index: 10},
-		{Start: 5, End: 9, Index: 11},
+		{Bounds: rect{X: 2, Y: 3, Width: 3, Height: 1}, Index: 10},
+		{Bounds: rect{X: 5, Y: 3, Width: 4, Height: 1}, Index: 11},
 	}
 	for _, tc := range []struct {
 		x     int
@@ -102,9 +102,9 @@ func TestHitboxAt(t *testing.T) {
 		{x: 8, idx: 11, found: true},
 		{x: 9, found: false},
 	} {
-		idx, found := hitboxAt(boxes, tc.x)
-		if found != tc.found || idx != tc.idx {
-			t.Fatalf("hitboxAt(%d) = %d, %v; want %d, %v", tc.x, idx, found, tc.idx, tc.found)
+		box, found := hitboxAt(boxes, tc.x, 3)
+		if found != tc.found || box.Index != tc.idx {
+			t.Fatalf("hitboxAt(%d) = %d, %v; want %d, %v", tc.x, box.Index, found, tc.idx, tc.found)
 		}
 	}
 }
@@ -141,7 +141,7 @@ func TestRenderBarsRecordMouseHitboxes(t *testing.T) {
 	if m.s.connectionHitboxes[0].Index != 0 || m.s.connectionHitboxes[1].Index != 1 {
 		t.Fatalf("connection hitboxes = %#v, want indexes 0 and 1", m.s.connectionHitboxes)
 	}
-	if m.s.connectionHitboxes[0].Start <= 0 {
+	if m.s.connectionHitboxes[0].Bounds.X <= 0 {
 		t.Fatalf("connection hitboxes were not offset by status prefix: %#v", m.s.connectionHitboxes)
 	}
 }

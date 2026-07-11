@@ -16,6 +16,7 @@ The child program or remote shell is treated as a black-box terminal: the app fo
 
 - Long-running named local servers: the first `multicrum --server NAME` auto-starts a detached owner daemon, and later processes attach to it over a Unix socket.
 - Multiple connections/workspaces per server, each with its own tabs / sessions.
+- Configurable local connection switcher: the default bottom pills or a persisted, drag-resizable left rail.
 - Local commands via PTY on Unix and ConPTY on Windows.
 - Named server attach/daemon lifecycle on Unix and Windows.
 - SSH sessions with `user@host[:port]`, explicit port, password, explicit key, SSH agent, `~/.ssh/config`, and known-host verification.
@@ -28,6 +29,7 @@ The child program or remote shell is treated as a black-box terminal: the app fo
 - Optional xterm.js browser UI over WebSocket.
 - Mouse selection/copy mode that preserves soft-wrapped logical lines.
 - Right-click a session or connection tab for a modal-styled context menu with focus, rename, move, and remove actions.
+- Centered dialogs support direct button/row clicks; drag session tabs/rows or connection pills/rail entries/rows to reorder them.
 - Terminal-accurate resize: output reflows (re-wraps) when the pane is made narrower or wider — characters cropped by a shrink are restored on a later widen — and scrollback stays consistent while scrolling with the mouse wheel or `Ctrl+PgUp`/`Ctrl+PgDn`. Prompt redraws and progress bars overwrite in place instead of leaving duplicate lines.
 
 ## Build
@@ -147,7 +149,7 @@ http://localhost:9999/?token=mytoken
 | `Ctrl+Alt+W` | Kill focused session, except final session. |
 | `Ctrl+Alt+R` | Open the sessions dialog on the active session; press `R` to rename. |
 | `Ctrl+Alt+S` | Open sessions dialog (focus, create, rename, move/reorder, filter, remove). |
-| `Ctrl+Alt+O` | Open connections modal (focus, create, rename, move/reorder, filter, remove). |
+| `Ctrl+Alt+O` | Open connections modal (focus, create, rename, move/reorder, filter, remove; `L` toggles bottom/left switcher placement). |
 | `Ctrl+Alt+E` | Open the connections modal on the active connection; press `R` to rename. |
 | `Ctrl+Alt+C` | Quick-create a new connection/workspace. |
 | `Ctrl+Alt+[` / `Ctrl+Alt+]` | Switch connections/workspaces. |

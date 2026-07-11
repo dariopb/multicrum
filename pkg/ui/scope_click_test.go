@@ -21,7 +21,7 @@ func TestScopeClicksActivateHelpAndNewSession(t *testing.T) {
 		t.Fatal("new-session hitbox was not recorded")
 	}
 	if handled, _ := m.s.handleMouseScopeClick(*m, mouseEvent{
-		X: m.s.newSessionHitbox.Start, Y: 0, Button: tea.MouseLeft, Action: mousePress,
+		X: m.s.newSessionHitbox.Bounds.X, Y: m.s.newSessionHitbox.Bounds.Y, Button: tea.MouseLeft, Action: mousePress,
 	}); !handled || m.s.mode != modeNewSession {
 		t.Fatalf("new-session click handled=%v mode=%v, want true/%v", handled, m.s.mode, modeNewSession)
 	}
@@ -31,9 +31,8 @@ func TestScopeClicksActivateHelpAndNewSession(t *testing.T) {
 	if !m.s.hasHelpHitbox {
 		t.Fatal("help hitbox was not recorded")
 	}
-	_, paneRows := paneSize(m.s.width, m.s.height)
 	if handled, _ := m.s.handleMouseScopeClick(*m, mouseEvent{
-		X: m.s.helpHitbox.Start, Y: paneRows + 1, Button: tea.MouseLeft, Action: mousePress,
+		X: m.s.helpHitbox.Bounds.X, Y: m.s.helpHitbox.Bounds.Y, Button: tea.MouseLeft, Action: mousePress,
 	}); !handled || m.s.mode != modeHelp {
 		t.Fatalf("help click handled=%v mode=%v, want true/%v", handled, m.s.mode, modeHelp)
 	}
@@ -44,7 +43,7 @@ func TestScopeClicksActivateHelpAndNewSession(t *testing.T) {
 		t.Fatal("connections hitbox was not recorded")
 	}
 	if handled, _ := m.s.handleMouseScopeClick(*m, mouseEvent{
-		X: m.s.connectionsHitbox.Start, Y: paneRows + 1, Button: tea.MouseLeft, Action: mousePress,
+		X: m.s.connectionsHitbox.Bounds.X, Y: m.s.connectionsHitbox.Bounds.Y, Button: tea.MouseLeft, Action: mousePress,
 	}); !handled || m.s.mode != modeConnections {
 		t.Fatalf("connections click handled=%v mode=%v, want true/%v", handled, m.s.mode, modeConnections)
 	}

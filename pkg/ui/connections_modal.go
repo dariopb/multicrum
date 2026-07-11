@@ -67,6 +67,9 @@ func (s *state) handleConnectionsKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 	switch msg.String() {
+	case "l", "L":
+		s.toggleConnectionLayout()
+		return nil
 	case "n", "N":
 		s.quickAddConnection(m)
 		s.connCursor = s.filteredCursorForIndex(s.activeConn)
@@ -322,7 +325,7 @@ func (m Model) renderConnectionsModal() string {
 	if s.connRenaming {
 		rows = append(rows, "", "Rename: "+renderWithCursor(s.connRename, s.connRenameCursor))
 	}
-	footer := "↑/↓ select   Enter focus   N new   R rename   M move   F filter   Del/X remove   Esc cancel"
+	footer := "↑/↓ select   Enter focus   N new   R rename   M move   L layout   F filter   Del/X remove   Esc cancel"
 	if s.connMoving {
 		footer = "Move: ↑/↓ reorder   M/Esc stop moving"
 	}

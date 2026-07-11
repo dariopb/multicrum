@@ -26,6 +26,15 @@ var (
 			Background(lipgloss.Color("199")).
 			Padding(0, 1)
 
+	railBrandStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("199"))
+
+	dividerStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Background(lipgloss.Color("0"))
+
 	statusBarStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250")).
 			Background(lipgloss.Color("236")).
@@ -46,6 +55,15 @@ var (
 				Foreground(lipgloss.Color("250")).
 				Background(lipgloss.Color("238")).
 				Padding(0, 1)
+
+	railInactiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("250")).
+				Background(lipgloss.Color("0"))
+
+	railActiveStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("236"))
 
 	viewportStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("0"))

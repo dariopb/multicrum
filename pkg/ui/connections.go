@@ -20,10 +20,17 @@ func (s *state) activeConnection() *connectionState {
 
 func (s *state) syncActiveConnectionFields() {
 	c := s.activeConnection()
+	if c.scrollbackCache == nil {
+		c.scrollbackCache = make(map[int]scrollWrapCache)
+	}
+	for _, conn := range s.connections {
+		conn.webActive.Store(conn == c)
+	}
 	s.manager = c.manager
 	s.viewports = c.viewports
 	s.altScreens = c.altScreens
 	s.scrollbackMode = c.scrollbackMode
+	s.scrollbackCache = c.scrollbackCache
 }
 
 func (s *state) addConnection(name string) *connectionState {
@@ -31,10 +38,11 @@ func (s *state) addConnection(name string) *connectionState {
 		name = fmt.Sprintf("connection-%d", len(s.connections)+1)
 	}
 	c := &connectionState{
-		name:           name,
-		viewports:      make(map[int]*viewport.Model),
-		altScreens:     make(map[int]bool),
-		scrollbackMode: make(map[int]bool),
+		name:            name,
+		viewports:       make(map[int]*viewport.Model),
+		altScreens:      make(map[int]bool),
+		scrollbackMode:  make(map[int]bool),
+		scrollbackCache: make(map[int]scrollWrapCache),
 	}
 	s.connections = append(s.connections, c)
 	if len(s.connections) == 1 {
@@ -94,39 +102,41 @@ func (s *state) moveConnection(from, to int) {
 		s.activeConn++
 	}
 	s.syncActiveConnectionFields()
-	s.rebindConnectionCallbacks()
 	s.notifyMeta()
 }
 
 func (s *state) rebindConnectionCallbacks() {
-	for i, conn := range s.connections {
-		if conn.manager == nil {
-			continue
-		}
-		idx := i
-		conn := conn
-		conn.manager.SetSendOutput(func(msg session.OutputMsg) {
-			// Browsers need every chunk of raw PTY bytes for a faithful replay,
-			// so forward those unconditionally (cheap byte copy to the socket).
-			if s.wsTransport != nil && idx == s.activeConn {
-				s.wsTransport.SendPTY(msg.Index, msg.Data)
-			}
-			// Coalesce the Bubble Tea notification: the renderer rebuilds the
-			// whole View() on every message, so collapsing a burst of small
-			// child writes into a single connectionOutputMsg (until the model
-			// consumes it) is what keeps a chatty child from saturating the
-			// event loop with throwaway view rebuilds. The bytes are already in
-			// the VTScreen, so nothing is dropped.
-			if s.program != nil && !conn.outputPending.Swap(true) {
-				s.program.Send(connectionOutputMsg{Conn: idx, Msg: msg})
-			}
-		})
-		conn.manager.SetSendExit(func(msg session.ExitMsg) {
-			if s.program != nil {
-				s.program.Send(connectionExitMsg{Conn: idx, Msg: msg})
-			}
-		})
+	for _, conn := range s.connections {
+		s.bindConnectionCallbacks(conn)
 	}
+}
+
+func (s *state) bindConnectionCallbacks(conn *connectionState) {
+	if conn == nil || conn.manager == nil || conn.callbacksBound {
+		return
+	}
+	conn.callbacksBound = true
+	conn.manager.SetSendOutput(func(msg session.OutputMsg) {
+		// Browsers need every chunk of raw PTY bytes for a faithful replay,
+		// so forward those unconditionally (cheap byte copy to the socket).
+		if s.wsTransport != nil && conn.webActive.Load() {
+			s.wsTransport.SendPTY(msg.Index, msg.Data)
+		}
+		// Coalesce the Bubble Tea notification: the renderer rebuilds the
+		// whole View() on every message, so collapsing a burst of small
+		// child writes into a single connectionOutputMsg (until the model
+		// consumes it) is what keeps a chatty child from saturating the
+		// event loop with throwaway view rebuilds. The bytes are already in
+		// the VTScreen, so nothing is dropped.
+		if s.program != nil && !conn.outputPending.Swap(true) {
+			s.program.Send(connectionOutputMsg{Conn: conn, Msg: msg})
+		}
+	})
+	conn.manager.SetSendExit(func(msg session.ExitMsg) {
+		if s.program != nil {
+			s.program.Send(connectionExitMsg{Conn: conn, Msg: msg})
+		}
+	})
 }
 
 func (s *state) removeConnection(index int) {
@@ -140,6 +150,7 @@ func (s *state) removeConnection(index int) {
 	conn.viewports = nil
 	conn.altScreens = nil
 	conn.scrollbackMode = nil
+	conn.scrollbackCache = nil
 	s.connections = append(s.connections[:index], s.connections[index+1:]...)
 	if s.activeConn >= len(s.connections) {
 		s.activeConn = len(s.connections) - 1
@@ -148,20 +159,19 @@ func (s *state) removeConnection(index int) {
 		s.activeConn = 0
 	}
 	s.syncActiveConnectionFields()
-	s.rebindConnectionCallbacks()
 	s.notifyMeta()
 }
 
 func (s *state) createConnectionWithDefaultSession(name string, m Model) *connectionState {
 	conn := s.addConnection(name)
-	cols, rows := paneSize(s.width, s.height)
-	// Callbacks are wired by rebindConnectionCallbacks below; New() is nil-safe
-	// until then (output is still applied to the VTScreen synchronously).
-	conn.manager = session.NewManagerWithSSH(cols, rows, nil, nil, s.sshClient)
+	geom := s.geometry()
+	conn.manager = session.NewManagerWithSSH(geom.Pane.Width, geom.Pane.Height, nil, nil, s.sshClient)
+	// Bind before New starts the read loop so callback installation never
+	// races live PTY output.
+	s.bindConnectionCallbacks(conn)
 	if sess, err := conn.manager.New(m.agentCmd); err == nil && m.agentCmdLine != "" {
 		sess.SetCmdLine(m.agentCmdLine)
 	}
-	s.rebindConnectionCallbacks()
 	return conn
 }
 
@@ -213,7 +223,12 @@ func (m *Model) AddInitialConnection(name string, sessions []startupSession) {
 }
 
 func (m *Model) SetConfigConnections(cfg *config.Config) {
-	if cfg == nil || len(cfg.Connections) == 0 {
+	if cfg == nil {
+		return
+	}
+	m.SetConnectionRailWidth(cfg.ConnectionRailWidth)
+	m.SetConnectionLayout(cfg.ConnectionLayout)
+	if len(cfg.Connections) == 0 {
 		return
 	}
 	entries := make([]startupConnection, 0, len(cfg.Connections))
@@ -229,4 +244,59 @@ func (m *Model) SetConfigConnections(cfg *config.Config) {
 		entries = append(entries, startupConnection{Name: conn.Name, Sessions: sessions})
 	}
 	m.SetInitialConnections(entries, cfg.ActiveConnection)
+}
+
+func (s *state) toggleConnectionLayout() {
+	if s.connectionLayout == connectionLayoutLeft {
+		s.connectionLayout = connectionLayoutBottom
+	} else {
+		s.connectionLayout = connectionLayoutLeft
+	}
+	s.applyGeometry()
+}
+
+// applyGeometry synchronizes every local TUI surface with the active layout.
+// This is used for both terminal resizes and layout changes, keeping managers,
+// viewports, cache, and hit targets in one coordinate system.
+func (s *state) applyGeometry() {
+	geom := s.geometry()
+	s.layoutFallback = s.connectionLayout == connectionLayoutLeft && geom.ConnectionRail.Width == 0
+	s.paneCache.valid = false
+	s.sessionHitboxes = nil
+	s.connectionHitboxes = nil
+	s.hasNewSessionHitbox = false
+	s.hasNewConnectionHitbox = false
+	s.hasHelpHitbox = false
+	s.hasConnectionsHitbox = false
+	for _, conn := range s.connections {
+		if conn.manager != nil {
+			conn.manager.ResizeAll(geom.Pane.Width, geom.Pane.Height)
+		}
+		for idx, vp := range conn.viewports {
+			vp.SetWidth(geom.Pane.Width)
+			vp.SetHeight(geom.Pane.Height)
+			conn.viewports[idx] = vp
+		}
+	}
+	if s.manager == nil || s.manager.Len() == 0 {
+		return
+	}
+	idx := s.manager.FocusedIndex()
+	s.ensureViewport(idx, s.width, s.height)
+	for _, sess := range s.manager.Sessions() {
+		if sess.Index() != idx {
+			continue
+		}
+		vp := s.viewports[idx]
+		if s.scrollbackMode[idx] && !sess.Screen().IsAltScreen() {
+			s.setScrollbackContent(idx, vp, sess.Screen().RenderWithScrollback())
+		} else {
+			delete(s.scrollbackCache, idx)
+			vp.SoftWrap = true
+			vp.SetContent(sess.Screen().Render())
+			anchorViewportToCursor(vp, sess)
+		}
+		s.viewports[idx] = vp
+		break
+	}
 }

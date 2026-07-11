@@ -13,8 +13,8 @@ import (
 // selection tracks an in-progress or completed mouse selection over the
 // focused session's buffer (scrollback + visible rows).
 //
-// Coordinates are buffer-relative: lineIdx is the index into VTScreen
-// BufferLines (0 = oldest scrollback row), col is the rune column.
+// Coordinates are display-row-relative: lineIdx is the index into the exact
+// wrapped row source painted by the pane, col is the rune column.
 type selection struct {
 	active   bool // mouse button is currently down
 	startL   int
@@ -36,9 +36,8 @@ func (sel selection) normalized() (sl, sc, el, ec int) {
 // corresponds to pane row 0.
 //
 // The selection source must match what the pane actually displays:
-//   - Scrollback mode: the pane shows RenderWithScrollback() (the full logical
-//     buffer), so the source is BufferLines() and the base is the viewport's
-//     YOffset directly.
+//   - Scrollback mode: the pane shows cached, prewrapped rows, so the source is
+//     the matching plain-text cache and the base is the viewport's YOffset.
 //   - Live mode: the pane shows the viewport's last Render() snapshot, so the
 //     source is that snapshot and the base is again just the viewport's
 //     YOffset — the visible rows *are* the source, so no scrollback shift is
@@ -63,6 +62,9 @@ func (s *state) selectionLines(idx int, vp *viewport.Model) []session.BufferLine
 		return nil
 	}
 	if s.scrollbackMode[idx] {
+		if cache, ok := s.scrollbackCache[idx]; ok {
+			return cache.plain
+		}
 		return sess.Screen().BufferLines()
 	}
 	rows := strings.Split(ansi.Strip(vp.GetContent()), "\n")
@@ -130,7 +132,7 @@ func (s *state) finishSelection() tea.Cmd {
 		s.sel = selection{}
 		return nil
 	}
-	copyToClipboard(text)
+	s.writeClipboard(text)
 	debugLog("copyToClipboard: done")
 	return tea.SetClipboard(text)
 }
@@ -167,9 +169,15 @@ func (s *state) copySelection() tea.Cmd {
 	if text == "" {
 		return nil
 	}
-	copyToClipboard(text)
+	s.writeClipboard(text)
 	debugLog("copySelection: copied %d bytes", len(text))
 	return tea.SetClipboard(text)
+}
+
+func (s *state) writeClipboard(text string) {
+	if s.clipboardWrite != nil {
+		s.clipboardWrite(text)
+	}
 }
 
 // clearSelection drops any current selection (e.g. after content changes).

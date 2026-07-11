@@ -17,6 +17,7 @@ const (
 	FrameResize
 	FrameControl
 	FrameControlAck
+	FrameClipboard
 )
 
 func WriteFrame(w io.Writer, typ byte, body []byte) error {

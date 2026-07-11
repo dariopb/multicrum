@@ -34,6 +34,7 @@ func (s *state) confirmDelete() tea.Cmd {
 			return s.confirmDelete()
 		}
 		delete(s.viewports, s.deleteIndex)
+		delete(s.scrollbackCache, s.deleteIndex)
 		s.manager.Kill(s.deleteIndex)
 		s.refreshFocused()
 		s.notifyMeta()

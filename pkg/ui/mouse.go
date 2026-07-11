@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
+	"multicrum/pkg/session"
 )
 
 type mouseAction int
@@ -23,9 +24,38 @@ type mouseEvent struct {
 }
 
 type mouseHitbox struct {
-	Start int
-	End   int
-	Index int
+	Bounds rect
+	Index  int
+	Action hitboxAction
+}
+
+type hitboxAction int
+
+const (
+	hitboxSession hitboxAction = iota
+	hitboxConnection
+	hitboxNewSession
+	hitboxNewConnection
+	hitboxHelp
+	hitboxConnections
+)
+
+type mouseDragKind int
+
+const (
+	mouseDragNone mouseDragKind = iota
+	mouseDragSessionTab
+	mouseDragConnectionItem
+	mouseDragSessionRow
+	mouseDragConnectionRow
+	mouseDragConnectionDivider
+)
+
+type mouseDrag struct {
+	kind       mouseDragKind
+	session    *session.Session
+	connection *connectionState
+	moved      bool
 }
 
 func mouseEventFromMsg(msg tea.MouseMsg) mouseEvent {
@@ -42,82 +72,177 @@ func mouseEventFromMsg(msg tea.MouseMsg) mouseEvent {
 	return ev
 }
 
-func hitboxAt(boxes []mouseHitbox, x int) (int, bool) {
+func hitboxAt(boxes []mouseHitbox, x, y int) (mouseHitbox, bool) {
 	for _, box := range boxes {
-		if x >= box.Start && x < box.End {
-			return box.Index, true
+		if (layoutGeometry{}).Contains(box.Bounds, x, y) {
+			return box, true
 		}
 	}
-	return 0, false
+	return mouseHitbox{}, false
 }
 
 func (s *state) handleMouseScopeClick(m Model, ev mouseEvent) (bool, tea.Cmd) {
+	if s.mouseDrag.kind != mouseDragNone {
+		switch ev.Action {
+		case mouseMotion:
+			s.updateScopeDrag(ev)
+		case mouseRelease:
+			s.finishScopeDrag(ev)
+		}
+		return true, nil
+	}
 	if ev.Action != mousePress {
 		return false, nil
 	}
-	if ev.Y == 0 {
-		if ev.Button == tea.MouseLeft && s.hasNewSessionHitbox {
-			if _, ok := hitboxAt([]mouseHitbox{s.newSessionHitbox}, ev.X); ok {
-				return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{
-					Code: 't', Mod: tea.ModCtrl | tea.ModAlt,
-				}))
-			}
+	geom := s.geometry()
+	if ev.Button == tea.MouseLeft && geom.Contains(geom.ConnectionDivider, ev.X, ev.Y) {
+		s.mouseDrag = mouseDrag{kind: mouseDragConnectionDivider}
+		return true, nil
+	}
+	if s.hasNewSessionHitbox && ev.Button == tea.MouseLeft {
+		if _, ok := hitboxAt([]mouseHitbox{s.newSessionHitbox}, ev.X, ev.Y); ok {
+			return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{Code: 't', Mod: tea.ModCtrl | tea.ModAlt}))
 		}
-		idx, ok := hitboxAt(s.sessionHitboxes, ev.X)
-		if !ok {
-			return false, nil
+	}
+	if s.hasNewConnectionHitbox && ev.Button == tea.MouseLeft {
+		if _, ok := hitboxAt([]mouseHitbox{s.newConnectionHitbox}, ev.X, ev.Y); ok {
+			return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl | tea.ModAlt}))
 		}
+	}
+	if s.hasConnectionsHitbox && ev.Button == tea.MouseLeft {
+		if _, ok := hitboxAt([]mouseHitbox{s.connectionsHitbox}, ev.X, ev.Y); ok {
+			return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl | tea.ModAlt}))
+		}
+	}
+	if s.hasHelpHitbox && ev.Button == tea.MouseLeft {
+		if _, ok := hitboxAt([]mouseHitbox{s.helpHitbox}, ev.X, ev.Y); ok {
+			return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{Code: '`', Mod: tea.ModAlt}))
+		}
+	}
+	if box, ok := hitboxAt(s.sessionHitboxes, ev.X, ev.Y); ok {
 		if ev.Button == tea.MouseRight {
-			s.openContextMenu(sessionContextMenu, idx, ev.X, ev.Y)
+			s.openContextMenu(sessionContextMenu, box.Index, ev.X, ev.Y)
 			return true, nil
 		}
 		if ev.Button != tea.MouseLeft {
 			return false, nil
 		}
-		s.mode = modeNormal
 		s.clearSelection()
-		if s.manager != nil && idx >= 0 && idx < s.manager.Len() && idx != s.manager.FocusedIndex() {
-			s.manager.Focus(idx)
-			s.refreshFocused()
-			s.notifyMeta()
+		if s.manager != nil {
+			s.mouseDrag = mouseDrag{
+				kind:    mouseDragSessionTab,
+				session: s.manager.ByID(box.Index),
+			}
 		}
 		return true, nil
 	}
-	_, paneRows := paneSize(s.width, s.height)
-	if ev.Y == paneRows+1 {
-		if ev.Button == tea.MouseLeft && s.hasConnectionsHitbox {
-			if _, ok := hitboxAt([]mouseHitbox{s.connectionsHitbox}, ev.X); ok {
-				return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{
-					Code: 'o', Mod: tea.ModCtrl | tea.ModAlt,
-				}))
-			}
-		}
-		if ev.Button == tea.MouseLeft && s.hasHelpHitbox {
-			if _, ok := hitboxAt([]mouseHitbox{s.helpHitbox}, ev.X); ok {
-				return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{
-					Code: '`', Mod: tea.ModAlt,
-				}))
-			}
-		}
-		idx, ok := hitboxAt(s.connectionHitboxes, ev.X)
-		if !ok {
-			return false, nil
-		}
+	if box, ok := hitboxAt(s.connectionHitboxes, ev.X, ev.Y); ok {
 		if ev.Button == tea.MouseRight {
-			s.openContextMenu(connectionContextMenu, idx, ev.X, ev.Y)
+			s.openContextMenu(connectionContextMenu, box.Index, ev.X, ev.Y)
 			return true, nil
 		}
 		if ev.Button != tea.MouseLeft {
 			return false, nil
 		}
-		s.mode = modeNormal
 		s.clearSelection()
-		if idx >= 0 && idx < len(s.connections) && idx != s.activeConn {
-			s.focusConnection(idx)
+		if box.Index >= 0 && box.Index < len(s.connections) {
+			s.mouseDrag = mouseDrag{
+				kind:       mouseDragConnectionItem,
+				connection: s.connections[box.Index],
+			}
 		}
+		return true, nil
+	}
+	// The rail is UI chrome, even its blank space; do not let clicks leak to
+	// the child terminal or start a selection.
+	if s.geometry().Contains(s.geometry().ConnectionRail, ev.X, ev.Y) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func (s *state) updateScopeDrag(ev mouseEvent) {
+	switch s.mouseDrag.kind {
+	case mouseDragConnectionDivider:
+		s.resizeConnectionRail(ev.X)
+	case mouseDragSessionTab:
+		box, ok := hitboxAt(s.sessionHitboxes, ev.X, ev.Y)
+		if !ok || s.mouseDrag.session == nil || s.manager == nil {
+			return
+		}
+		target := s.manager.ByID(box.Index)
+		from := sessionIndex(s.manager, s.mouseDrag.session)
+		to := sessionIndex(s.manager, target)
+		if from >= 0 && to >= 0 && from != to {
+			s.moveSession(from, to)
+			s.mouseDrag.moved = true
+		}
+	case mouseDragConnectionItem:
+		box, ok := hitboxAt(s.connectionHitboxes, ev.X, ev.Y)
+		if !ok || s.mouseDrag.connection == nil || box.Index < 0 || box.Index >= len(s.connections) {
+			return
+		}
+		from := connectionIndex(s.connections, s.mouseDrag.connection)
+		to := connectionIndex(s.connections, s.connections[box.Index])
+		if from >= 0 && to >= 0 && from != to {
+			s.moveConnection(from, to)
+			s.mouseDrag.moved = true
+		}
+	}
+}
+
+func (s *state) finishScopeDrag(ev mouseEvent) {
+	drag := s.mouseDrag
+	s.mouseDrag = mouseDrag{}
+	if drag.moved {
+		return
+	}
+	switch drag.kind {
+	case mouseDragConnectionDivider:
+		return
+	case mouseDragSessionTab:
+		box, ok := hitboxAt(s.sessionHitboxes, ev.X, ev.Y)
+		if !ok || s.manager.ByID(box.Index) != drag.session {
+			return
+		}
+		index := sessionIndex(s.manager, drag.session)
+		if index >= 0 && index != s.manager.FocusedIndex() {
+			s.manager.Focus(index)
+			s.refreshFocused()
+			s.notifyMeta()
+		}
+	case mouseDragConnectionItem:
+		box, ok := hitboxAt(s.connectionHitboxes, ev.X, ev.Y)
+		if !ok || box.Index < 0 || box.Index >= len(s.connections) ||
+			s.connections[box.Index] != drag.connection {
+			return
+		}
+		index := connectionIndex(s.connections, drag.connection)
+		if index >= 0 && index != s.activeConn {
+			s.focusConnection(index)
+		}
+	}
+}
+
+func sessionIndex(manager *session.SessionManager, target *session.Session) int {
+	if manager == nil || target == nil {
+		return -1
+	}
+	for index, sess := range manager.Sessions() {
+		if sess == target {
+			return index
+		}
+	}
+	return -1
+}
+
+func connectionIndex(connections []*connectionState, target *connectionState) int {
+	for index, conn := range connections {
+		if conn == target {
+			return index
+		}
+	}
+	return -1
 }
 
 // encodeMouseSGR converts a Bubble Tea mouse event into the SGR (1006) mouse

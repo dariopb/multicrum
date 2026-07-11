@@ -196,6 +196,8 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 	if !detachedOwner {
 		output = localserver.FanoutWriter{Primary: os.Stdout, Mirror: owner}
 	}
+	model.SetClipboardOutput(output)
+	model.SetClipboardHandler(owner.WriteClipboard)
 
 	var p *tea.Program
 	p = tea.NewProgram(
@@ -231,6 +233,7 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 	}
 
 	_, err = p.Run()
+	_, _ = io.WriteString(output, ui.TerminalCleanupSequence)
 	return err
 }
 

@@ -55,12 +55,12 @@ func TestRenderPaneContentCacheMatchesUncached(t *testing.T) {
 		content := vp.GetContent()
 		yoff := vp.YOffset()
 		want := renderPaneContentUncached(content, 80, 22, false, yoff)
-		got := m.s.renderPaneContent(vp, 80, 22, false)
+		got := m.s.renderPaneContent(0, vp, 80, 22, false)
 		if got != want {
 			t.Fatalf("%s: cached render != uncached render", label)
 		}
 		// A second call must hit the cache and stay identical.
-		if again := m.s.renderPaneContent(vp, 80, 22, false); again != got {
+		if again := m.s.renderPaneContent(0, vp, 80, 22, false); again != got {
 			t.Fatalf("%s: cache-hit render changed output", label)
 		}
 	}
@@ -73,4 +73,50 @@ func TestRenderPaneContentCacheMatchesUncached(t *testing.T) {
 
 	vp.SetYOffset(1)
 	check("changed offset")
+}
+
+func TestRenderScrollbackWrapCacheMatchesUncached(t *testing.T) {
+	m := NewModel([]string{"bash"}, 80, 24)
+	m.s.ensureViewport(0, 80, 24)
+	vp := m.s.viewports[0]
+	vp.SoftWrap = true
+	vp.SetContent(
+		"short\n" +
+			"this line is deliberately long enough to wrap several times in the vertical layout\n" +
+			"middle\n" +
+			"another line that keeps going past both tested pane widths to exercise cache replacement\n" +
+			"last",
+	)
+
+	content := vp.GetContent()
+	for _, width := range []int{65, 25} {
+		m.s.width = width
+		m.s.setScrollbackContent(0, vp, content)
+		for _, offset := range []int{0, 1, 3, 5} {
+			vp.SetYOffset(offset)
+			want := renderPaneContentUncached(content, width, 8, true, vp.YOffset())
+			got := m.s.renderPaneContent(0, vp, width, 8, true)
+			if got != want {
+				t.Fatalf("width %d offset %d: cached render != uncached render", width, offset)
+			}
+		}
+	}
+
+	content += "\nnew content invalidates the wrapped rows"
+	m.s.setScrollbackContent(0, vp, content)
+	want := renderPaneContentUncached(content, 25, 8, true, vp.YOffset())
+	if got := m.s.renderPaneContent(0, vp, 25, 8, true); got != want {
+		t.Fatal("changed content: cached render != uncached render")
+	}
+
+	vp.SetHeight(8)
+	vp.GotoBottom()
+	before := vp.YOffset()
+	vp.ScrollUp(3)
+	if got := before - vp.YOffset(); got != 3 {
+		t.Fatalf("wheel-sized scroll moved %d rows, want 3", got)
+	}
+	if vp.SoftWrap {
+		t.Fatal("scrollback viewport must use prewrapped rows")
+	}
 }

@@ -1,6 +1,16 @@
 package ui
 
-import tea "charm.land/bubbletea/v2"
+import (
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+)
+
+const TerminalCleanupSequence = ansi.ResetModeMouseButtonEvent +
+	ansi.ResetModeMouseAnyEvent +
+	ansi.ResetModeMouseExtSgr +
+	ansi.ResetModeAltScreenSaveCursor +
+	ansi.EraseEntireScreen +
+	ansi.CursorHomePosition
 
 func (s *state) handleQuitConfirmKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.Key().Code {
@@ -27,6 +37,7 @@ func (s *state) handleQuitConfirmKey(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (s *state) shutdownAll() tea.Cmd {
+	s.quitting = true
 	for _, conn := range s.connections {
 		if conn.manager != nil {
 			_ = conn.manager.CloseAll()

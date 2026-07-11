@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -40,83 +41,96 @@ const (
 )
 
 type connectionState struct {
-	name           string
-	manager        *session.SessionManager
-	viewports      map[int]*viewport.Model
-	altScreens     map[int]bool
-	scrollbackMode map[int]bool
-	initialCfg     []startupSession
+	name            string
+	manager         *session.SessionManager
+	viewports       map[int]*viewport.Model
+	altScreens      map[int]bool
+	scrollbackMode  map[int]bool
+	scrollbackCache map[int]scrollWrapCache
+	initialCfg      []startupSession
 	// outputPending coalesces PTY output notifications: the read loop sets it
 	// and only enqueues a connectionOutputMsg when it was previously clear, so
 	// a burst of small child writes collapses into a single Bubble Tea message
 	// (and therefore a single View() rebuild) instead of thousands. The bytes
 	// themselves are already applied to the VTScreen synchronously in the read
 	// loop, so no output is lost by dropping the intermediate notifications.
-	outputPending atomic.Bool
+	outputPending  atomic.Bool
+	webActive      atomic.Bool
+	callbacksBound bool
 }
 
 type state struct {
-	manager              *session.SessionManager
-	viewports            map[int]*viewport.Model
-	altScreens           map[int]bool // last-seen alt-screen state per session index, for transition detection
-	connections          []*connectionState
-	activeConn           int
-	serverName           string
-	localClients         int
-	inputMux             *InputMux
-	program              *tea.Program
-	width                int
-	height               int
-	errMsg               string
-	mode                 mode
-	renameText           string
-	renameCursor         int
-	selectFilter         string
-	selectFilterCursor   int
-	selectCursor         int
-	selectScroll         int  // first visible row index when sessions overflow modal height
-	selectMoving         bool // when true, Up/Down reorders the selected session instead of moving cursor
-	selectMoveStart      int  // original session index of the moving entry, so Esc can revert
-	selectRenaming       bool
-	selectFiltering      bool
-	exitPromptID         int // session index waiting for user decision (in exit prompt)
-	exitChoice           int // 0 = respawn, 1 = remove
-	deleteKind           string
-	deleteIndex          int
-	deleteName           string
-	deleteReturn         mode
-	deleteChoice         int
-	newSession           newSessionState // state for the new-session modal
-	newSessionReturn     mode
-	connCursor           int
-	connRename           string
-	connRenameCursor     int
-	connRenaming         bool
-	connFilter           string
-	connFilterCursor     int
-	connFiltering        bool
-	connMoving           bool
-	contextMenu          contextMenu
-	sessionHitboxes      []mouseHitbox
-	connectionHitboxes   []mouseHitbox
-	newSessionHitbox     mouseHitbox
-	helpHitbox           mouseHitbox
-	connectionsHitbox    mouseHitbox
-	hasNewSessionHitbox  bool
-	hasHelpHitbox        bool
-	hasConnectionsHitbox bool
-	mouseCapture         bool               // when true, mouse events are forwarded to the child PTY (app-mode)
-	sel                  selection          // in-progress / completed mouse selection over the focused buffer
-	search               scrollSearch       // vi-style scrollback search ('/') and line jump (':')
-	sshClient            *ssh_client.Client // non-nil starts SSH-backed sessions
-	onMetaChange         func()             // called when sessions are added/removed/focused
-	wsTransport          *transport.WSTransport
-	configPath           string           // path used by save/load layout shortcut
-	initialCfg           []startupSession // sessions to spawn on Init (instead of agentCmd)
-	statusMsg            string           // transient status line (e.g. config save result)
-	renderPending        bool             // a render tick is in flight (coalescing PTY bursts)
-	scrollbackMode       map[int]bool     // sessions currently scrolled up (need full scrollback in viewport)
-	paneCache            paneCache        // memoizes renderPaneContent across redundant View() calls
+	manager                *session.SessionManager
+	viewports              map[int]*viewport.Model
+	altScreens             map[int]bool // last-seen alt-screen state per session index, for transition detection
+	scrollbackCache        map[int]scrollWrapCache
+	connections            []*connectionState
+	activeConn             int
+	serverName             string
+	localClients           int
+	inputMux               *InputMux
+	program                *tea.Program
+	width                  int
+	height                 int
+	connectionLayout       connectionLayout
+	connectionRailWidth    int
+	layoutFallback         bool
+	errMsg                 string
+	mode                   mode
+	renameText             string
+	renameCursor           int
+	selectFilter           string
+	selectFilterCursor     int
+	selectCursor           int
+	selectScroll           int  // first visible row index when sessions overflow modal height
+	selectMoving           bool // when true, Up/Down reorders the selected session instead of moving cursor
+	selectMoveStart        int  // original session index of the moving entry, so Esc can revert
+	selectRenaming         bool
+	selectFiltering        bool
+	exitPromptID           int // session index waiting for user decision (in exit prompt)
+	exitChoice             int // 0 = respawn, 1 = remove
+	exitError              string
+	deleteKind             string
+	deleteIndex            int
+	deleteName             string
+	deleteReturn           mode
+	deleteChoice           int
+	newSession             newSessionState // state for the new-session modal
+	newSessionReturn       mode
+	connCursor             int
+	connRename             string
+	connRenameCursor       int
+	connRenaming           bool
+	connFilter             string
+	connFilterCursor       int
+	connFiltering          bool
+	connMoving             bool
+	contextMenu            contextMenu
+	sessionHitboxes        []mouseHitbox
+	connectionHitboxes     []mouseHitbox
+	newSessionHitbox       mouseHitbox
+	newConnectionHitbox    mouseHitbox
+	helpHitbox             mouseHitbox
+	connectionsHitbox      mouseHitbox
+	hasNewSessionHitbox    bool
+	hasNewConnectionHitbox bool
+	hasHelpHitbox          bool
+	hasConnectionsHitbox   bool
+	mouseDrag              mouseDrag
+	mouseCapture           bool               // when true, mouse events are forwarded to the child PTY (app-mode)
+	sel                    selection          // in-progress / completed mouse selection over the focused buffer
+	search                 scrollSearch       // vi-style scrollback search ('/') and line jump (':')
+	sshClient              *ssh_client.Client // non-nil starts SSH-backed sessions
+	onMetaChange           func()             // called when sessions are added/removed/focused
+	wsTransport            *transport.WSTransport
+	configPath             string           // path used by save/load layout shortcut
+	initialCfg             []startupSession // sessions to spawn on Init (instead of agentCmd)
+	statusMsg              string           // transient status line (e.g. config save result)
+	clipboardWrite         func(string)
+	quitting               bool         // suppresses redraw after the terminal is explicitly cleared
+	renderPending          bool         // a render tick is in flight (coalescing PTY bursts)
+	scrollbackMode         map[int]bool // sessions currently scrolled up (need full scrollback in viewport)
+	paneCache              paneCache    // memoizes renderPaneContent across redundant View() calls
 }
 
 // paneCache memoizes the output of renderPaneContent, which is a pure function
@@ -132,6 +146,13 @@ type paneCache struct {
 	rows    int
 	wrap    bool
 	out     string
+}
+
+type scrollWrapCache struct {
+	content string
+	cols    int
+	rows    []string
+	plain   []session.BufferLine
 }
 
 // startupSession is a session entry queued for startup, with its title and
@@ -167,20 +188,25 @@ func NewModel(agentCmd []string, cols, rows int) *Model {
 // sshClient is non-nil.
 func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Client) *Model {
 	conn := &connectionState{
-		name:           "default",
-		viewports:      make(map[int]*viewport.Model),
-		altScreens:     make(map[int]bool),
-		scrollbackMode: make(map[int]bool),
+		name:            "default",
+		viewports:       make(map[int]*viewport.Model),
+		altScreens:      make(map[int]bool),
+		scrollbackMode:  make(map[int]bool),
+		scrollbackCache: make(map[int]scrollWrapCache),
 	}
 	st := &state{
-		viewports:      conn.viewports,
-		altScreens:     conn.altScreens,
-		scrollbackMode: conn.scrollbackMode,
-		connections:    []*connectionState{conn},
-		serverName:     "default",
-		width:          cols,
-		height:         rows,
-		sshClient:      sshClient,
+		viewports:           conn.viewports,
+		altScreens:          conn.altScreens,
+		scrollbackMode:      conn.scrollbackMode,
+		scrollbackCache:     conn.scrollbackCache,
+		connections:         []*connectionState{conn},
+		serverName:          "default",
+		width:               cols,
+		height:              rows,
+		connectionLayout:    connectionLayoutBottom,
+		connectionRailWidth: connectionRailWidth,
+		sshClient:           sshClient,
+		clipboardWrite:      copyToClipboard,
 	}
 	return &Model{agentCmd: agentCmd, s: st}
 }
@@ -201,11 +227,57 @@ func (m *Model) SetInputMux(input *InputMux) { m.s.inputMux = input }
 
 func (m *Model) SetLocalClientCount(n int) { m.s.localClients = n }
 
+// SetClipboardOutput routes OSC 52 through the same writer used by the TUI.
+// Detached owners have no /dev/tty, so this is required for clipboard escapes
+// to reach attached clients through the local-server fan-out.
+func (m *Model) SetClipboardOutput(w io.Writer) {
+	if w == nil {
+		m.s.clipboardWrite = copyToClipboard
+		return
+	}
+	m.s.clipboardWrite = func(text string) {
+		copyToClipboardOutput(w, text)
+	}
+}
+
+func (m *Model) SetClipboardHandler(handler func(string)) {
+	if handler == nil {
+		return
+	}
+	previous := m.s.clipboardWrite
+	m.s.clipboardWrite = func(text string) {
+		if previous != nil {
+			previous(text)
+		}
+		handler(text)
+	}
+}
+
 // SetConfigPath records the path the layout-save shortcut writes to.
 // Empty means "no config path", and the save shortcut becomes a no-op
 // with an error status.
 func (m *Model) SetConfigPath(path string) {
 	m.s.configPath = path
+}
+
+// SetConnectionLayout selects the local TUI connection switcher placement.
+// Invalid values intentionally retain the compatible bottom layout.
+func (m *Model) SetConnectionLayout(layout string) {
+	m.s.connectionLayout = normalizedConnectionLayout(layout)
+	m.s.layoutFallback = m.s.connectionLayout == connectionLayoutLeft && !m.s.usingLeftRail()
+	if m.s.manager != nil {
+		m.s.applyGeometry()
+	}
+}
+
+func (m *Model) SetConnectionRailWidth(width int) {
+	if width <= 0 {
+		width = connectionRailWidth
+	}
+	m.s.connectionRailWidth = width
+	if m.s.manager != nil {
+		m.s.applyGeometry()
+	}
 }
 
 // SetInitialSessions queues a list of sessions to spawn at Init time
@@ -238,8 +310,8 @@ func (m *Model) AddInitialSessionLine(title, line string) {
 // event loop. Must be called before p.Run().
 func (m *Model) SetProgram(p *tea.Program) {
 	m.s.program = p
-	cols, rows := paneSize(m.s.width, m.s.height)
-	m.s.initManagers(cols, rows)
+	geom := m.s.geometry()
+	m.s.initManagers(geom.Pane.Width, geom.Pane.Height)
 }
 
 // StartWSTransport starts the WebSocket transport wired to the session manager.
@@ -329,12 +401,12 @@ type wsControlMsg transport.ControlMsg
 type wsResizeMsg transport.ResizeMsg
 
 type connectionOutputMsg struct {
-	Conn int
+	Conn *connectionState
 	Msg  session.OutputMsg
 }
 
 type connectionExitMsg struct {
-	Conn int
+	Conn *connectionState
 	Msg  session.ExitMsg
 }
 
@@ -473,42 +545,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		s.width = msg.Width
 		s.height = msg.Height
-		cols, rows := paneSize(s.width, s.height)
-		// Resize every connection's manager so each one's cached cols/rows
-		// (used by Respawn/New) tracks the current TUI size — otherwise a
-		// background connection keeps its stale init size and any session
-		// created or respawned there starts at the wrong dimensions.
-		for _, conn := range s.connections {
-			if conn.manager != nil {
-				conn.manager.ResizeAll(cols, rows)
-			}
-		}
-		for idx, vp := range s.viewports {
-			vp.SetWidth(cols)
-			vp.SetHeight(rows)
-			s.viewports[idx] = vp
-		}
-		// Re-render the visible session now. WindowSizeMsg only adjusts the
-		// viewport geometry; without re-pushing content the viewport keeps the
-		// text it wrapped at the previous width, so shrinking then widening
-		// leaves stale "ghost" rows on screen until the child happens to emit
-		// more output. The session screen has already reflowed in ResizeAll.
-		idx := s.manager.FocusedIndex()
-		s.ensureViewport(idx, s.width, s.height)
-		for _, sess := range s.manager.Sessions() {
-			if sess.Index() != idx {
-				continue
-			}
-			vp := s.viewports[idx]
-			if s.scrollbackMode[idx] && !sess.Screen().IsAltScreen() {
-				vp.SetContent(sess.Screen().RenderWithScrollback())
-			} else {
-				vp.SetContent(sess.Screen().Render())
-				anchorViewportToCursor(vp, sess)
-			}
-			s.viewports[idx] = vp
-			break
-		}
+		s.applyGeometry()
 		return m, nil
 
 	case wsResizeMsg:
@@ -543,6 +580,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "kill":
 			if s.manager.Len() > 1 {
 				delete(s.viewports, msg.ID)
+				delete(s.scrollbackCache, msg.ID)
 				s.manager.Kill(msg.ID)
 				s.refreshFocused()
 				s.notifyMeta()
@@ -625,18 +663,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connectionOutputMsg:
-		if msg.Conn != s.activeConn {
+		connIndex := connectionIndex(s.connections, msg.Conn)
+		if connIndex < 0 {
+			msg.Conn.outputPending.Store(false)
+			return m, nil
+		}
+		if connIndex != s.activeConn {
 			// Not visible: re-arm this connection's coalescing flag so its
 			// next output still notifies (we just don't render it).
-			if msg.Conn >= 0 && msg.Conn < len(s.connections) {
-				s.connections[msg.Conn].outputPending.Store(false)
-			}
+			msg.Conn.outputPending.Store(false)
 			return m, nil
 		}
 		if msg.Msg.Index != s.manager.FocusedIndex() {
 			// Active connection but a background session produced the output;
 			// re-arm so that session keeps notifying, but don't render it.
-			s.connections[msg.Conn].outputPending.Store(false)
+			msg.Conn.outputPending.Store(false)
 			return m, nil
 		}
 		s.ensureViewport(msg.Msg.Index, s.width, s.height)
@@ -679,6 +720,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if alt != prev {
 					s.altScreens[idx] = alt
 					s.scrollbackMode[idx] = false
+					delete(s.scrollbackCache, idx)
+					vp.SoftWrap = true
 					vp.SetContent(sess.Screen().Render())
 					vp.GotoBottom()
 					s.clearSelection()
@@ -687,11 +730,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// User is browsing scrollback: keep the full content so
 					// YOffset stays meaningful relative to it.
 					wasAtBottom := vp.AtBottom()
-					vp.SetContent(sess.Screen().RenderWithScrollback())
+					s.setScrollbackContent(idx, vp, sess.Screen().RenderWithScrollback())
 					if wasAtBottom {
 						// Caught back up to live tail — drop the heavy
 						// scrollback content and resume cheap rendering.
 						s.scrollbackMode[idx] = false
+						delete(s.scrollbackCache, idx)
+						vp.SoftWrap = true
 						vp.SetContent(sess.Screen().Render())
 						anchorViewportToCursor(vp, sess)
 						s.clearSearch()
@@ -709,7 +754,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connectionExitMsg:
-		if msg.Conn != s.activeConn {
+		connIndex := connectionIndex(s.connections, msg.Conn)
+		if connIndex < 0 || connIndex != s.activeConn {
 			s.notifyMeta()
 			return m, nil
 		}
@@ -717,6 +763,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.mode = modeExitPrompt
 			s.exitPromptID = msg.Msg.Index
 			s.exitChoice = 0
+			s.exitError = ""
+			if s.usingLeftRail() {
+				s.notifyMeta()
+				return m, tea.ClearScreen
+			}
 		}
 		s.notifyMeta()
 		return m, nil
@@ -728,6 +779,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.mode = modeExitPrompt
 			s.exitPromptID = msg.Index
 			s.exitChoice = 0
+			s.exitError = ""
+			if s.usingLeftRail() {
+				s.notifyMeta()
+				return m, tea.ClearScreen
+			}
 		}
 		s.notifyMeta()
 		return m, nil
@@ -788,18 +844,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.mode == modeContextMenu {
 			return m, s.handleContextMenuMouse(m, ev)
 		}
+		if s.centeredModalOpen() {
+			return m, s.handleModalMouse(m, ev)
+		}
 		if handled, cmd := s.handleMouseScopeClick(m, ev); handled {
 			return m, cmd
 		}
 		if s.mode != modeNormal {
 			return m, nil
 		}
-		_, paneRows := paneSize(s.width, s.height)
-		// Translate from whole-window coords to pane-relative coords. The
-		// pane starts at row 1 (row 0 is the tab bar). The status bar is
-		// the row just past paneRows.
-		ev.Y -= 1
-		inPane := ev.Y >= 0 && ev.Y < paneRows && ev.X >= 0 && ev.X < s.width
+		geom := s.geometry()
+		paneX, paneY, inPane := geom.ScreenToPane(ev.X, ev.Y)
 		sess := s.manager.Focused()
 		if sess == nil {
 			return m, nil
@@ -824,6 +879,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
+			ev.X, ev.Y = paneX, paneY
 			if seq := encodeMouseSGR(ev); seq != nil {
 				_, _ = sess.Write(seq)
 			}
@@ -834,19 +890,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// left-drag builds a selection that is copied to the clipboard on
 		// release. Clamp coordinates so a drag/release that drifts into the
 		// tab/status bar still updates and finishes the selection.
-		clampX := ev.X
+		// Clamp in pane-relative screen space even when a drag/release is
+		// outside the pane (for example over the left rail).
+		clampX := ev.X - geom.Pane.X
 		if clampX < 0 {
 			clampX = 0
 		}
-		if clampX >= s.width {
-			clampX = s.width - 1
+		if clampX >= geom.Pane.Width {
+			clampX = geom.Pane.Width - 1
 		}
-		clampY := ev.Y
+		clampY := ev.Y - geom.Pane.Y
 		if clampY < 0 {
 			clampY = 0
 		}
-		if clampY >= paneRows {
-			clampY = paneRows - 1
+		if clampY >= geom.Pane.Height {
+			clampY = geom.Pane.Height - 1
 		}
 		switch ev.Button {
 		case tea.MouseWheelUp:
@@ -871,18 +929,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if inPane && ev.Button == tea.MouseRight &&
+			(ev.Action == mousePress || ev.Action == mouseRelease) {
+			cmd := s.copySelection()
+			if cmd != nil {
+				s.clearSelection()
+				s.bottomFocused()
+			}
+			return m, cmd
+		}
 		switch ev.Action {
 		case mousePress:
 			if ev.Button == tea.MouseLeft && inPane {
 				s.startSelection(clampX, clampY)
-			}
-			// Right-click copies the current selection to the clipboard,
-			// then clears the selection and returns to the live screen.
-			if ev.Button == tea.MouseRight {
-				cmd := s.copySelection()
-				s.clearSelection()
-				s.bottomFocused()
-				return m, cmd
 			}
 		case mouseMotion:
 			if s.sel.active {
@@ -1009,22 +1068,23 @@ func (m Model) cursor() *tea.Cursor {
 	if !ok {
 		return nil
 	}
-	_, rows := paneSize(s.width, s.height)
+	geom := s.geometry()
+	rows := geom.Pane.Height
 	var y int
 	if s.scrollbackMode[idx] {
 		// Viewport content is scrollback + screen; map vt row to viewport line.
 		line := len(sess.Screen().BufferLines()) - rows + cur.Y
-		y = 1 + line - vp.YOffset()
+		y = geom.Pane.Y + line - vp.YOffset()
 	} else {
 		// Cheap path: viewport content is the full vt screen; map vt-Y
 		// through the viewport's current scroll offset so the on-screen
 		// cursor stays aligned when the vt grid is taller than the pane.
-		y = 1 + cur.Y - vp.YOffset()
+		y = geom.Pane.Y + cur.Y - vp.YOffset()
 	}
-	if y < 1 || y > rows || cur.X < 0 || cur.X >= s.width {
+	if y < geom.Pane.Y || y >= geom.Pane.Y+rows || cur.X < 0 || cur.X >= geom.Pane.Width {
 		return nil
 	}
-	cursor := tea.NewCursor(cur.X, y)
+	cursor := tea.NewCursor(geom.Pane.X+cur.X, y)
 	cursor.Shape = teaCursorShape(cur.Shape)
 	cursor.Blink = cur.Blink
 	return cursor
@@ -1043,17 +1103,34 @@ func teaCursorShape(shape vt.CursorStyle) tea.CursorShape {
 
 func (m Model) viewString() string {
 	s := m.s
+	if s.quitting {
+		return ""
+	}
 	if s.errMsg != "" {
 		return s.errMsg + "\n\nPress Ctrl+Alt+Q to quit."
 	}
 	if s.manager == nil || s.manager.Len() == 0 {
 		return "Starting…\n"
 	}
-	return strings.Join([]string{
-		m.renderTabBar(),
-		m.renderPane(),
-		m.renderStatusBar(),
-	}, "\n")
+	geom := s.geometry()
+	tabBar := m.renderTabBar()
+	pane := m.renderPane()
+	if geom.ConnectionRail.Width == 0 {
+		status := m.renderStatusBar()
+		return strings.Join([]string{tabBar, pane, status}, "\n")
+	}
+	rail := m.renderConnectionRail(geom)
+	mainRows := append([]string{tabBar}, strings.Split(pane, "\n")...)
+	divider := dividerStyle.Render("│")
+	rows := make([]string, geom.Screen.Height)
+	for y := range rows {
+		main := strings.Repeat(" ", geom.TabBar.Width)
+		if y < len(mainRows) {
+			main = padLine(mainRows[y], geom.TabBar.Width)
+		}
+		rows[y] = padLine(rail[y], geom.ConnectionRail.Width) + divider + main
+	}
+	return strings.Join(rows, "\n")
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1071,11 +1148,33 @@ func (s *state) ensureViewport(idx, w, h int) {
 }
 
 func (s *state) resetViewport(idx, w, h int) {
-	cols, rows := paneSize(w, h)
-	vp := viewport.New(viewport.WithWidth(cols), viewport.WithHeight(rows))
+	geom := s.geometry()
+	vp := viewport.New(viewport.WithWidth(geom.Pane.Width), viewport.WithHeight(geom.Pane.Height))
 	vp.SoftWrap = true
 	vp.SetContent("")
 	s.viewports[idx] = &vp
+	delete(s.scrollbackCache, idx)
+}
+
+func (s *state) setScrollbackContent(idx int, vp *viewport.Model, content string) {
+	cols := s.geometry().Pane.Width
+	if s.scrollbackCache == nil {
+		s.scrollbackCache = make(map[int]scrollWrapCache)
+		s.activeConnection().scrollbackCache = s.scrollbackCache
+	}
+	cache, ok := s.scrollbackCache[idx]
+	if ok && cache.content == content && cache.cols == cols {
+		return
+	}
+	rows, plain := softWrapRowsWithPlain(strings.Split(content, "\n"), cols)
+	s.scrollbackCache[idx] = scrollWrapCache{
+		content: content,
+		cols:    cols,
+		rows:    rows,
+		plain:   plain,
+	}
+	vp.SoftWrap = false
+	vp.SetContent(strings.Join(rows, "\n"))
 }
 
 // enterScrollback loads the full Render+scrollback content into the viewport
@@ -1096,7 +1195,7 @@ func (s *state) enterScrollback(idx int) {
 		return
 	}
 	vp := s.viewports[idx]
-	vp.SetContent(sess.Screen().RenderWithScrollback())
+	s.setScrollbackContent(idx, vp, sess.Screen().RenderWithScrollback())
 	vp.GotoBottom()
 	s.scrollbackMode[idx] = true
 	s.viewports[idx] = vp
@@ -1150,6 +1249,8 @@ func (s *state) bottomFocused() {
 	vp.GotoBottom()
 	if s.scrollbackMode[idx] {
 		// Drop the heavy scrollback content now that we're back at the tail.
+		delete(s.scrollbackCache, idx)
+		vp.SoftWrap = true
 		for _, sess := range s.manager.Sessions() {
 			if sess.Index() == idx {
 				vp.SetContent(sess.Screen().Render())
@@ -1173,11 +1274,13 @@ func (s *state) refreshFocused() {
 	// drift across viewers. The "last resizer wins" model already lets a
 	// browser fit() override us right after; this just guarantees the
 	// active viewer at the moment of focus is consistent.
-	cols, rows := paneSize(s.width, s.height)
-	s.manager.ResizeOne(idx, cols, rows)
+	geom := s.geometry()
+	s.manager.ResizeOne(idx, geom.Pane.Width, geom.Pane.Height)
 	for _, sess := range s.manager.Sessions() {
 		if sess.Index() == idx {
 			vp := s.viewports[idx]
+			delete(s.scrollbackCache, idx)
+			vp.SoftWrap = true
 			vp.SetContent(sess.Screen().Render())
 			vp.GotoBottom()
 			s.scrollbackMode[idx] = false
@@ -1231,6 +1334,18 @@ const (
 
 func (s *state) handleGlobalShortcut(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	k := msg.Key()
+	if s.usingLeftRail() && k.Mod.Contains(tea.ModCtrl|tea.ModAlt) {
+		switch k.Code {
+		case tea.KeyUp, tea.KeyKpUp:
+			s.mode = modeNormal
+			s.focusConnection(s.activeConn - 1)
+			return true, nil
+		case tea.KeyDown, tea.KeyKpDown:
+			s.mode = modeNormal
+			s.focusConnection(s.activeConn + 1)
+			return true, nil
+		}
+	}
 	if k.Mod.Contains(tea.ModCtrl|tea.ModAlt) && (k.Code == '<' || k.Code == ',' || k.Code == '[') {
 		s.mode = modeNormal
 		s.focusConnection(s.activeConn - 1)
@@ -1300,6 +1415,7 @@ func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		if s.manager.Len() > 1 {
 			idx := s.manager.FocusedIndex()
 			delete(s.viewports, idx)
+			delete(s.scrollbackCache, idx)
 			s.manager.Kill(idx)
 			s.refreshFocused()
 			s.notifyMeta()
@@ -1395,6 +1511,8 @@ func (s *state) handleExitPromptKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 	case tea.KeyEnter:
 		return s.resolveExitPrompt(m)
 	case tea.KeyEscape:
+		s.mode = modeNormal
+		s.exitError = ""
 		return nil
 	}
 	switch msg.String() {
@@ -1413,22 +1531,26 @@ func (s *state) handleExitPromptKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 func (s *state) resolveExitPrompt(m Model) tea.Cmd {
 	id := s.exitPromptID
 	choice := s.exitChoice
-	s.mode = modeNormal
 	if choice == 0 {
 		if err := s.manager.Respawn(id); err != nil {
-			s.errMsg = fmt.Sprintf("respawn failed: %v", err)
+			s.exitError = fmt.Sprintf("respawn failed: %v", err)
+			s.mode = modeExitPrompt
 			return nil
 		}
+		s.exitError = ""
+		s.mode = modeNormal
 		// Respawn rebuilds the VT screen at the manager's cached cols/rows.
 		// Push the active TUI viewer's pane size on top so the new PTY is
 		// in sync with what the user is looking at, even if a browser had
 		// previously sized this session differently via ResizeOne.
-		cols, rows := paneSize(s.width, s.height)
-		s.manager.ResizeOne(id, cols, rows)
+		geom := s.geometry()
+		s.manager.ResizeOne(id, geom.Pane.Width, geom.Pane.Height)
 		s.resetViewport(id, s.width, s.height)
 		s.notifyMeta()
 		return nil
 	}
+	s.exitError = ""
+	s.mode = modeNormal
 	if s.manager.Len() <= 1 {
 		name := "session"
 		if sess := s.manager.ByID(id); sess != nil {
@@ -1443,6 +1565,7 @@ func (s *state) resolveExitPrompt(m Model) tea.Cmd {
 		return nil
 	}
 	delete(s.viewports, id)
+	delete(s.scrollbackCache, id)
 	s.manager.Kill(id)
 	s.refreshFocused()
 	s.notifyMeta()
@@ -1729,9 +1852,39 @@ func (s *state) moveSessionInSelector(delta int) {
 	if to < 0 || to >= s.manager.Len() {
 		return
 	}
-	s.manager.Move(from, to)
+	s.moveSession(from, to)
 	s.selectCursor = s.filteredSessionCursorForIndex(to)
+}
+
+func (s *state) moveSession(from, to int) {
+	if s.manager == nil || from < 0 || to < 0 || from >= s.manager.Len() || to >= s.manager.Len() || from == to {
+		return
+	}
+	conn := s.activeConnection()
+	conn.viewports = moveIndexedMap(conn.viewports, from, to)
+	conn.altScreens = moveIndexedMap(conn.altScreens, from, to)
+	conn.scrollbackMode = moveIndexedMap(conn.scrollbackMode, from, to)
+	conn.scrollbackCache = moveIndexedMap(conn.scrollbackCache, from, to)
+	s.manager.Move(from, to)
+	s.syncActiveConnectionFields()
 	s.notifyMeta()
+}
+
+func moveIndexedMap[T any](values map[int]T, from, to int) map[int]T {
+	moved := make(map[int]T, len(values))
+	for index, value := range values {
+		next := index
+		switch {
+		case index == from:
+			next = to
+		case from < to && index > from && index <= to:
+			next--
+		case from > to && index >= to && index < from:
+			next++
+		}
+		moved[next] = value
+	}
+	return moved
 }
 
 func (s *state) confirmDeleteSessionAtSelectorCursor() {
@@ -1761,6 +1914,7 @@ func (s *state) removeSessionAtSelectorCursor() {
 	}
 	idx := matches[s.selectCursor].Index()
 	delete(s.viewports, idx)
+	delete(s.scrollbackCache, idx)
 	s.manager.Kill(idx)
 	s.refreshFocused()
 	s.notifyMeta()
@@ -1802,7 +1956,7 @@ func (s *state) filteredSessions() []*session.Session {
 // modal can display, used as the PgUp/PgDown step size.
 func (s *state) selectorPageStep() int {
 	const chrome = 4
-	step := s.height*80/100 - chrome
+	step := s.geometry().Pane.Height*80/100 - chrome
 	if step < 1 {
 		step = 1
 	}
@@ -1811,13 +1965,18 @@ func (s *state) selectorPageStep() int {
 
 func (m Model) renderTabBar() string {
 	s := m.s
+	geom := s.geometry()
+	cols := geom.TabBar.Width
 	focused := s.manager.FocusedIndex()
 	sessions := s.manager.Sessions()
 
 	s.sessionHitboxes = nil
 	s.hasNewSessionHitbox = false
 
-	brand := brandStyle.Render("multicrum")
+	brand := ""
+	if !s.usingLeftRail() {
+		brand = brandStyle.Render("multicrum")
+	}
 	brandW := lipgloss.Width(brand)
 
 	// Build each tab as a styled string with its measured width.
@@ -1847,18 +2006,18 @@ func (m Model) renderTabBar() string {
 	for _, w := range widths {
 		total += w
 	}
-	if total <= s.width || s.width <= 0 {
+	if total <= cols || cols <= 0 {
 		x := 0
 		for i, w := range widths {
 			if i < len(sessions) {
-				s.sessionHitboxes = append(s.sessionHitboxes, mouseHitbox{Start: x, End: x + w, Index: sessions[i].Index()})
+				s.sessionHitboxes = append(s.sessionHitboxes, mouseHitbox{Bounds: rect{X: geom.TabBar.X + x, Y: geom.TabBar.Y, Width: w, Height: 1}, Index: sessions[i].Index(), Action: hitboxSession})
 			}
 			x += w
 		}
-		s.newSessionHitbox = mouseHitbox{Start: x, End: x + newTabW}
+		s.newSessionHitbox = mouseHitbox{Bounds: rect{X: geom.TabBar.X + x, Y: geom.TabBar.Y, Width: newTabW, Height: 1}, Action: hitboxNewSession}
 		s.hasNewSessionHitbox = true
 		bar := lipgloss.JoinHorizontal(lipgloss.Top, append(tabs, newTab)...)
-		if pad := s.width - lipgloss.Width(bar) - brandW; pad > 0 {
+		if pad := cols - lipgloss.Width(bar) - brandW; pad > 0 {
 			bar += tabBarStyle.Render(strings.Repeat(" ", pad))
 		}
 		bar += brand
@@ -1895,12 +2054,12 @@ func (m Model) renderTabBar() string {
 	used := widths[focusedPos]
 	for {
 		grew := false
-		if end < len(tabs) && used+widths[end] <= s.width-newTabW-brandW {
+		if end < len(tabs) && used+widths[end] <= cols-newTabW-brandW {
 			used += widths[end]
 			end++
 			grew = true
 		}
-		if start > 0 && used+widths[start-1] <= s.width-newTabW-brandW {
+		if start > 0 && used+widths[start-1] <= cols-newTabW-brandW {
 			start--
 			used += widths[start]
 			grew = true
@@ -1920,7 +2079,7 @@ func (m Model) renderTabBar() string {
 	if needRight {
 		reserved += rightW
 	}
-	for used+reserved > s.width-newTabW-brandW && end-start > 1 {
+	for used+reserved > cols-newTabW-brandW && end-start > 1 {
 		// Drop the side farther from the focused tab.
 		if focusedPos-start > end-1-focusedPos && start < focusedPos {
 			used -= widths[start]
@@ -1961,7 +2120,7 @@ func (m Model) renderTabBar() string {
 	for i := start; i < end; i++ {
 		parts = append(parts, tabs[i])
 		if i < len(sessions) {
-			s.sessionHitboxes = append(s.sessionHitboxes, mouseHitbox{Start: x, End: x + widths[i], Index: sessions[i].Index()})
+			s.sessionHitboxes = append(s.sessionHitboxes, mouseHitbox{Bounds: rect{X: geom.TabBar.X + x, Y: geom.TabBar.Y, Width: widths[i], Height: 1}, Index: sessions[i].Index(), Action: hitboxSession})
 		}
 		x += widths[i]
 	}
@@ -1969,18 +2128,18 @@ func (m Model) renderTabBar() string {
 		parts = append(parts, right)
 		x += rightW
 	}
-	s.newSessionHitbox = mouseHitbox{Start: x, End: x + newTabW}
+	s.newSessionHitbox = mouseHitbox{Bounds: rect{X: geom.TabBar.X + x, Y: geom.TabBar.Y, Width: newTabW, Height: 1}, Action: hitboxNewSession}
 	s.hasNewSessionHitbox = true
 	parts = append(parts, newTab)
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
-	if pad := s.width - lipgloss.Width(bar) - brandW; pad > 0 {
+	if pad := cols - lipgloss.Width(bar) - brandW; pad > 0 {
 		bar += tabBarStyle.Render(strings.Repeat(" ", pad))
 	}
 	bar += brand
 	// If even that overflows (a single tab wider than the screen), hard
 	// truncate so we never wrap the bar onto a second row.
-	if lipgloss.Width(bar) > s.width {
-		bar = ansi.Truncate(bar, s.width, "")
+	if lipgloss.Width(bar) > cols {
+		bar = ansi.Truncate(bar, cols, "")
 	}
 	return bar
 }
@@ -1988,10 +2147,11 @@ func (m Model) renderTabBar() string {
 func (m Model) renderPane() string {
 	s := m.s
 	idx := s.manager.FocusedIndex()
-	paneCols, paneRows := paneSize(s.width, s.height)
+	geom := s.geometry()
+	paneCols, paneRows := geom.Pane.Width, geom.Pane.Height
 	var pane string
 	if vp, ok := s.viewports[idx]; ok {
-		pane = s.renderPaneContent(vp, paneCols, paneRows, s.scrollbackMode[idx])
+		pane = s.renderPaneContent(idx, vp, paneCols, paneRows, s.scrollbackMode[idx])
 		if !s.mouseCapture {
 			pane = s.overlaySelection(pane, paneCols, paneRows)
 		}
@@ -2034,14 +2194,30 @@ func (m Model) renderPane() string {
 // wrap one row and shift every subsequent row down by one — that's the
 // "dialog buttons are in the wrong place" bug. We pad/truncate to exactly
 // paneCols x paneRows ourselves so no wrapping is ever possible.
-func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int, wrap bool) string {
-	content := vp.GetContent()
+func (s *state) renderPaneContent(idx int, vp *viewport.Model, paneCols, paneRows int, wrap bool) string {
+	content := ""
+	var wrappedRows []string
+	if wrap {
+		if cache, ok := s.scrollbackCache[idx]; ok && cache.cols == paneCols {
+			content = cache.content
+			wrappedRows = cache.rows
+		} else {
+			content = vp.GetContent()
+		}
+	} else {
+		content = vp.GetContent()
+	}
 	yoff := vp.YOffset()
 	if c := &s.paneCache; c.valid && c.wrap == wrap && c.cols == paneCols &&
 		c.rows == paneRows && c.yoff == yoff && c.content == content {
 		return c.out
 	}
-	out := renderPaneContentUncached(content, paneCols, paneRows, wrap, yoff)
+	var out string
+	if wrappedRows != nil {
+		out = renderPaneRows(wrappedRows, paneCols, paneRows, yoff)
+	} else {
+		out = renderPaneContentUncached(content, paneCols, paneRows, wrap, yoff)
+	}
 	s.paneCache = paneCache{
 		valid: true, content: content, yoff: yoff,
 		cols: paneCols, rows: paneRows, wrap: wrap, out: out,
@@ -2067,6 +2243,10 @@ func renderPaneContentUncached(content string, paneCols, paneRows int, wrap bool
 		// behavior so cell-accurate grids (btop dialogs) never shift.
 		all = softWrapRows(all, paneCols)
 	}
+	return renderPaneRows(all, paneCols, paneRows, yoff)
+}
+
+func renderPaneRows(all []string, paneCols, paneRows, yoff int) string {
 	if yoff < 0 {
 		yoff = 0
 	}
@@ -2091,21 +2271,37 @@ func renderPaneContentUncached(content string, paneCols, paneRows int, wrap bool
 // way the viewport's SoftWrap renderer does (chunks of maxWidth via ansi.Cut),
 // so a caller windowing by the viewport's YOffset stays row-aligned.
 func softWrapRows(lines []string, maxWidth int) []string {
+	rows, _ := softWrapRowsWithPlain(lines, maxWidth)
+	return rows
+}
+
+func softWrapRowsWithPlain(lines []string, maxWidth int) ([]string, []session.BufferLine) {
 	if maxWidth <= 0 {
-		return lines
+		plain := make([]session.BufferLine, len(lines))
+		for i, line := range lines {
+			plain[i].Text = strings.TrimRight(ansi.Strip(line), " ")
+		}
+		return lines, plain
 	}
 	out := make([]string, 0, len(lines))
+	plain := make([]session.BufferLine, 0, len(lines))
 	for _, line := range lines {
 		w := ansi.StringWidth(line)
 		if w <= maxWidth {
 			out = append(out, line)
+			plain = append(plain, session.BufferLine{Text: strings.TrimRight(ansi.Strip(line), " ")})
 			continue
 		}
 		for idx := 0; idx < w; idx += maxWidth {
-			out = append(out, ansi.Cut(line, idx, maxWidth+idx))
+			row := ansi.Cut(line, idx, maxWidth+idx)
+			out = append(out, row)
+			plain = append(plain, session.BufferLine{
+				Text:     strings.TrimRight(ansi.Strip(row), " "),
+				SoftWrap: idx+maxWidth < w,
+			})
 		}
 	}
-	return out
+	return out, plain
 }
 
 // anchorViewportToCursor scrolls vp so the vt cursor row is visible inside
@@ -2161,7 +2357,8 @@ func blankPane(paneCols, paneRows int) string {
 // overlayBox paints box centered over pane (both already ANSI-styled).
 func (m Model) overlayBox(pane, box string) string {
 	s := m.s
-	cols, rows := paneSize(s.width, s.height)
+	geom := s.geometry()
+	cols, rows := geom.Pane.Width, geom.Pane.Height
 	boxWidth := lipgloss.Width(box)
 	boxHeight := lipgloss.Height(box)
 	left := max(0, (cols-boxWidth)/2)
@@ -2234,6 +2431,10 @@ func (m Model) renderExitModal() string {
 		"",
 		"←/→ or Tab to choose   Enter confirm",
 		"R respawn   X remove   Esc dismiss",
+	}
+	if s.exitError != "" {
+		rows = append(rows, "", "Error:")
+		rows = append(rows, wrapText(s.exitError, width, 1)...)
 	}
 	return padBox(rows, width)
 }
@@ -2371,7 +2572,8 @@ func (m Model) renderSessionSelectorModal() string {
 
 	// Modal sizing: width = min(76, 80% of screen); list height = up to 80%
 	// of screen rows minus title + filter + footer overhead.
-	width := s.width * 80 / 100
+	geom := s.geometry()
+	width := geom.Pane.Width * 80 / 100
 	if width > 76 {
 		width = 76
 	}
@@ -2379,19 +2581,7 @@ func (m Model) renderSessionSelectorModal() string {
 		width = 30
 	}
 
-	// Reserve 4 lines: title, filter, blank, footer.
-	const chrome = 4
-	maxListRows := s.height*80/100 - chrome
-	if maxListRows < 3 {
-		maxListRows = 3
-	}
-	listRows := len(matches)
-	if listRows == 0 {
-		listRows = 1
-	}
-	if listRows > maxListRows {
-		listRows = maxListRows
-	}
+	listRows := s.sessionSelectorListRows()
 
 	// Keep cursor visible: adjust scroll window.
 	if s.selectCursor < s.selectScroll {
@@ -2474,7 +2664,8 @@ func (m Model) renderSessionSelectorModal() string {
 
 func (m Model) renderStatusBar() string {
 	s := m.s
-	cols, rows := paneSize(s.width, s.height)
+	geom := s.geometry()
+	cols, rows := geom.Pane.Width, geom.Pane.Height
 	s.connectionHitboxes = nil
 	s.hasHelpHitbox = false
 	s.hasConnectionsHitbox = false
@@ -2484,21 +2675,28 @@ func (m Model) renderStatusBar() string {
 	}
 	serverPrefix := statusKeyStyle.Render(fmt.Sprintf(" server:%s │ ", s.serverName))
 	connectionsLabel := statusKeyStyle.Render("conn ")
+	if geom.ConnectionRail.Width > 0 {
+		if active := s.activeConnection(); active != nil {
+			connectionsLabel = statusKeyStyle.Render("conn:" + truncate(active.name, 12) + " ")
+		}
+	}
 	prefix := serverPrefix + connectionsLabel
 	connStart := lipgloss.Width(serverPrefix)
-	s.connectionsHitbox = mouseHitbox{Start: connStart, End: connStart + lipgloss.Width(connectionsLabel)}
+	s.connectionsHitbox = mouseHitbox{Bounds: rect{X: geom.StatusBar.X + connStart, Y: geom.StatusBar.Y, Width: lipgloss.Width(connectionsLabel), Height: 1}, Action: hitboxConnections}
 	s.hasConnectionsHitbox = true
-	pills := s.renderConnectionPills()
+	pills := ""
+	if geom.ConnectionRail.Width == 0 {
+		pills = s.renderConnectionPills()
+	}
 	prefixWidth := lipgloss.Width(prefix)
 	for i := range s.connectionHitboxes {
-		s.connectionHitboxes[i].Start += prefixWidth
-		s.connectionHitboxes[i].End += prefixWidth
+		s.connectionHitboxes[i].Bounds.X += prefixWidth
 	}
 	status := prefix + pills + statusKeyStyle.Render(fmt.Sprintf(" │ %dx%d │ clients:%d │ %s ", cols, rows, s.localClients+1, mouseTag))
 	if s.mode == modeRenaming {
 		help := helpStyle.Render(" Rename: " + renderWithCursor(s.renameText, s.renameCursor) + "  Enter save  Esc cancel")
 		left := status
-		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
@@ -2506,7 +2704,7 @@ func (m Model) renderStatusBar() string {
 	if s.mode == modeSelecting {
 		help := helpStyle.Render(" Sessions — see modal")
 		left := status
-		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
@@ -2514,7 +2712,7 @@ func (m Model) renderStatusBar() string {
 	if s.mode == modeConnections {
 		help := helpStyle.Render(" Connections — see modal")
 		left := status
-		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
@@ -2522,7 +2720,7 @@ func (m Model) renderStatusBar() string {
 	if s.mode == modeHelp {
 		help := helpStyle.Render(" Help: Esc/Enter close")
 		left := status
-		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
@@ -2530,7 +2728,7 @@ func (m Model) renderStatusBar() string {
 	if s.mode == modeQuitConfirm {
 		help := helpStyle.Render(" Confirm quit — Y/Enter quit, N/Esc cancel")
 		left := status
-		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
@@ -2538,7 +2736,7 @@ func (m Model) renderStatusBar() string {
 	if s.mode == modeExitPrompt {
 		help := helpStyle.Render(" Session exited — choose action in modal")
 		left := status
-		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
@@ -2550,21 +2748,24 @@ func (m Model) renderStatusBar() string {
 		}
 		help := helpStyle.Render(" " + prefix + renderWithCursor(s.search.input, len([]rune(s.search.input))) + "  Enter go  Esc cancel")
 		left := status
-		if pad := s.width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))
 		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
 	}
 	help := helpStyle.Render(" Alt+` help")
+	if s.layoutFallback {
+		help = helpStyle.Render(" left layout temporarily using bottom (terminal too narrow) ")
+	}
 	if s.statusMsg != "" {
 		help = helpStyle.Render(" " + s.statusMsg + " ")
 	} else {
 		helpStart := lipgloss.Width(status)
-		s.helpHitbox = mouseHitbox{Start: helpStart, End: helpStart + lipgloss.Width(help)}
+		s.helpHitbox = mouseHitbox{Bounds: rect{X: geom.StatusBar.X + helpStart, Y: geom.StatusBar.Y, Width: lipgloss.Width(help), Height: 1}, Action: hitboxHelp}
 		s.hasHelpHitbox = true
 	}
 	left := status + help
-	if pad := s.width - lipgloss.Width(left); pad > 0 {
+	if pad := geom.StatusBar.Width - lipgloss.Width(left); pad > 0 {
 		left += statusBarStyle.Render(strings.Repeat(" ", pad))
 	}
 	return left

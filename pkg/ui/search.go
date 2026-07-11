@@ -300,7 +300,7 @@ func (s *state) overlaySearch(pane string, paneCols, paneRows int) string {
 	if qlen == 0 {
 		return pane
 	}
-	lines := sess.Screen().BufferLines()
+	lines := s.selectionLines(idx, vp)
 	byLine := map[int][]int{}
 	for _, h := range s.search.hits {
 		byLine[h.line] = append(byLine[h.line], h.col)

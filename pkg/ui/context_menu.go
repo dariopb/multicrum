@@ -70,12 +70,18 @@ func (m Model) renderContextMenu() string {
 // sit above the pane, so their menu opens immediately below; connection tabs
 // sit below it, so their menu opens immediately above.
 func (m Model) contextMenuBounds() (left, top, width, height int) {
-	cols, rows := paneSize(m.s.width, m.s.height)
+	geom := m.s.geometry()
+	cols, rows := geom.Pane.Width, geom.Pane.Height
 	box := m.renderContextMenu()
 	width = lipgloss.Width(box)
 	height = lipgloss.Height(box)
-	left = m.s.contextMenu.pointerX
-	top = m.s.contextMenu.pointerY
+	left = m.s.contextMenu.pointerX - geom.Pane.X
+	top = m.s.contextMenu.pointerY - geom.Pane.Y
+	if m.s.contextMenu.kind == sessionContextMenu {
+		top = 0 // Session tabs open immediately below the tab bar.
+	} else if geom.ConnectionRail.Width > 0 {
+		left = 0 // Rail menus open beside the rail, inside the main column.
+	}
 	if left < 0 {
 		left = 0
 	}
@@ -94,13 +100,15 @@ func (m Model) contextMenuBounds() (left, top, width, height int) {
 	} else if top+height > rows {
 		top = rows - height
 	}
+	left += geom.Pane.X
+	top += geom.Pane.Y
 	return
 }
 
 func (m Model) overlayContextMenu(pane string) string {
 	left, top, _, _ := m.contextMenuBounds()
-	cols, rows := paneSize(m.s.width, m.s.height)
-	return overlayBoxAt(pane, m.renderContextMenu(), left, top, cols, rows)
+	geom := m.s.geometry()
+	return overlayBoxAt(pane, m.renderContextMenu(), left-geom.Pane.X, top-geom.Pane.Y, geom.Pane.Width, geom.Pane.Height)
 }
 
 // handleContextMenuMouse dispatches the clicked menu option by entering the
@@ -141,7 +149,7 @@ func (s *state) handleContextMenuMouse(m Model, ev mouseEvent) tea.Cmd {
 
 func (m Model) contextMenuOptionAt(ev mouseEvent) int {
 	left, top, width, _ := m.contextMenuBounds()
-	option := ev.Y - 1 - top - 1 // pane origin, then the top border
+	option := ev.Y - top - 1 // top border
 	if ev.X < left || ev.X >= left+width || option < 0 ||
 		option >= len(m.contextMenuOptions()) {
 		return -1

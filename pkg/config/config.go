@@ -32,10 +32,12 @@ type ConnectionEntry struct {
 }
 
 type Config struct {
-	Server           string            `yaml:"server,omitempty"`
-	ActiveConnection string            `yaml:"activeConnection,omitempty"`
-	Connections      []ConnectionEntry `yaml:"connections,omitempty"`
-	Sessions         []SessionEntry    `yaml:"sessions,omitempty"`
+	Server              string            `yaml:"server,omitempty"`
+	ActiveConnection    string            `yaml:"activeConnection,omitempty"`
+	ConnectionLayout    string            `yaml:"connectionLayout,omitempty" json:"connectionLayout,omitempty"`
+	ConnectionRailWidth int               `yaml:"connectionRailWidth,omitempty" json:"connectionRailWidth,omitempty"`
+	Connections         []ConnectionEntry `yaml:"connections,omitempty"`
+	Sessions            []SessionEntry    `yaml:"sessions,omitempty"`
 }
 
 func (c *Config) Normalize() *Config {
@@ -43,6 +45,11 @@ func (c *Config) Normalize() *Config {
 		return nil
 	}
 	out := *c
+	switch out.ConnectionLayout {
+	case "left", "bottom":
+	default:
+		out.ConnectionLayout = "bottom"
+	}
 	if len(out.Connections) == 0 && len(out.Sessions) > 0 {
 		out.Connections = []ConnectionEntry{{Name: "default", Sessions: out.Sessions}}
 		if out.ActiveConnection == "" {

@@ -109,6 +109,7 @@ func TryAttach(path, server string, stdin *os.File, stdout io.Writer) (bool, err
 	if _, err := clientHandshake(conn, server, "tui-attach", cols, rows); err != nil {
 		return true, err
 	}
+	defer func() { _, _ = io.WriteString(stdout, terminalCleanupSequence) }()
 	old, err := term.MakeRaw(int(stdin.Fd()))
 	if err == nil {
 		defer term.Restore(int(stdin.Fd()), old)
@@ -139,8 +140,11 @@ func TryAttach(path, server string, stdin *os.File, stdout io.Writer) (bool, err
 				done <- struct{}{}
 				return
 			}
-			if typ == FrameOutput {
+			switch typ {
+			case FrameOutput:
 				_, _ = stdout.Write(mapBareLF(body))
+			case FrameClipboard:
+				writeAttachedClipboard(stdout, body)
 			}
 		}
 	}()
@@ -443,6 +447,23 @@ func (o *Owner) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+func (o *Owner) WriteClipboard(text string) {
+	o.mu.Lock()
+	clients := make([]*client, 0, len(o.clients))
+	for c := range o.clients {
+		clients = append(clients, c)
+	}
+	o.mu.Unlock()
+	for _, c := range clients {
+		c.mu.Lock()
+		err := WriteFrame(c.conn, FrameClipboard, []byte(text))
+		c.mu.Unlock()
+		if err != nil {
+			_ = c.conn.Close()
+		}
+	}
 }
 
 func (o *Owner) Close() error {

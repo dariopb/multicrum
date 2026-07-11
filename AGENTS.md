@@ -97,7 +97,7 @@ ui.Model Update loop
 
 - `Alt+Backtick`: show/close centered help modal listing shortcuts.
 - `Ctrl+Alt+T`: open the new-session modal in the active connection. This is a global shortcut and must work from modal states, including exited-session prompts.
-- `Ctrl+Alt+O`: open the connections modal (focus, create, rename, move/reorder, filter, remove).
+- `Ctrl+Alt+O`: open the connections modal (focus, create, rename, move/reorder, filter, remove); `L` toggles the persisted bottom/left local layout.
 - `Ctrl+Alt+E`: open the connections modal on the active connection; press `R` to rename.
 - `Ctrl+Alt+C`: quick-create a new connection/workspace and focus it.
 - `Ctrl+Alt+[` / `Ctrl+Alt+]`: previous/next connection/workspace.
@@ -144,7 +144,7 @@ Lifecycle commands are `multicrum list` / `multicrum ls`, `multicrum status --se
 
 The runtime state is a tree: server → connections → sessions. `state.connections` stores `connectionState` objects, each with its own `SessionManager`, viewport map, alt-screen map, and scrollback-mode map. `state.syncActiveConnectionFields()` keeps legacy `state.manager`/`state.viewports` aliases pointed at the active connection so older UI paths keep working.
 
-Config files now save `connections[].sessions[]`; legacy top-level `sessions` are loaded into a `default` connection by `Config.Normalize()`. `cmdline` entries are parsed into startup argv with `ui.ParseCmdLine` while preserving the original `cmdline` for round-trip saves. SSH-backed sessions include an `ssh` block with target, port, key, default-key/agent flags, known-host settings, and remote command persistence.
+Config files now save `connections[].sessions[]` plus `connectionLayout` (`bottom`, the default, or `left`); legacy top-level `sessions` are loaded into a `default` connection by `Config.Normalize()`. `cmdline` entries are parsed into startup argv with `ui.ParseCmdLine` while preserving the original `cmdline` for round-trip saves. SSH-backed sessions include an `ssh` block with target, port, key, default-key/agent flags, known-host settings, and remote command persistence.
 
 Attach clients stream raw terminal input to the owner through length-prefixed frames and receive mirrored owner TUI output. `SIGWINCH` from Unix attach clients is forwarded as resize frames. Windows attach/server uses loopback TCP with the same frame protocol.
 
