@@ -290,8 +290,8 @@ type ControlAck struct {
 
 Attach-client detach:
 
-- `Ctrl+Q` (`0x11`) detaches the attached client only.
-- `Alt+Ctrl+Q` (`ESC 0x11`) also detaches.
+- `Alt+Ctrl+Q` (`ESC 0x11`) detaches the attached client only. Plain `Ctrl+Q`
+  is forwarded to the TUI/child.
 - Owner `Ctrl+Alt+Q` opens shutdown confirmation and closes the server if confirmed.
 
 `localserver.FanoutWriter` preserves TTY-like `Read`, `Write`, `Close`, and `Fd` behavior by delegating to the primary file when possible. Bubble Tea depends on this to detect output capabilities.
@@ -775,6 +775,19 @@ TUI mouse modes:
   emulator after the last render tick, making a visibly populated row select
   newer or blank content.
 - `mouse:app`: forward mouse events to the child only when it has enabled terminal mouse reporting.
+
+Right-clicking a session tab or connection tab opens a bordered context menu
+anchored immediately inside the pane beside that tab. It uses the same modal
+style and offers focus, rename, move, and remove. A clicked item selects the
+target in the relevant selector and invokes its existing keyboard handler
+(`Enter`, `R`, `M`, or `Delete`); it does not implement duplicate action logic.
+While open, it uses all-motion mouse reporting so the item under the pointer is
+highlighted with the modal selection style. Right-clicking another tab replaces
+the current menu with one for that tab.
+
+The TUI's visible `[+] Ctrl+Alt+T` tab-bar affordance and Help status-bar
+affordance are also left-clickable. They dispatch the same existing new-session
+and help shortcuts as their keyboard equivalents.
 
 Both modes keep mouse reporting enabled (select mode uses `CellMotion`, app mode
 `AllMotion`); `Model.View()` sets `MouseMode` and bubbletea's renderer emits the

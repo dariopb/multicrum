@@ -27,6 +27,7 @@ The child program or remote shell is treated as a black-box terminal: the app fo
 - Layout save/load for local sessions and SSH sessions, including remote commands.
 - Optional xterm.js browser UI over WebSocket.
 - Mouse selection/copy mode that preserves soft-wrapped logical lines.
+- Right-click a session or connection tab for a modal-styled context menu with focus, rename, move, and remove actions.
 - Terminal-accurate resize: output reflows (re-wraps) when the pane is made narrower or wider — characters cropped by a shrink are restored on a later widen — and scrollback stays consistent while scrolling with the mouse wheel or `Ctrl+PgUp`/`Ctrl+PgDn`. Prompt redraws and progress bars overwrite in place instead of leaving duplicate lines.
 
 ## Build

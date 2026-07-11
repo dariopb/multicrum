@@ -110,7 +110,9 @@ ui.Model Update loop
 - `Ctrl+PgDown`: page down through local TUI scrollback.
 - `Ctrl+Up` / `Ctrl+Down`: scroll local TUI scrollback one line.
 - `Ctrl+Home` / `Ctrl+End`: jump to top/bottom of local TUI scrollback.
-- `Ctrl+Alt+Q`: owner TUI opens server quit confirmation; attached clients use `Ctrl+Q`/`Alt+Ctrl+Q` to detach without killing sessions.
+- `Ctrl+Alt+Q`: owner TUI opens server quit confirmation; attached clients use `Ctrl+Alt+Q` to detach without killing sessions. Plain `Ctrl+Q` is forwarded.
+- Right-click a session tab or connection tab to open a modal-styled context menu anchored inside the pane next to it. Its focus, rename, move, and remove items must route through `handleSelectKey` / `handleConnectionsKey` with synthetic `Enter`, `R`, `M`, or `Delete` keys after selecting the clicked target; do not add a duplicate action implementation. `View()` uses `AllMotion` while `modeContextMenu` is open so the item beneath the pointer is highlighted with `selectorActiveStyle`; restore select mode by closing the menu. Right-clicking a second tab while a menu is open must replace it with the new tab's menu, not merely dismiss it.
+- Left-click `[+] Ctrl+Alt+T` in the tab bar or the Help label in the status bar to dispatch the existing new-session or help shortcut. Their bounds are recorded as `newSessionHitbox` and `helpHitbox` while rendering; do not create duplicate action paths.
 
 Global shortcuts (`Ctrl+Alt+T`, `Ctrl+Alt+Left/Right`, `Ctrl+Alt+[`/`]`, `Ctrl+Alt+Q`) are centralized in `state.handleGlobalShortcut` and run before modal-specific handlers. Do not duplicate these bindings inside individual modal handlers; that caused regressions where exited-session dialogs blocked connection/session switching or quit.
 

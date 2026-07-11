@@ -170,7 +170,8 @@ Implemented in `server_unix.go:TryAttach`:
 - forward stdin chunks as `FrameInput`,
 - forward `SIGWINCH` as `FrameResize`,
 - copy `FrameOutput` payloads to stdout,
-- detach on `Ctrl+Q` (`0x11`) or `Alt+Ctrl+Q` (`ESC 0x11`), without killing server sessions.
+- detach on `Alt+Ctrl+Q` (`ESC 0x11`), without killing server sessions. Plain
+  `Ctrl+Q` (`0x11`) is forwarded.
 
 ### Owner behavior
 

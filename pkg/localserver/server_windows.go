@@ -262,9 +262,6 @@ func clientHandshake(conn net.Conn, server, kind string, cols, rows int) (*Serve
 }
 
 func isDetachSequence(p []byte) bool {
-	if len(p) == 1 && p[0] == 0x11 {
-		return true
-	}
 	return len(p) == 2 && p[0] == 0x1b && p[1] == 0x11
 }
 

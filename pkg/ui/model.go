@@ -36,6 +36,7 @@ const (
 	modeQuitConfirm
 	modeDeleteConfirm
 	modeScrollSearch
+	modeContextMenu
 )
 
 type connectionState struct {
@@ -55,60 +56,67 @@ type connectionState struct {
 }
 
 type state struct {
-	manager            *session.SessionManager
-	viewports          map[int]*viewport.Model
-	altScreens         map[int]bool // last-seen alt-screen state per session index, for transition detection
-	connections        []*connectionState
-	activeConn         int
-	serverName         string
-	localClients       int
-	inputMux           *InputMux
-	program            *tea.Program
-	width              int
-	height             int
-	errMsg             string
-	mode               mode
-	renameText         string
-	renameCursor       int
-	selectFilter       string
-	selectFilterCursor int
-	selectCursor       int
-	selectScroll       int  // first visible row index when sessions overflow modal height
-	selectMoving       bool // when true, Up/Down reorders the selected session instead of moving cursor
-	selectMoveStart    int  // original session index of the moving entry, so Esc can revert
-	selectRenaming     bool
-	selectFiltering    bool
-	exitPromptID       int // session index waiting for user decision (in exit prompt)
-	exitChoice         int // 0 = respawn, 1 = remove
-	deleteKind         string
-	deleteIndex        int
-	deleteName         string
-	deleteReturn       mode
-	deleteChoice       int
-	newSession         newSessionState // state for the new-session modal
-	newSessionReturn   mode
-	connCursor         int
-	connRename         string
-	connRenameCursor   int
-	connRenaming       bool
-	connFilter         string
-	connFilterCursor   int
-	connFiltering      bool
-	connMoving         bool
-	sessionHitboxes    []mouseHitbox
-	connectionHitboxes []mouseHitbox
-	mouseCapture       bool               // when true, mouse events are forwarded to the child PTY (app-mode)
-	sel                selection          // in-progress / completed mouse selection over the focused buffer
-	search             scrollSearch       // vi-style scrollback search ('/') and line jump (':')
-	sshClient          *ssh_client.Client // non-nil starts SSH-backed sessions
-	onMetaChange       func()             // called when sessions are added/removed/focused
-	wsTransport        *transport.WSTransport
-	configPath         string           // path used by save/load layout shortcut
-	initialCfg         []startupSession // sessions to spawn on Init (instead of agentCmd)
-	statusMsg          string           // transient status line (e.g. config save result)
-	renderPending      bool             // a render tick is in flight (coalescing PTY bursts)
-	scrollbackMode     map[int]bool     // sessions currently scrolled up (need full scrollback in viewport)
-	paneCache          paneCache        // memoizes renderPaneContent across redundant View() calls
+	manager              *session.SessionManager
+	viewports            map[int]*viewport.Model
+	altScreens           map[int]bool // last-seen alt-screen state per session index, for transition detection
+	connections          []*connectionState
+	activeConn           int
+	serverName           string
+	localClients         int
+	inputMux             *InputMux
+	program              *tea.Program
+	width                int
+	height               int
+	errMsg               string
+	mode                 mode
+	renameText           string
+	renameCursor         int
+	selectFilter         string
+	selectFilterCursor   int
+	selectCursor         int
+	selectScroll         int  // first visible row index when sessions overflow modal height
+	selectMoving         bool // when true, Up/Down reorders the selected session instead of moving cursor
+	selectMoveStart      int  // original session index of the moving entry, so Esc can revert
+	selectRenaming       bool
+	selectFiltering      bool
+	exitPromptID         int // session index waiting for user decision (in exit prompt)
+	exitChoice           int // 0 = respawn, 1 = remove
+	deleteKind           string
+	deleteIndex          int
+	deleteName           string
+	deleteReturn         mode
+	deleteChoice         int
+	newSession           newSessionState // state for the new-session modal
+	newSessionReturn     mode
+	connCursor           int
+	connRename           string
+	connRenameCursor     int
+	connRenaming         bool
+	connFilter           string
+	connFilterCursor     int
+	connFiltering        bool
+	connMoving           bool
+	contextMenu          contextMenu
+	sessionHitboxes      []mouseHitbox
+	connectionHitboxes   []mouseHitbox
+	newSessionHitbox     mouseHitbox
+	helpHitbox           mouseHitbox
+	connectionsHitbox    mouseHitbox
+	hasNewSessionHitbox  bool
+	hasHelpHitbox        bool
+	hasConnectionsHitbox bool
+	mouseCapture         bool               // when true, mouse events are forwarded to the child PTY (app-mode)
+	sel                  selection          // in-progress / completed mouse selection over the focused buffer
+	search               scrollSearch       // vi-style scrollback search ('/') and line jump (':')
+	sshClient            *ssh_client.Client // non-nil starts SSH-backed sessions
+	onMetaChange         func()             // called when sessions are added/removed/focused
+	wsTransport          *transport.WSTransport
+	configPath           string           // path used by save/load layout shortcut
+	initialCfg           []startupSession // sessions to spawn on Init (instead of agentCmd)
+	statusMsg            string           // transient status line (e.g. config save result)
+	renderPending        bool             // a render tick is in flight (coalescing PTY bursts)
+	scrollbackMode       map[int]bool     // sessions currently scrolled up (need full scrollback in viewport)
+	paneCache            paneCache        // memoizes renderPaneContent across redundant View() calls
 }
 
 // paneCache memoizes the output of renderPaneContent, which is a pure function
@@ -777,8 +785,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		ev := mouseEventFromMsg(msg)
 		debugMouse(ev)
-		if s.handleMouseScopeClick(ev) {
-			return m, nil
+		if s.mode == modeContextMenu {
+			return m, s.handleContextMenuMouse(m, ev)
+		}
+		if handled, cmd := s.handleMouseScopeClick(m, ev); handled {
+			return m, cmd
 		}
 		if s.mode != modeNormal {
 			return m, nil
@@ -913,6 +924,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := s.handleConnectionsKey(m, msg)
 			return m, cmd
 		}
+		if s.mode == modeContextMenu {
+			if msg.Key().Code == tea.KeyEscape {
+				s.closeContextMenu()
+			}
+			return m, nil
+		}
 		if s.mode == modeQuitConfirm {
 			cmd := s.handleQuitConfirmKey(msg)
 			return m, cmd
@@ -957,7 +974,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View {
 	view := tea.NewView(m.viewString())
 	view.AltScreen = true
-	if m.s.mouseCapture {
+	if m.s.mouseCapture || m.s.mode == modeContextMenu {
 		view.MouseMode = tea.MouseModeAllMotion
 	} else {
 		// Select mode still needs mouse reporting so we receive wheel events
@@ -1798,6 +1815,7 @@ func (m Model) renderTabBar() string {
 	sessions := s.manager.Sessions()
 
 	s.sessionHitboxes = nil
+	s.hasNewSessionHitbox = false
 
 	brand := brandStyle.Render("multicrum")
 	brandW := lipgloss.Width(brand)
@@ -1837,6 +1855,8 @@ func (m Model) renderTabBar() string {
 			}
 			x += w
 		}
+		s.newSessionHitbox = mouseHitbox{Start: x, End: x + newTabW}
+		s.hasNewSessionHitbox = true
 		bar := lipgloss.JoinHorizontal(lipgloss.Top, append(tabs, newTab)...)
 		if pad := s.width - lipgloss.Width(bar) - brandW; pad > 0 {
 			bar += tabBarStyle.Render(strings.Repeat(" ", pad))
@@ -1947,7 +1967,10 @@ func (m Model) renderTabBar() string {
 	}
 	if needRight {
 		parts = append(parts, right)
+		x += rightW
 	}
+	s.newSessionHitbox = mouseHitbox{Start: x, End: x + newTabW}
+	s.hasNewSessionHitbox = true
 	parts = append(parts, newTab)
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 	if pad := s.width - lipgloss.Width(bar) - brandW; pad > 0 {
@@ -1996,6 +2019,8 @@ func (m Model) renderPane() string {
 		return m.overlayBox(pane, m.renderQuitConfirmModal())
 	case modeDeleteConfirm:
 		return m.overlayBox(pane, m.renderDeleteConfirmModal())
+	case modeContextMenu:
+		return m.overlayContextMenu(pane)
 	}
 	return pane
 }
@@ -2141,6 +2166,12 @@ func (m Model) overlayBox(pane, box string) string {
 	boxHeight := lipgloss.Height(box)
 	left := max(0, (cols-boxWidth)/2)
 	top := max(0, (rows-boxHeight)/2)
+	return overlayBoxAt(pane, box, left, top, cols, rows)
+}
+
+// overlayBoxAt paints box at a pane-relative position. Callers that anchor an
+// overlay to mouse coordinates must clamp their bounds before using it.
+func overlayBoxAt(pane, box string, left, top, cols, rows int) string {
 	paneLines := strings.Split(pane, "\n")
 	boxLines := strings.Split(box, "\n")
 	for len(paneLines) < rows {
@@ -2208,6 +2239,10 @@ func (m Model) renderExitModal() string {
 }
 
 func padBox(rows []string, width int) string {
+	return padBoxWithStyle(rows, width, helpModalStyle)
+}
+
+func padBoxWithStyle(rows []string, width int, style lipgloss.Style) string {
 	for _, row := range rows {
 		if w := lipgloss.Width(row); w > width {
 			width = w
@@ -2218,7 +2253,7 @@ func padBox(rows []string, width int) string {
 			rows[i] = row + modalGapStyle.Render(strings.Repeat(" ", pad))
 		}
 	}
-	return helpModalStyle.Render(strings.Join(rows, "\n"))
+	return style.Render(strings.Join(rows, "\n"))
 }
 
 func truncate(s string, max int) string {
@@ -2258,7 +2293,8 @@ func (m Model) renderHelpModal() string {
 		": (in scrollback)    jump to line number",
 		"Ctrl+Alt+M           toggle mouse mode (select ↔ app)",
 		"Wheel (select mode)  scroll the scrollback buffer",
-		"Right-click          copy selection, exit scrollback",
+		"Right-click pane     copy selection, exit scrollback",
+		"Right-click tab      focus/rename/move/remove menu",
 		"Shift+drag           native terminal selection / copy",
 		"Ctrl+Alt+Q           quit",
 		"",
@@ -2440,11 +2476,18 @@ func (m Model) renderStatusBar() string {
 	s := m.s
 	cols, rows := paneSize(s.width, s.height)
 	s.connectionHitboxes = nil
+	s.hasHelpHitbox = false
+	s.hasConnectionsHitbox = false
 	mouseTag := "mouse:select"
 	if s.mouseCapture {
 		mouseTag = "mouse:app"
 	}
-	prefix := statusKeyStyle.Render(fmt.Sprintf(" server:%s │ conn ", s.serverName))
+	serverPrefix := statusKeyStyle.Render(fmt.Sprintf(" server:%s │ ", s.serverName))
+	connectionsLabel := statusKeyStyle.Render("conn ")
+	prefix := serverPrefix + connectionsLabel
+	connStart := lipgloss.Width(serverPrefix)
+	s.connectionsHitbox = mouseHitbox{Start: connStart, End: connStart + lipgloss.Width(connectionsLabel)}
+	s.hasConnectionsHitbox = true
 	pills := s.renderConnectionPills()
 	prefixWidth := lipgloss.Width(prefix)
 	for i := range s.connectionHitboxes {
@@ -2515,6 +2558,10 @@ func (m Model) renderStatusBar() string {
 	help := helpStyle.Render(" Alt+` help")
 	if s.statusMsg != "" {
 		help = helpStyle.Render(" " + s.statusMsg + " ")
+	} else {
+		helpStart := lipgloss.Width(status)
+		s.helpHitbox = mouseHitbox{Start: helpStart, End: helpStart + lipgloss.Width(help)}
+		s.hasHelpHitbox = true
 	}
 	left := status + help
 	if pad := s.width - lipgloss.Width(left); pad > 0 {

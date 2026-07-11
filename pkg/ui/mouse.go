@@ -51,14 +51,28 @@ func hitboxAt(boxes []mouseHitbox, x int) (int, bool) {
 	return 0, false
 }
 
-func (s *state) handleMouseScopeClick(ev mouseEvent) bool {
-	if ev.Action != mousePress || ev.Button != tea.MouseLeft {
-		return false
+func (s *state) handleMouseScopeClick(m Model, ev mouseEvent) (bool, tea.Cmd) {
+	if ev.Action != mousePress {
+		return false, nil
 	}
 	if ev.Y == 0 {
+		if ev.Button == tea.MouseLeft && s.hasNewSessionHitbox {
+			if _, ok := hitboxAt([]mouseHitbox{s.newSessionHitbox}, ev.X); ok {
+				return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{
+					Code: 't', Mod: tea.ModCtrl | tea.ModAlt,
+				}))
+			}
+		}
 		idx, ok := hitboxAt(s.sessionHitboxes, ev.X)
 		if !ok {
-			return false
+			return false, nil
+		}
+		if ev.Button == tea.MouseRight {
+			s.openContextMenu(sessionContextMenu, idx, ev.X, ev.Y)
+			return true, nil
+		}
+		if ev.Button != tea.MouseLeft {
+			return false, nil
 		}
 		s.mode = modeNormal
 		s.clearSelection()
@@ -67,22 +81,43 @@ func (s *state) handleMouseScopeClick(ev mouseEvent) bool {
 			s.refreshFocused()
 			s.notifyMeta()
 		}
-		return true
+		return true, nil
 	}
 	_, paneRows := paneSize(s.width, s.height)
 	if ev.Y == paneRows+1 {
+		if ev.Button == tea.MouseLeft && s.hasConnectionsHitbox {
+			if _, ok := hitboxAt([]mouseHitbox{s.connectionsHitbox}, ev.X); ok {
+				return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{
+					Code: 'o', Mod: tea.ModCtrl | tea.ModAlt,
+				}))
+			}
+		}
+		if ev.Button == tea.MouseLeft && s.hasHelpHitbox {
+			if _, ok := hitboxAt([]mouseHitbox{s.helpHitbox}, ev.X); ok {
+				return s.handleShortcut(m, tea.KeyPressMsg(tea.Key{
+					Code: '`', Mod: tea.ModAlt,
+				}))
+			}
+		}
 		idx, ok := hitboxAt(s.connectionHitboxes, ev.X)
 		if !ok {
-			return false
+			return false, nil
+		}
+		if ev.Button == tea.MouseRight {
+			s.openContextMenu(connectionContextMenu, idx, ev.X, ev.Y)
+			return true, nil
+		}
+		if ev.Button != tea.MouseLeft {
+			return false, nil
 		}
 		s.mode = modeNormal
 		s.clearSelection()
 		if idx >= 0 && idx < len(s.connections) && idx != s.activeConn {
 			s.focusConnection(idx)
 		}
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 // encodeMouseSGR converts a Bubble Tea mouse event into the SGR (1006) mouse
