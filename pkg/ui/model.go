@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
@@ -44,6 +45,13 @@ type connectionState struct {
 	altScreens     map[int]bool
 	scrollbackMode map[int]bool
 	initialCfg     []startupSession
+	// outputPending coalesces PTY output notifications: the read loop sets it
+	// and only enqueues a connectionOutputMsg when it was previously clear, so
+	// a burst of small child writes collapses into a single Bubble Tea message
+	// (and therefore a single View() rebuild) instead of thousands. The bytes
+	// themselves are already applied to the VTScreen synchronously in the read
+	// loop, so no output is lost by dropping the intermediate notifications.
+	outputPending atomic.Bool
 }
 
 type state struct {
@@ -100,6 +108,22 @@ type state struct {
 	statusMsg          string           // transient status line (e.g. config save result)
 	renderPending      bool             // a render tick is in flight (coalescing PTY bursts)
 	scrollbackMode     map[int]bool     // sessions currently scrolled up (need full scrollback in viewport)
+	paneCache          paneCache        // memoizes renderPaneContent across redundant View() calls
+}
+
+// paneCache memoizes the output of renderPaneContent, which is a pure function
+// of the viewport content, scroll offset, pane size and wrap flag. Bubble Tea
+// calls View() after every message, so between render frames the same pane is
+// rebuilt many times over with identical inputs; caching turns those repeats
+// into a cheap key comparison instead of a full split/pad pass.
+type paneCache struct {
+	valid   bool
+	content string
+	yoff    int
+	cols    int
+	rows    int
+	wrap    bool
+	out     string
 }
 
 // startupSession is a session entry queued for startup, with its title and
@@ -594,13 +618,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case connectionOutputMsg:
 		if msg.Conn != s.activeConn {
+			// Not visible: re-arm this connection's coalescing flag so its
+			// next output still notifies (we just don't render it).
+			if msg.Conn >= 0 && msg.Conn < len(s.connections) {
+				s.connections[msg.Conn].outputPending.Store(false)
+			}
 			return m, nil
 		}
 		if msg.Msg.Index != s.manager.FocusedIndex() {
+			// Active connection but a background session produced the output;
+			// re-arm so that session keeps notifying, but don't render it.
+			s.connections[msg.Conn].outputPending.Store(false)
 			return m, nil
 		}
 		s.ensureViewport(msg.Msg.Index, s.width, s.height)
 		if s.renderPending {
+			// A frame is already scheduled; leave outputPending set so every
+			// further child write in this frame window coalesces into it. The
+			// flag is re-armed by renderTickMsg once the frame is drawn.
 			return m, nil
 		}
 		s.renderPending = true
@@ -619,6 +654,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case renderTickMsg:
 		s.renderPending = false
+		// Re-arm the active connection's output coalescing flag now that this
+		// frame is being drawn: child writes during the frame window were
+		// collapsed into the single notification that scheduled this tick, and
+		// the next write should schedule the following frame.
+		if s.activeConn >= 0 && s.activeConn < len(s.connections) {
+			s.connections[s.activeConn].outputPending.Store(false)
+		}
 		idx := s.manager.FocusedIndex()
 		s.ensureViewport(idx, s.width, s.height)
 		vp := s.viewports[idx]
@@ -1969,6 +2011,20 @@ func (m Model) renderPane() string {
 // paneCols x paneRows ourselves so no wrapping is ever possible.
 func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int, wrap bool) string {
 	content := vp.GetContent()
+	yoff := vp.YOffset()
+	if c := &s.paneCache; c.valid && c.wrap == wrap && c.cols == paneCols &&
+		c.rows == paneRows && c.yoff == yoff && c.content == content {
+		return c.out
+	}
+	out := renderPaneContentUncached(content, paneCols, paneRows, wrap, yoff)
+	s.paneCache = paneCache{
+		valid: true, content: content, yoff: yoff,
+		cols: paneCols, rows: paneRows, wrap: wrap, out: out,
+	}
+	return out
+}
+
+func renderPaneContentUncached(content string, paneCols, paneRows int, wrap bool, yoff int) string {
 	if content == "" {
 		return blankPane(paneCols, paneRows)
 	}
@@ -1986,7 +2042,6 @@ func (s *state) renderPaneContent(vp *viewport.Model, paneCols, paneRows int, wr
 		// behavior so cell-accurate grids (btop dialogs) never shift.
 		all = softWrapRows(all, paneCols)
 	}
-	yoff := vp.YOffset()
 	if yoff < 0 {
 		yoff = 0
 	}

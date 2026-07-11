@@ -42,3 +42,35 @@ func TestSoftWrapRowsMatchesViewportModel(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderPaneContentCacheMatchesUncached verifies the memoized pane render
+// returns exactly what the uncached path produces across content/offset/size
+// changes — otherwise a stale cache key would show wrong or frozen output.
+func TestRenderPaneContentCacheMatchesUncached(t *testing.T) {
+	m := NewModel([]string{"bash"}, 80, 24)
+	m.s.ensureViewport(0, 80, 24)
+	vp := m.s.viewports[0]
+
+	check := func(label string) {
+		content := vp.GetContent()
+		yoff := vp.YOffset()
+		want := renderPaneContentUncached(content, 80, 22, false, yoff)
+		got := m.s.renderPaneContent(vp, 80, 22, false)
+		if got != want {
+			t.Fatalf("%s: cached render != uncached render", label)
+		}
+		// A second call must hit the cache and stay identical.
+		if again := m.s.renderPaneContent(vp, 80, 22, false); again != got {
+			t.Fatalf("%s: cache-hit render changed output", label)
+		}
+	}
+
+	vp.SetContent("line one\nline two\nline three")
+	check("initial content")
+
+	vp.SetContent("different\ncontent\nhere\nnow")
+	check("changed content")
+
+	vp.SetYOffset(1)
+	check("changed offset")
+}

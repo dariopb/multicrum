@@ -711,6 +711,14 @@ WebSocket gotchas:
   reflowed content is shown immediately; without it the viewport keeps text
   wrapped at the previous width and shows stale "ghost" rows until the next PTY
   output.
+- **Render throttling & memoization.** Bubble Tea rebuilds `View()` after every
+  message, so PTY output notifications are coalesced: each connection's read
+  loop only enqueues one `connectionOutputMsg` at a time (`outputPending`
+  atomic flag, re-armed once the frame is drawn in `renderTickMsg`), capping a
+  chatty child at ~60 view rebuilds/sec. The visible pane string
+  (`renderPaneContent`) is memoized in `state.paneCache`, keyed on the viewport
+  content, scroll offset, pane size and wrap flag, so redundant `View()` calls
+  between frames reuse the last result instead of re-splitting/re-padding.
 
 ## VTScreen Details
 
@@ -752,7 +760,20 @@ Package: `pkg/ssh_client`.
 
 TUI mouse modes:
 
-- `mouse:select`: local selection/copy; soft-wrapped logical lines are joined using `VTScreen.BufferLines()` wrap metadata.
+- `mouse:select`: local selection/copy. The selection source **must match what
+  the pane displays**: in live mode the pane shows the viewport's most recently
+  rendered `VTScreen.Render()` snapshot, so selection maps mouse rows onto that
+  snapshot (not the current emulator cells); in scrollback mode the pane shows
+  `RenderWithScrollback()` (the full logical buffer), so it maps onto
+  `VTScreen.BufferLines()`. `state.paneRowBase` is therefore just the viewport
+  `YOffset` in both modes. Mapping live-mode rows onto the logical
+  `BufferLines()` tail was a bug: after a `clear` the visible screen is a fresh
+  top-aligned frame that diverges from the logical scrollback tail, so
+  selecting the first on-screen lines picked unrelated history rows until
+  enough output scrolled the screen back into alignment. Reading the current
+  emulator cells was also wrong: a resize or child redraw may advance the
+  emulator after the last render tick, making a visibly populated row select
+  newer or blank content.
 - `mouse:app`: forward mouse events to the child only when it has enabled terminal mouse reporting.
 
 Both modes keep mouse reporting enabled (select mode uses `CellMotion`, app mode

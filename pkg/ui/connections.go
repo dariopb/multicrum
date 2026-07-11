@@ -104,12 +104,21 @@ func (s *state) rebindConnectionCallbacks() {
 			continue
 		}
 		idx := i
+		conn := conn
 		conn.manager.SetSendOutput(func(msg session.OutputMsg) {
-			if s.program != nil {
-				s.program.Send(connectionOutputMsg{Conn: idx, Msg: msg})
-			}
+			// Browsers need every chunk of raw PTY bytes for a faithful replay,
+			// so forward those unconditionally (cheap byte copy to the socket).
 			if s.wsTransport != nil && idx == s.activeConn {
 				s.wsTransport.SendPTY(msg.Index, msg.Data)
+			}
+			// Coalesce the Bubble Tea notification: the renderer rebuilds the
+			// whole View() on every message, so collapsing a burst of small
+			// child writes into a single connectionOutputMsg (until the model
+			// consumes it) is what keeps a chatty child from saturating the
+			// event loop with throwaway view rebuilds. The bytes are already in
+			// the VTScreen, so nothing is dropped.
+			if s.program != nil && !conn.outputPending.Swap(true) {
+				s.program.Send(connectionOutputMsg{Conn: idx, Msg: msg})
 			}
 		})
 		conn.manager.SetSendExit(func(msg session.ExitMsg) {
@@ -146,19 +155,9 @@ func (s *state) removeConnection(index int) {
 func (s *state) createConnectionWithDefaultSession(name string, m Model) *connectionState {
 	conn := s.addConnection(name)
 	cols, rows := paneSize(s.width, s.height)
-	idx := len(s.connections) - 1
-	conn.manager = session.NewManagerWithSSH(cols, rows,
-		func(msg session.OutputMsg) {
-			if s.program != nil {
-				s.program.Send(connectionOutputMsg{Conn: idx, Msg: msg})
-			}
-		},
-		func(msg session.ExitMsg) {
-			if s.program != nil {
-				s.program.Send(connectionExitMsg{Conn: idx, Msg: msg})
-			}
-		},
-		s.sshClient)
+	// Callbacks are wired by rebindConnectionCallbacks below; New() is nil-safe
+	// until then (output is still applied to the VTScreen synchronously).
+	conn.manager = session.NewManagerWithSSH(cols, rows, nil, nil, s.sshClient)
 	if sess, err := conn.manager.New(m.agentCmd); err == nil && m.agentCmdLine != "" {
 		sess.SetCmdLine(m.agentCmdLine)
 	}
@@ -170,23 +169,12 @@ func (s *state) initManagers(cols, rows int) {
 	if len(s.connections) == 0 {
 		s.addConnection("default")
 	}
-	for i, c := range s.connections {
+	for _, c := range s.connections {
 		if c.manager == nil {
-			idx := i
-			c.manager = session.NewManagerWithSSH(cols, rows,
-				func(msg session.OutputMsg) {
-					if s.program != nil {
-						s.program.Send(connectionOutputMsg{Conn: idx, Msg: msg})
-					}
-				},
-				func(msg session.ExitMsg) {
-					if s.program != nil {
-						s.program.Send(connectionExitMsg{Conn: idx, Msg: msg})
-					}
-				},
-				s.sshClient)
+			c.manager = session.NewManagerWithSSH(cols, rows, nil, nil, s.sshClient)
 		}
 	}
+	s.rebindConnectionCallbacks()
 	s.syncActiveConnectionFields()
 }
 

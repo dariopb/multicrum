@@ -3,6 +3,8 @@ package session
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestScrollbackStoresLogicalLinesAcrossResize(t *testing.T) {
@@ -161,4 +163,66 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestVisibleLinesMatchScreenAfterClear guards the mouse-selection alignment
+// fix: after a `clear`, the visible emulator screen is a fresh top-aligned
+// frame, which diverges from the logical scrollback tail. VisibleLines() must
+// track what Render() actually shows (so live-mode selection maps correctly),
+// while BufferLines()' tail still reflects the logical history.
+func TestVisibleLinesMatchScreenAfterClear(t *testing.T) {
+	s := NewVTScreen(40, 8)
+	// Build up plenty of scrollback history.
+	for i := 0; i < 30; i++ {
+		s.Write([]byte("old line\r\n"))
+	}
+
+	// Clear screen + home cursor (what `clear` emits), then print fresh output
+	// near the top, leaving blank padding below.
+	s.Write([]byte("\x1b[3J\x1b[2J\x1b[H"))
+	s.Write([]byte("AAAA\r\nBBBB\r\nCCCC"))
+
+	vis := s.VisibleLines()
+	if len(vis) != 8 {
+		t.Fatalf("VisibleLines len = %d, want 8 (one per screen row)", len(vis))
+	}
+	for i, want := range []string{"AAAA", "BBBB", "CCCC"} {
+		if vis[i].Text != want {
+			t.Fatalf("VisibleLines[%d] = %q, want %q", i, vis[i].Text, want)
+		}
+	}
+
+	// Rows below the fresh output are blank on the visible screen.
+	if vis[7].Text != "" {
+		t.Fatalf("VisibleLines[7] = %q, want empty padding row", vis[7].Text)
+	}
+	// The bug this fixes: BufferLines()' last-8 tail is the logical history,
+	// which does NOT start with the on-screen "AAAA" row — confirming the two
+	// sources genuinely diverge and that selection must use VisibleLines live.
+	buf := s.BufferLines()
+	if len(buf) >= 8 && buf[len(buf)-8].Text == "AAAA" {
+		t.Fatalf("expected BufferLines tail to diverge from the visible screen")
+	}
+}
+
+// TestVisibleLinesMatchRenderAfterNarrowResize ensures the plain-cell source
+// used by live mouse selection stays row-for-row aligned with the ANSI screen
+// rendered by the TUI after a small width shrink.
+func TestVisibleLinesMatchRenderAfterNarrowResize(t *testing.T) {
+	s := NewVTScreen(40, 8)
+	s.Write([]byte("\x1b[32malpha file\x1b[0m\r\n\x1b[34mbeta directory\x1b[0m\r\n"))
+	s.Write([]byte("a line that wraps when the width changes\r\n"))
+	s.Resize(39, 8)
+
+	rendered := strings.Split(ansi.Strip(s.Render()), "\n")
+	visible := s.VisibleLines()
+	if len(rendered) != len(visible) {
+		t.Fatalf("Render rows = %d, VisibleLines rows = %d", len(rendered), len(visible))
+	}
+	for i, line := range rendered {
+		got := strings.TrimRight(line, " ")
+		if visible[i].Text != got {
+			t.Fatalf("row %d: VisibleLines = %q, Render = %q", i, visible[i].Text, got)
+		}
+	}
 }

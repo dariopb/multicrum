@@ -535,6 +535,26 @@ func (s *VTScreen) BufferLines() []BufferLine {
 	return out
 }
 
+// VisibleLines returns the current on-screen rows as plain-text BufferLine
+// entries, one per emulator row (0 = top of the visible screen). This is the
+// exact set of lines that Render() paints, so it is the correct source for
+// live-mode mouse selection: unlike BufferLines() (which is the *logical*
+// scrollback and only coincides with the visible screen when output is
+// scrolling at the bottom), VisibleLines() always matches what the user sees —
+// e.g. immediately after `clear`, when the screen is a fresh top-aligned frame
+// with blank padding below the cursor rather than the tail of the logical
+// buffer. Rows are not marked SoftWrap: each visible row is copied as its own
+// line since the emulator grid does not preserve logical wrap boundaries.
+func (s *VTScreen) VisibleLines() []BufferLine {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]BufferLine, 0, s.rows)
+	for y := 0; y < s.rows; y++ {
+		out = append(out, BufferLine{Text: strings.TrimRight(s.plainRowAtLocked(y), " ")})
+	}
+	return out
+}
+
 func (s *VTScreen) plainRowAtLocked(y int) string {
 	var b strings.Builder
 	b.Grow(s.cols)

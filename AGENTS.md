@@ -179,6 +179,15 @@ Every WebSocket binary message uses byte 0 as a type tag.
 - Avoid sending a new-session snapshot from the WS read goroutine before Bubble Tea has processed the `new` control; it can replay the old focused session. Let metadata-driven focus request the snapshot.
 - The generated HTML must not use `fmt.Sprintf` over the whole CSS/JS template because literal `%` in CSS/JS corrupts formatting. Use `strings.Replace(..., "__WS_QUERY__", wsQuery, 1)`.
 
+## Rendering Performance (hot path)
+
+Bubble Tea calls `Model.View()` **after every message** (see bubbletea `eventLoop` → `p.render`), then flushes to the terminal on a separate 60fps ticker. So the cost that matters for perceived lag is not the terminal write but how often/expensively `View()` rebuilds the frame string when a child spews output. Two mechanisms keep this bounded — do not remove either:
+
+- **Output-notification coalescing.** The session read loop applies bytes to the `VTScreen` synchronously, then notifies the program. Each connection carries an `outputPending atomic.Bool`: the read-loop callback only enqueues a `connectionOutputMsg` when it was previously clear (`Swap(true)` was false), so a burst of small child writes collapses into a single Bubble Tea message. The flag is **re-armed in `renderTickMsg`** (after the frame is drawn), not in the output handler, so every write during a frame window coalesces into one notification and output tops out at ~60 `View()` rebuilds/sec regardless of how chatty the child is. Background/non-focused output re-arms immediately in the handler (it isn't rendered) so those connections keep notifying. Nothing is lost by dropping intermediate notifications because the bytes are already in the `VTScreen`.
+- **Pane render memoization.** `renderPaneContent` is a pure function of `(viewport content, YOffset, paneCols, paneRows, wrap)`; `state.paneCache` memoizes its output keyed on exactly those inputs. Between frames the same pane is rebuilt on every redundant `View()` with identical inputs, so the cache turns an ~87µs split/pad pass into a cheap key comparison (measured `View()` ~126µs → ~43µs). The pure worker is `renderPaneContentUncached`; the cache needs no manual invalidation because any change to the inputs misses the key. Overlays (selection/search/scroll indicator) are applied by `renderPane` *after* the cached content, so they are never stale.
+
+Benchmarks live in `pkg/ui/bench_render_test.go` (`BenchmarkView`, `BenchmarkScreenRender`, `BenchmarkRenderPaneContent[Cached]`); the cache-correctness guard is `TestRenderPaneContentCacheMatchesUncached`.
+
 ## Viewport and Session Index Gotchas
 
 Sessions are indexed 0-based and `Kill()` reindexes remaining sessions. `state.viewports` is keyed by session index, so stale viewport reuse is easy after kills/recreates.
@@ -244,6 +253,10 @@ Two things must be true for wheel/selection to work from launch:
 2. **The bigger issue with a detached owner:** the owner's renderer emits the mouse-enable CSI only once (first flush / on a `MouseMode` change), and that first flush happens with no attach client connected — so the enable is written to the socket fan-out and lost. A later-attaching client's terminal therefore never receives `?1002h/?1006h`, and mouse stays dead until the user toggles mouse mode (`Ctrl+Alt+M`) twice (which forces a `MouseMode` change → re-emit). Fix: on client attach the owner sends `LocalClientCountMsg`; the handler detects an increased count and re-asserts `state.mouseEnableSequence()` (matching the current capture mode) via a `tea.RawMsg`, alongside `tea.ClearScreen`. Keep mouse-enable owned by `MouseMode` for changes, but re-assert it on every new attach.
 
 Regression tests: `TestResetTerminalInputModesKeepsMouseReporting` and `TestMouseEnableSequenceMatchesMode` in `pkg/ui/mouse_test.go`.
+
+### Mouse selection source must match the displayed pane
+
+Live-mode selection maps mouse rows onto the **viewport's rendered `Render()` snapshot**, while scrollback-mode selection maps onto `VTScreen.BufferLines()` (the logical scrollback — what `RenderWithScrollback()` paints). `state.selectionLines(idx, vp)` picks the source by `scrollbackMode[idx]`, and `state.paneRowBase` is just the viewport `YOffset` in both modes. Do **not** map live-mode rows onto the `BufferLines()` tail: `BufferLines()` is the logical history and only coincides with the visible screen while output is scrolling at the bottom. After a `clear` (fresh top-aligned screen with blank padding below the cursor) the two diverge, so selecting the first on-screen lines returned unrelated logical-history text until enough output realigned them. Also do not read live selection from the current emulator cells: resize/reflow or child redraw output can advance them between the last render tick and the mouse event, making a visibly populated row copy newer or blank content. `overlaySelection` and `selectionText` must both read from `selectionLines`. Regression tests: `TestVisibleLinesMatchScreenAfterClear` and `TestLiveSelectionUsesRenderedViewportSnapshot`.
 
 ### Emulator quirks worked around in `VTScreen.Write`
 

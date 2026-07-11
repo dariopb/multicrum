@@ -6,6 +6,8 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"multicrum/pkg/session"
 )
 
 // selection tracks an in-progress or completed mouse selection over the
@@ -30,25 +32,45 @@ func (sel selection) normalized() (sl, sc, el, ec int) {
 	return
 }
 
-// paneRowBase returns the BufferLines index that corresponds to pane row 0.
+// paneRowBase returns the line index (within the active selection source) that
+// corresponds to pane row 0.
 //
-// In scrollback mode the viewport content is the full buffer (scrollback +
-// screen), so the base is simply the viewport's YOffset. In the live path the
-// viewport content is only the current screen (Render()), which is the *tail*
-// of BufferLines; the base must therefore be shifted by the scrollback length
-// (len(BufferLines) - visibleScreenRows) so mouse rows map onto the visible
-// screen rather than the top of scrollback.
+// The selection source must match what the pane actually displays:
+//   - Scrollback mode: the pane shows RenderWithScrollback() (the full logical
+//     buffer), so the source is BufferLines() and the base is the viewport's
+//     YOffset directly.
+//   - Live mode: the pane shows the viewport's last Render() snapshot, so the
+//     source is that snapshot and the base is again just the viewport's
+//     YOffset — the visible rows *are* the source, so no scrollback shift is
+//     applied. (Shifting by len(BufferLines)-rows here was the bug that made
+//     selection pick logical-buffer lines instead of the on-screen rows right
+//     after a `clear`, when the two diverge.)
 func (s *state) paneRowBase(idx int, vp *viewport.Model) int {
-	base := vp.YOffset()
-	if !s.scrollbackMode[idx] {
-		if sess := s.manager.Focused(); sess != nil {
-			_, rows := paneSize(s.width, s.height)
-			if off := len(sess.Screen().BufferLines()) - rows; off > 0 {
-				base += off
-			}
-		}
+	return vp.YOffset()
+}
+
+// selectionLines returns the line source that matches the pane's current
+// display mode, so mouse-row indices and rendered rows stay aligned.
+//
+// In live mode the viewport content is the last screen snapshot rendered to
+// the user. Read that snapshot rather than the current VT screen: during a
+// resize or a burst of PTY output the emulator can advance between render
+// ticks, and selecting from it would otherwise copy a different (sometimes
+// blank) row than the one visibly under the mouse.
+func (s *state) selectionLines(idx int, vp *viewport.Model) []session.BufferLine {
+	sess := s.manager.Focused()
+	if sess == nil {
+		return nil
 	}
-	return base
+	if s.scrollbackMode[idx] {
+		return sess.Screen().BufferLines()
+	}
+	rows := strings.Split(ansi.Strip(vp.GetContent()), "\n")
+	lines := make([]session.BufferLine, len(rows))
+	for i, row := range rows {
+		lines[i].Text = strings.TrimRight(row, " ")
+	}
+	return lines
 }
 
 // bufferRowFromMouse maps a mouse event Y inside the pane to a buffer line
@@ -162,7 +184,12 @@ func (s *state) selectionText() string {
 	if sess == nil {
 		return ""
 	}
-	lines := sess.Screen().BufferLines()
+	idx := s.manager.FocusedIndex()
+	vp, ok := s.viewports[idx]
+	if !ok {
+		return ""
+	}
+	lines := s.selectionLines(idx, vp)
 	if len(lines) == 0 {
 		return ""
 	}
@@ -212,13 +239,13 @@ func (s *state) overlaySelection(pane string, paneCols, paneRows int) string {
 	if sess == nil {
 		return pane
 	}
-	lines := sess.Screen().BufferLines()
-	sl, sc, el, ec := s.sel.normalized()
 	idx := s.manager.FocusedIndex()
+	sl, sc, el, ec := s.sel.normalized()
 	vp, ok := s.viewports[idx]
 	if !ok {
 		return pane
 	}
+	lines := s.selectionLines(idx, vp)
 	yoff := s.paneRowBase(idx, vp)
 	paneLines := strings.Split(pane, "\n")
 	for i := 0; i < len(paneLines) && i < paneRows; i++ {
