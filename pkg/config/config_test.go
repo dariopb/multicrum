@@ -25,7 +25,7 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 		ConnectionLayout:    "left",
 		ConnectionRailWidth: 22,
 		Connections: []ConnectionEntry{
-			{Name: "default", Sessions: []SessionEntry{{Cmd: []string{"bash"}}}},
+			{Name: "default", Sessions: []SessionEntry{{Cmd: []string{"bash"}, Cwd: "/tmp/project"}}},
 			{Name: "work", Sessions: []SessionEntry{{Title: "logs", CmdLine: "tail -f /var/log/syslog"}}},
 			{Name: "remote", Sessions: []SessionEntry{{Title: "ssh", CmdLine: "bash -l", SSH: &SSHEntry{Target: "user@example.com", Port: "2222", Key: "~/.ssh/id_ed25519", UseDefaultKeys: true, UseAgent: true}}}},
 		},

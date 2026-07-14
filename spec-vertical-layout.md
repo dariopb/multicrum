@@ -256,8 +256,12 @@ row. It must stay continuous behind the entries, tab bar, and pane.
 - Centered dialogs are centered within `geom.Pane`, not the full terminal and
   not the rail.
 - Context menus are anchored from screen coordinates, then clamped inside
-  `geom.Pane`. A right-clicked rail item should open its menu immediately to
-  the right of the rail; a session-tab menu remains below the tab bar.
+  `geom.Screen`. A right-clicked rail item opens at the pointer over the full
+  composed frame rather than being translated into pane coordinates; a
+  session-tab menu remains below the tab bar.
+- Left- or right-clicking the `Multicrum` title opens the global actions menu:
+  Help, session/connection creation and selectors, Toggle Mouse with its current
+  mode, Save Layout, client-only Detach, and server-wide Quit.
 
 ## Resize, PTY, Viewport, and Rendering-State Changes
 
@@ -294,6 +298,9 @@ Audit every current `paneSize` consumer, including:
 - Left-click a rail connection item focuses that connection.
 - Right-click a rail item opens its existing context menu (focus, rename,
   move, remove) targeting that connection.
+- Left- or right-click the `Multicrum` title to open global actions. Detach
+  closes only the attach client that generated the click; Quit retains the
+  owner/server confirmation.
 - The active/hover semantics remain unchanged: context menu uses all-motion
   while open; regular select/app mouse behavior continues inside the pane.
 - A click in the rail must never begin a terminal selection or forward a
@@ -348,8 +355,8 @@ fallback.
 - Active style covers both full-width entry rows.
 - Rail hitboxes cover both rows and do not overlap pane hitboxes.
 - Tab/new-session/Help/`conn` click targets use geometry-derived rectangles.
-- Dialogs and context menus remain within the main pane and do not paint over
-  the rail.
+- Dialogs remain within the main pane. Context menus are composed over the
+  full frame so rail and title menus stay at their screen-coordinate pointer.
 
 ### Regression coverage
 
@@ -360,6 +367,8 @@ Add explicit tests that:
 - SGR mouse coordinates in left mode are pane-relative;
 - live selection remains aligned after a resize and after a layout toggle;
 - context menu replacement works when right-clicking different rail items;
+- the title menu exposes Detach separately from Quit and Detach targets only
+  the input-source attach client;
 - switching layout while scrolled or with a modal open does not retain stale
   viewport content/hitboxes;
 - plain Ctrl+Q remains forwarded and Ctrl+Alt+Q detaches an attached client.
@@ -384,9 +393,10 @@ Add explicit tests that:
 
 - Existing configs render exactly as bottom layout without migration.
 - `left` survives save/load and starts in the saved placement.
-- The left rail begins with pink `Multicrum`, then exactly one blank row, then
-  two-row connection items.
+- The left rail begins with pink `Multicrum`, the active server row, exactly
+  one blank row, then two-row connection items.
 - Active connection styling spans both full-width item rows.
+- A focused faulted session retains active styling while showing its `✗`.
 - PTY dimensions, viewport dimensions, mouse selection, SGR mouse forwarding,
   cursor placement, overlays, and dialogs all use main-pane geometry.
 - Switching placement is immediate, safely resizes sessions, and leaves no

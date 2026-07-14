@@ -28,14 +28,15 @@ type Owner struct {
 	ln     net.Listener
 	input  InputSink
 
-	mu         sync.Mutex
-	clients    map[*client]struct{}
-	onCount    func(int)
-	onResize   func(cols, rows int)
-	onControl  func(action string)
-	settings   ServerSettings
-	latestCols int
-	latestRows int
+	mu           sync.Mutex
+	clients      map[*client]struct{}
+	activeClient *client
+	onCount      func(int)
+	onResize     func(cols, rows int)
+	onControl    func(action string)
+	settings     ServerSettings
+	latestCols   int
+	latestRows   int
 }
 
 type client struct {
@@ -364,6 +365,9 @@ func (o *Owner) handle(conn net.Conn) {
 		defer func() {
 			o.mu.Lock()
 			delete(o.clients, c)
+			if o.activeClient == c {
+				o.activeClient = nil
+			}
 			n := len(o.clients)
 			o.mu.Unlock()
 			o.emitCount(n)
@@ -376,6 +380,9 @@ func (o *Owner) handle(conn net.Conn) {
 		}
 		switch typ {
 		case FrameInput:
+			o.mu.Lock()
+			o.activeClient = c
+			o.mu.Unlock()
 			if o.input != nil {
 				o.input.Inject(body)
 			}
@@ -427,6 +434,23 @@ func (o *Owner) emitCount(n int) {
 	o.mu.Unlock()
 	if onCount != nil {
 		onCount(n)
+	}
+}
+
+func (o *Owner) DetachActiveClient() {
+	o.mu.Lock()
+	c := o.activeClient
+	if c != nil {
+		if _, ok := o.clients[c]; !ok {
+			c = nil
+		}
+	}
+	o.activeClient = nil
+	o.mu.Unlock()
+	if c != nil {
+		c.mu.Lock()
+		_ = c.conn.Close()
+		c.mu.Unlock()
 	}
 }
 

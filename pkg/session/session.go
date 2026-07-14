@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,13 +24,15 @@ type ExitMsg struct {
 
 // Session owns a PTY/ConPTY and the process running inside it.
 type Session struct {
-	mu      sync.Mutex
-	index   int
-	cmd     []string
-	cmdLine string
-	title   string
-	screen  *VTScreen
-	exited  bool
+	mu        sync.Mutex
+	index     int
+	cmd       []string
+	cmdLine   string
+	workDir   string
+	title     string
+	screen    *VTScreen
+	exited    bool
+	processID int
 
 	// rw is the bidirectional channel to the child process (unix pty master,
 	// Windows ConPTY pipe pair, or SSH remote PTY). Set by Start().
@@ -163,6 +166,50 @@ func (s *Session) CmdLine() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cmdLine
+}
+
+func (s *Session) IsInteractiveShell() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sshClient != nil || len(s.cmd) == 0 {
+		return false
+	}
+	name := strings.ToLower(filepath.Base(s.cmd[0]))
+	shellName := strings.ToLower(filepath.Base(os.Getenv("SHELL")))
+	comspecName := strings.ToLower(filepath.Base(os.Getenv("COMSPEC")))
+	known := false
+	switch name {
+	case "sh", "bash", "dash", "zsh", "fish", "ksh", "csh", "tcsh", "nu", "nu.exe", "xonsh", "elvish",
+		"pwsh", "pwsh.exe", "powershell", "powershell.exe", "cmd", "cmd.exe":
+		known = true
+	}
+	if !known && name != shellName && name != comspecName {
+		return false
+	}
+	for _, arg := range s.cmd[1:] {
+		arg = strings.ToLower(arg)
+		switch {
+		case name == "cmd" || name == "cmd.exe":
+			if arg == "/c" {
+				return false
+			}
+		case name == "pwsh" || name == "pwsh.exe" || name == "powershell" || name == "powershell.exe":
+			if arg == "-c" || arg == "-command" || strings.HasPrefix(arg, "-command=") ||
+				arg == "-encodedcommand" || strings.HasPrefix(arg, "-encodedcommand=") {
+				return false
+			}
+		case arg == "--command", strings.HasPrefix(arg, "--command="),
+			strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(strings.TrimLeft(arg, "-"), "c"):
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Session) ConfiguredWorkingDirectory() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.workDir
 }
 
 func (s *Session) SSHConfig() (ssh_client.ResolvedConfig, bool) {

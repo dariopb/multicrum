@@ -14,13 +14,14 @@ func (s *Session) Start(cols, rows int) error {
 	if s.sshClient != nil {
 		return s.startSSH(cols, rows)
 	}
-	uc, err := console.NewUnixConsole(s.cmd, cols, rows)
+	uc, err := console.NewUnixConsole(s.cmd, cols, rows, s.workDir)
 	if err != nil {
 		return fmt.Errorf("Unix PTY start: %w", err)
 	}
 
 	s.mu.Lock()
 	s.rw = uc
+	s.processID = uc.PID()
 	s.resizeFn = func(cols, rows int) error {
 		return uc.Resize(cols, rows)
 	}

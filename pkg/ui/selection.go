@@ -67,10 +67,22 @@ func (s *state) selectionLines(idx int, vp *viewport.Model) []session.BufferLine
 		}
 		return sess.Screen().BufferLines()
 	}
-	rows := strings.Split(ansi.Strip(vp.GetContent()), "\n")
-	lines := make([]session.BufferLine, len(rows))
+	rows := strings.Split(vp.GetContent(), "\n")
+	visible := sess.Screen().VisibleLines()
+	cols := s.geometry().Pane.Width
+	lines := make([]session.BufferLine, 0, len(rows))
 	for i, row := range rows {
-		lines[i].Text = strings.TrimRight(row, " ")
+		_, wrapped := softWrapRowsWithPlain([]string{row}, cols)
+		// The viewport can add display rows when its pane is narrower than the
+		// PTY grid (for example after another viewer resized the session).
+		// Preserve those virtual rows exactly, then apply the terminal row's
+		// own wrap boundary to the final segment when the painted snapshot
+		// still matches the emulator.
+		if len(wrapped) > 0 && i < len(visible) &&
+			strings.TrimRight(ansi.Strip(row), " ") == visible[i].Text {
+			wrapped[len(wrapped)-1].SoftWrap = visible[i].SoftWrap
+		}
+		lines = append(lines, wrapped...)
 	}
 	return lines
 }

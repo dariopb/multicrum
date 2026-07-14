@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -12,6 +13,7 @@ type contextMenuKind int
 const (
 	sessionContextMenu contextMenuKind = iota
 	connectionContextMenu
+	appContextMenu
 )
 
 type contextMenu struct {
@@ -21,6 +23,8 @@ type contextMenu struct {
 	pointerY int
 	hover    int
 }
+
+const appContextMenuDetachOption = 7
 
 func (s *state) openContextMenu(kind contextMenuKind, target, pointerX, pointerY int) {
 	s.contextMenu = contextMenu{
@@ -56,6 +60,23 @@ func (m Model) contextMenuLabels() []string {
 }
 
 func (m Model) contextMenuOptions() []string {
+	if m.s.contextMenu.kind == appContextMenu {
+		mouseMode := "select"
+		if m.s.mouseCapture {
+			mouseMode = "app"
+		}
+		return []string{
+			"Help",
+			"New Session",
+			"Sessions",
+			"New Connection",
+			"Connections",
+			fmt.Sprintf("Toggle Mouse (%s)", mouseMode),
+			"Save Layout",
+			"Detach",
+			"Quit",
+		}
+	}
 	return []string{"Focus", "Rename", "Move", "Remove"}
 }
 
@@ -65,22 +86,22 @@ func (m Model) renderContextMenu() string {
 	return padBoxWithStyle(m.contextMenuLabels(), 0, helpModalStyle.Padding(0, 1))
 }
 
-// contextMenuBounds keeps the menu anchored beside the tab that opened it,
-// while ensuring it remains entirely inside the renderable pane. Session tabs
-// sit above the pane, so their menu opens immediately below; connection tabs
-// sit below it, so their menu opens immediately above.
+// contextMenuBounds uses screen coordinates so menus opened from the vertical
+// rail stay at the pointer instead of being translated into the terminal pane.
 func (m Model) contextMenuBounds() (left, top, width, height int) {
 	geom := m.s.geometry()
-	cols, rows := geom.Pane.Width, geom.Pane.Height
+	cols, rows := geom.Screen.Width, geom.Screen.Height
 	box := m.renderContextMenu()
 	width = lipgloss.Width(box)
 	height = lipgloss.Height(box)
-	left = m.s.contextMenu.pointerX - geom.Pane.X
-	top = m.s.contextMenu.pointerY - geom.Pane.Y
+	left = m.s.contextMenu.pointerX
+	top = m.s.contextMenu.pointerY
 	if m.s.contextMenu.kind == sessionContextMenu {
-		top = 0 // Session tabs open immediately below the tab bar.
-	} else if geom.ConnectionRail.Width > 0 {
-		left = 0 // Rail menus open beside the rail, inside the main column.
+		top = geom.TabBar.Y + geom.TabBar.Height
+	} else if m.s.contextMenu.kind == appContextMenu {
+		top = m.s.contextMenu.pointerY + 1
+	} else if geom.ConnectionRail.Width == 0 {
+		top = geom.StatusBar.Y - height
 	}
 	if left < 0 {
 		left = 0
@@ -100,15 +121,13 @@ func (m Model) contextMenuBounds() (left, top, width, height int) {
 	} else if top+height > rows {
 		top = rows - height
 	}
-	left += geom.Pane.X
-	top += geom.Pane.Y
 	return
 }
 
-func (m Model) overlayContextMenu(pane string) string {
+func (m Model) overlayContextMenu(frame string) string {
 	left, top, _, _ := m.contextMenuBounds()
 	geom := m.s.geometry()
-	return overlayBoxAt(pane, m.renderContextMenu(), left-geom.Pane.X, top-geom.Pane.Y, geom.Pane.Width, geom.Pane.Height)
+	return overlayBoxAt(frame, m.renderContextMenu(), left, top, geom.Screen.Width, geom.Screen.Height)
 }
 
 // handleContextMenuMouse dispatches the clicked menu option by entering the
@@ -137,11 +156,23 @@ func (s *state) handleContextMenuMouse(m Model, ev mouseEvent) tea.Cmd {
 	}
 	menu := s.contextMenu
 	s.contextMenu = contextMenu{}
+	if menu.kind == appContextMenu {
+		s.mode = modeNormal
+		if option == appContextMenuDetachOption {
+			if s.detachClient != nil {
+				s.detachClient()
+			}
+			return nil
+		}
+		_, cmd := s.handleShortcut(m, appContextMenuKey(option))
+		return cmd
+	}
 	if menu.kind == sessionContextMenu {
 		s.openSessionSelector()
 		s.selectCursor = s.filteredSessionCursorForIndex(menu.target)
 		return s.handleSelectKey(m, contextMenuKey(option))
 	}
+
 	s.openConnectionsModal()
 	s.connCursor = s.filteredCursorForIndex(menu.target)
 	return s.handleConnectionsKey(m, contextMenuKey(option))
@@ -155,6 +186,28 @@ func (m Model) contextMenuOptionAt(ev mouseEvent) int {
 		return -1
 	}
 	return option
+}
+
+func appContextMenuKey(option int) tea.KeyPressMsg {
+	ctrlAlt := tea.ModCtrl | tea.ModAlt
+	switch option {
+	case 0:
+		return tea.KeyPressMsg(tea.Key{Code: '`', Mod: tea.ModAlt})
+	case 1:
+		return tea.KeyPressMsg(tea.Key{Code: 't', Mod: ctrlAlt})
+	case 2:
+		return tea.KeyPressMsg(tea.Key{Code: 's', Mod: ctrlAlt})
+	case 3:
+		return tea.KeyPressMsg(tea.Key{Code: 'c', Mod: ctrlAlt})
+	case 4:
+		return tea.KeyPressMsg(tea.Key{Code: 'o', Mod: ctrlAlt})
+	case 5:
+		return tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter, Mod: tea.ModAlt})
+	case 6:
+		return tea.KeyPressMsg(tea.Key{Code: 'p', Mod: ctrlAlt})
+	default:
+		return tea.KeyPressMsg(tea.Key{Code: 'q', Mod: ctrlAlt})
+	}
 }
 
 func contextMenuKey(option int) tea.KeyPressMsg {

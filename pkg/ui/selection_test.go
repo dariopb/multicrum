@@ -65,6 +65,31 @@ func TestLiveSelectionUsesRenderedViewportSnapshot(t *testing.T) {
 	}
 }
 
+func TestLiveSelectionPreservesMatchingSoftWrapMetadata(t *testing.T) {
+	m := NewModel([]string{"bash"}, 5, 6)
+	m.s.manager = session.NewManager(10, 4, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	sess, err := m.s.manager.New([]string{"sh"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	sess.Screen().Write([]byte("\x1b[2J\x1b[Habcdefgh\r\nnext"))
+	m.s.ensureViewport(0, 5, 6)
+	vp := m.s.viewports[0]
+	vp.SetContent(sess.Screen().Render())
+
+	lines := m.s.selectionLines(0, vp)
+	if len(lines) < 2 || lines[0].Text != "abcde" || lines[1].Text != "fgh" || !lines[0].SoftWrap {
+		t.Fatalf("live selection lines = %#v, want pane-wrapped abcdefgh rows", lines)
+	}
+	m.s.sel = selection{startL: 0, startC: 0, endL: 1, endC: 2, hasRange: true}
+	if got := m.s.selectionText(); got != "abcdefgh" {
+		t.Fatalf("selectionText() = %q, want joined soft-wrapped line", got)
+	}
+}
+
 func TestScrollbackSelectionUsesDisplayedWrappedRows(t *testing.T) {
 	for _, layout := range []connectionLayout{connectionLayoutBottom, connectionLayoutLeft} {
 		t.Run(string(layout), func(t *testing.T) {

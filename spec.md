@@ -89,7 +89,7 @@ pkg/
     frame_test.go
     protocol.go          # hello/resize protocol structs
     server_unix.go       # Unix socket owner + attach client
-    server_windows.go    # unsupported stubs on Windows
+    server_windows.go    # Windows loopback-TCP owner + attach client
     fanout.go            # TTY-preserving output fan-out writer
   session/
     doc.go
@@ -97,7 +97,9 @@ pkg/
     session.go           # Session lifecycle, read loop, title/cmdline state
     start_unix.go        # Unix PTY startup
     start_windows.go     # Windows ConPTY startup
-    vtscreen.go          # vt10x screen, ANSI rendering, scrollback, replay bytes
+    current_dir_linux.go # live child cwd lookup through /proc
+    current_dir_other.go # unsupported-platform cwd lookup fallback
+    vtscreen.go          # Charm vt screen, ANSI rendering, scrollback, replay bytes
   ssh_client/
     auth.go
     client.go
@@ -111,7 +113,6 @@ pkg/
     transport.go         # generic transport interface
     local.go             # no-op local transport
     websocket.go         # Echo/Gorilla WS server + embedded browser UI
-    static/              # embedded fonts and xterm.js assets
   ui/
     model.go             # Bubble Tea model, modes, Update/View, global shortcuts
     connections.go       # connection state and connection management helpers
@@ -139,7 +140,7 @@ Top-level docs/specs:
 - `README.md`: user-facing overview.
 - `AGENTS.md`: maintainer memory and operational gotchas.
 - `spec.md`: this current implementation spec.
-- `server-long-running.md`: detailed named-server/connections implementation notes.
+- `spec-vertical-layout.md`: detailed bottom/left connection-layout behavior.
 - `spec-ssh-client.md`: SSH package details.
 
 ## Dependencies
@@ -153,7 +154,7 @@ Current direct dependencies include:
 | TUI viewport | `charm.land/bubbles/v2/viewport` |
 | TUI styling | `charm.land/lipgloss/v2` |
 | Terminal ANSI helpers | `github.com/charmbracelet/x/ansi`, `github.com/charmbracelet/x/vt` |
-| VT screen model | `github.com/hinshun/vt10x` |
+| VT screen model | `github.com/charmbracelet/x/vt` |
 | Unix PTY | `github.com/creack/pty` |
 | Windows syscalls / ConPTY | `golang.org/x/sys/windows` |
 | SSH | `golang.org/x/crypto/ssh`, `github.com/kevinburke/ssh_config`, `github.com/skeema/knownhosts` |
@@ -173,6 +174,7 @@ Module Go version: `go 1.25.0`.
 3. Try `localserver.TryAttach(...)`.
    - If it attaches, the process becomes an attach client and returns when detached/disconnected.
    - Attached clients use raw terminal mode, forward stdin frames, receive owner-rendered TUI output frames, map bare LF output to CRLF for raw terminals, and forward resize frames where supported.
+   - A newly attached terminal receives an explicit full-frame snapshot with the current alternate-screen state, mouse mode, and exact cursor position/style/visibility. This bypasses the owner's already-painted renderer cache, so the client is never blank until its first input.
 4. If attach fails, spawn a detached hidden owner process by re-execing the current binary with hidden `--owner`.
 5. The parent waits for the server socket to become ready, then attaches the current terminal as the first client.
 6. The detached owner:
@@ -235,6 +237,7 @@ Frame types in `pkg/localserver/frame.go`:
 | `0x05` | `FrameResize` | attach → owner | JSON `Resize` |
 | `0x06` | `FrameControl` | control client → owner | JSON `ControlRequest` (`stop`) |
 | `0x07` | `FrameControlAck` | owner → control client | JSON `ControlAck` |
+| `0x08` | `FrameClipboard` | owner → attach | selected UTF-8 text for client-side clipboard handling |
 
 Protocol structs in `pkg/localserver/protocol.go`:
 
@@ -292,7 +295,17 @@ Attach-client detach:
 
 - `Alt+Ctrl+Q` (`ESC 0x11`) detaches the attached client only. Plain `Ctrl+Q`
   is forwarded to the TUI/child.
+- The left-rail `Multicrum` menu also exposes **Detach**. The owner tracks the
+  attach client that supplied the menu click and closes only that connection;
+  sessions, the daemon, and other clients continue running.
 - Owner `Ctrl+Alt+Q` opens shutdown confirmation and closes the server if confirmed.
+
+Clipboard delivery:
+
+- The owner sends selected text in `FrameClipboard` so the attach process can
+  copy in the environment of the receiving terminal.
+- Attach clients inside tmux/byobu use `tmux set-buffer -w`; other terminals
+  use OSC 52 output.
 
 `localserver.FanoutWriter` preserves TTY-like `Read`, `Write`, `Close`, and `Fd` behavior by delegating to the primary file when possible. Bubble Tea depends on this to detect output capabilities.
 
@@ -305,11 +318,14 @@ Current YAML tree:
 ```yaml
 server: default
 activeConnection: work
+connectionLayout: left
+connectionRailWidth: 15
 connections:
   - name: default
     sessions:
       - title: shell
         cmdline: bash
+        cwd: /home/user/project
   - name: work
     sessions:
       - title: logs
@@ -346,6 +362,7 @@ type SessionEntry struct {
     Title   string    `yaml:"title,omitempty"`
     CmdLine string    `yaml:"cmdline,omitempty"`
     Cmd     []string  `yaml:"cmd,omitempty"`
+    Cwd     string    `yaml:"cwd,omitempty"`
     SSH     *SSHEntry `yaml:"ssh,omitempty"`
 }
 
@@ -358,6 +375,7 @@ type Config struct {
     Server           string            `yaml:"server,omitempty"`
     ActiveConnection string            `yaml:"activeConnection,omitempty"`
     ConnectionLayout string            `yaml:"connectionLayout,omitempty" json:"connectionLayout,omitempty"`
+    ConnectionRailWidth int            `yaml:"connectionRailWidth,omitempty" json:"connectionRailWidth,omitempty"`
     Connections      []ConnectionEntry `yaml:"connections,omitempty"`
     Sessions         []SessionEntry    `yaml:"sessions,omitempty"` // legacy
 }
@@ -371,14 +389,25 @@ Loading rules:
 - Missing active connection becomes the first loaded connection.
 - `connectionLayout` accepts `bottom` (default) and `left`; empty or unknown
   values normalize to `bottom`.
+- `connectionRailWidth` persists the requested left-rail width. Missing or
+  non-positive values use the UI default, and rendering clamps it without
+  overwriting the saved preference when the terminal is narrow.
 - `cmdline` is parsed into startup `Cmd` with `ui.ParseCmdLine` when loaded through `Model.SetConfigConnections`; this is required so config-defined commands do not fall back to the process default `--cmd` (`bash`).
+- On Linux, saving a local interactive shell records its live working
+  directory as `cwd` through `/proc/<pid>/cwd`. Other platforms preserve a
+  configured `cwd` but do not discover a changed live directory. Startup uses
+  the saved directory when usable and otherwise silently falls back to the
+  owner's normal working directory.
+- `cwd` is not recorded for SSH sessions, non-shell commands, or shell
+  one-shots such as `bash -c`.
 - `ssh` entries recreate SSH-backed sessions with their saved target, port, key, known-host settings, and remote command.
 - `cmdline` is preserved in session state for round-trip saves.
 
 Saving rules:
 
 - `pkg/ui/layout_save.go` saves every connection, not just the active connection.
-- It writes `server`, `activeConnection`, `connectionLayout`, and `connections[].sessions[]`.
+- It writes `server`, `activeConnection`, `connectionLayout`,
+  `connectionRailWidth`, and `connections[].sessions[]`.
 - For each session, it prefers `Session.CmdLine()` when present; otherwise it writes argv-style `cmd`.
 - SSH-backed sessions also write an `ssh` block with target, port, key, default-key/agent flags, known-hosts override, and insecure host-key flag.
 - Top-level legacy `sessions` is omitted when connections exist.
@@ -452,6 +481,7 @@ Implemented operations:
 | Method | Purpose |
 |---|---|
 | `New(cmd []string)` | Create local/default-backend session. |
+| `NewInDir(cmd []string, cwd string)` | Create a local session in a saved directory, silently falling back when unusable. |
 | `NewWithSSH(cmd []string, sshClient *ssh_client.Client)` | Create local or SSH-backed session; rolls back if start fails. |
 | `Focus(index)` | Focus session. |
 | `Rename(index, title)` | Set title override. |
@@ -478,6 +508,8 @@ Current modes in `pkg/ui/model.go`:
 | `modeConnections` | Multi-function connections dialog. |
 | `modeQuitConfirm` | Owner/server quit confirmation. |
 | `modeDeleteConfirm` | Delete confirmation for sessions/connections/final-session cases. |
+| `modeScrollSearch` | Scrollback search or line-jump input. |
+| `modeContextMenu` | Session, connection, or global application context menu. |
 
 ### Global shortcuts
 
@@ -566,6 +598,10 @@ When a session exits, `modeExitPrompt` offers respawn/remove.
 Rules:
 
 - The dialog is intentionally non-dismissible with Esc/N/Q, because closing it leaves focus on an exited, non-controllable session.
+- Mouse clicks may focus another session or connection while the prompt is
+  open; doing so closes the stale prompt just like keyboard focus switching.
+- A focused exited session keeps the normal active-tab background and adds the
+  `✗` marker, so focus remains visible.
 - User must respawn/remove, or use global shortcuts to create another session, switch session/connection, or quit.
 - Removing the final session in a connection always requires an additional confirmation.
 - If other connections exist, confirming final-session removal removes the whole now-empty connection and focuses another connection; the app does not exit.
@@ -727,18 +763,21 @@ WebSocket gotchas:
 
 `VTScreen` maintains:
 
-- `vt10x.Terminal` visible screen.
+- `vt.Emulator` visible screen.
 - Raw replay history capped at 256 KiB for browser snapshots.
 - TUI semantic scrollback capped at 10000 rendered lines.
 
 Important behavior:
 
-- `Render()` walks vt10x cells and emits ANSI SGR color sequences.
+- `Render()` walks Charm vt cells and emits ANSI SGR color sequences.
 - `RenderWithScrollback()` prepends semantic scrollback for local TUI browsing. It returns full, un-wrapped logical lines so copy/selection keep real line breaks; the scrollback pane re-wraps them to the pane width for display.
 - Logical-line capture treats a `CR`+`LF` pair as one line break, but a **lone** `CR` returns to column 0 and overwrites the current line in place (prompt redraws, progress bars). A bare `CR` does **not** commit a new logical line, so repeated prompt redraws no longer accumulate duplicate blank prompt lines in scrollback. The decision is deferred (`pendingCR`) so a `CR` at a read-buffer boundary is resolved by the next byte.
-- Scrollback pane rendering (`renderPaneContent`) windows content with the viewport's `YOffset`, which is measured in soft-wrapped row space. In scrollback mode it first expands each logical line into fixed-width wrapped rows (`softWrapRows`, mirroring `viewport.softWrap`) before applying `YOffset`; otherwise scrolling drifts and duplicates rows when lines are wider than the pane. The live/alt-screen path stays strictly no-wrap so cell-accurate grids (btop dialogs) never shift.
+- Scrollback pane rendering windows content with the viewport's `YOffset`,
+  which is measured in soft-wrapped row space. Scrollback is cached as
+  prewrapped ANSI/plain rows with `SoftWrap=false` on the viewport itself, so
+  offset changes remain constant-time instead of rewrapping the entire history.
 - `SetReplyWriter()` forwards CPR/DSR replies back to child PTY/SSH.
-- `translateSCORC` rewrites bare `ESC[u` to `ESC 8` before feeding vt10x because the Charm vt emulator lacks SCORC handling; raw browser history keeps original bytes.
+- `translateSCORC` rewrites bare `ESC[u` to `ESC 8` before feeding the Charm vt emulator because it lacks SCORC handling; raw browser history keeps original bytes.
 - `Resize()` reflows the visible screen on a size change by replaying a bounded tail of raw history (see Rendering and Resize Semantics).
 
 ## Keyboard Escape Stripping
@@ -777,6 +816,12 @@ TUI mouse modes:
   emulator cells was also wrong: a resize or child redraw may advance the
   emulator after the last render tick, making a visibly populated row select
   newer or blank content.
+- Live selection expands the painted viewport snapshot into the same virtual
+  rows Bubble Tea displays when the pane is narrower than the PTY grid.
+  `VTScreen.VisibleLines()` reconstructs terminal-grid soft-wrap boundaries
+  from logical lines, with full-width fallback for trailing-space, tab-expanded,
+  and cursor-redrawn rows. Copy joins both kinds of continuation row without a
+  newline while preserving proven CR/LF boundaries.
 - `mouse:app`: forward mouse events to the child only when it has enabled terminal mouse reporting.
 
 Right-clicking a session tab or connection tab opens a bordered context menu
@@ -787,6 +832,12 @@ target in the relevant selector and invokes its existing keyboard handler
 While open, it uses all-motion mouse reporting so the item under the pointer is
 highlighted with the modal selection style. Right-clicking another tab replaces
 the current menu with one for that tab.
+
+In left layout, clicking either mouse button on the `Multicrum` title opens a
+full-screen-coordinate global menu: Help, New Session, Sessions, New
+Connection, Connections, Toggle Mouse (showing `select` or `app`), Save Layout,
+Detach, and Quit. Detach targets only the client that generated the click;
+Quit uses the existing owner/server confirmation.
 
 The TUI's visible `[+] Ctrl+Alt+T` tab-bar affordance and Help status-bar
 affordance are also left-clickable. They dispatch the same existing new-session
@@ -801,6 +852,11 @@ mouse-enable is written before any client attaches, so on each client attach the
 owner re-asserts the enable sequence (`state.mouseEnableSequence()`) for the newly
 connected terminal — otherwise wheel/selection stay dead until the user toggles
 mouse mode twice.
+
+Attach handling also emits the complete current frame and cursor state. Raw
+snapshot output is CRLF-normalized and ends with an absolute cursor placement
+or explicit cursor hide, keeping the new terminal aligned with Bubble Tea's
+existing renderer state.
 
 Web mouse modes:
 

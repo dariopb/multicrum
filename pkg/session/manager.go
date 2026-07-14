@@ -68,12 +68,22 @@ func (m *SessionManager) SetSendExit(fn func(ExitMsg)) {
 
 // New creates, starts, and appends a new session.
 func (m *SessionManager) New(cmd []string) (*Session, error) {
-	return m.NewWithSSH(cmd, m.sshClient)
+	return m.newWithOptions(cmd, m.sshClient, "")
+}
+
+// NewInDir starts a local session in workDir when it is usable. An invalid
+// directory is ignored so stale saved layouts never prevent session startup.
+func (m *SessionManager) NewInDir(cmd []string, workDir string) (*Session, error) {
+	return m.newWithOptions(cmd, m.sshClient, workDir)
 }
 
 // NewWithSSH creates, starts, and appends a new session using sshClient when
 // non-nil, otherwise using the local PTY/ConPTY backend.
 func (m *SessionManager) NewWithSSH(cmd []string, sshClient *ssh_client.Client) (*Session, error) {
+	return m.newWithOptions(cmd, sshClient, "")
+}
+
+func (m *SessionManager) newWithOptions(cmd []string, sshClient *ssh_client.Client, workDir string) (*Session, error) {
 	m.mu.Lock()
 	idx := len(m.sessions)
 	s, err := newSession(idx, cmd, m.cols, m.rows, sshClient)
@@ -81,6 +91,7 @@ func (m *SessionManager) NewWithSSH(cmd []string, sshClient *ssh_client.Client) 
 		m.mu.Unlock()
 		return nil, fmt.Errorf("new session: %w", err)
 	}
+	s.workDir = workDir
 	s.SendOutput = m.SendOutput
 	s.SendExit = m.SendExit
 	m.sessions = append(m.sessions, s)

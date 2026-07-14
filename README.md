@@ -25,11 +25,13 @@ The child program or remote shell is treated as a black-box terminal: the app fo
   - typed local command,
   - one-off remote SSH session with target/port/password/key/remote command.
 - Session rename, kill, respawn/remove on exit, and filtered session picker.
-- Layout save/load for local sessions and SSH sessions, including remote commands.
+- Layout save/load for local sessions and SSH sessions, including remote commands and the live working directory of interactive local shells.
 - Optional xterm.js browser UI over WebSocket.
-- Mouse selection/copy mode that preserves soft-wrapped logical lines.
+- Mouse selection/copy mode that preserves logical lines across scrollback wraps, terminal-grid wraps, and narrower live viewport wraps. Right-click copies the current selection, including through tmux/byobu attach clients.
 - Right-click a session or connection tab for a modal-styled context menu with focus, rename, move, and remove actions.
+- In the left layout, clicking the `Multicrum` title opens global actions including Help, session/connection controls, mouse mode, save, client-only Detach, and server-wide Quit.
 - Centered dialogs support direct button/row clicks; drag session tabs/rows or connection pills/rail entries/rows to reorder them.
+- Exited-session prompts cannot be accidentally dismissed; mouse and keyboard can still switch away, and a focused faulted tab remains visibly selected with its `✗`.
 - Terminal-accurate resize: output reflows (re-wraps) when the pane is made narrower or wider — characters cropped by a shrink are restored on a later widen — and scrollback stays consistent while scrolling with the mouse wheel or `Ctrl+PgUp`/`Ctrl+PgDn`. Prompt redraws and progress bars overwrite in place instead of leaving duplicate lines.
 
 ## Build
@@ -63,6 +65,8 @@ Attach to or create a separate named server:
 
 If no live `work` server exists, the first command starts a detached owner daemon, waits for its local endpoint, then attaches the current terminal as a client. Closing or detaching that client does not stop the sessions; run `./multicrum --server work` later to reconnect.
 
+New attach clients receive the current frame, cursor position/style, alternate-screen state, and mouse mode immediately; no keypress is needed to trigger the first render.
+
 Lifecycle commands:
 
 ```bash
@@ -72,6 +76,8 @@ Lifecycle commands:
 ```
 
 `list` and `status` show the server PID, local endpoint path, and startup settings such as command, config path, WebSocket address, token presence, and SSH options. Token values are never printed; only `token=set` is shown. Unix uses Unix sockets; Windows stores a per-user loopback TCP address file under the multicrum runtime directory.
+
+On Linux, saving a layout records the live `cwd` for local interactive shells; configured `cwd` values also round-trip on other platforms. Restored shells try to start there and silently fall back to the owner working directory if the saved path is missing or inaccessible. SSH sessions, non-shell commands, and shell one-shots such as `bash -c` do not save `cwd`.
 
 Local command:
 
@@ -157,6 +163,8 @@ http://localhost:9999/?token=mytoken
 | `Alt+1..9` | Jump to session N in the active connection. |
 | `Ctrl+Alt+M` | Toggle mouse mode: selection/copy vs app forwarding. |
 | `Ctrl+Alt+Q` | Quit the owner TUI/server; in an attached client, detach that client. |
+
+In the left layout, click the `Multicrum` title for the global action menu. **Detach** disconnects only the client that opened the menu; **Quit** opens the server-wide shutdown confirmation.
 
 In SSH sessions, OpenSSH-style escapes are supported at line start:
 

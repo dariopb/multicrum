@@ -16,7 +16,7 @@ func TestSetConfigConnectionsParsesCmdLine(t *testing.T) {
 				Name: "work",
 				Sessions: []config.SessionEntry{
 					{Title: "simple", CmdLine: "python -m http.server"},
-					{Title: "shell", CmdLine: "echo $HOME"},
+					{Title: "shell", CmdLine: "echo $HOME", Cwd: "/tmp/project"},
 				},
 			},
 		},
@@ -31,6 +31,9 @@ func TestSetConfigConnectionsParsesCmdLine(t *testing.T) {
 	}
 	if want := []string{"bash", "-c", "echo $HOME"}; !reflect.DeepEqual(entries[1].Cmd, want) {
 		t.Fatalf("shell cmd = %#v, want %#v", entries[1].Cmd, want)
+	}
+	if entries[1].Cwd != "/tmp/project" {
+		t.Fatalf("startup cwd = %q, want /tmp/project", entries[1].Cwd)
 	}
 }
 

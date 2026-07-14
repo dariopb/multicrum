@@ -198,6 +198,7 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 	}
 	model.SetClipboardOutput(output)
 	model.SetClipboardHandler(owner.WriteClipboard)
+	model.SetDetachHandler(owner.DetachActiveClient)
 
 	var p *tea.Program
 	p = tea.NewProgram(

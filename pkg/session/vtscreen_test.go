@@ -219,10 +219,56 @@ func TestVisibleLinesMatchRenderAfterNarrowResize(t *testing.T) {
 	if len(rendered) != len(visible) {
 		t.Fatalf("Render rows = %d, VisibleLines rows = %d", len(rendered), len(visible))
 	}
+
 	for i, line := range rendered {
 		got := strings.TrimRight(line, " ")
 		if visible[i].Text != got {
 			t.Fatalf("row %d: VisibleLines = %q, Render = %q", i, visible[i].Text, got)
 		}
 	}
+}
+
+func TestVisibleLinesDistinguishesSoftWrapFromHardLineBreak(t *testing.T) {
+	t.Run("soft wrap", func(t *testing.T) {
+		s := NewVTScreen(5, 4)
+		s.Write([]byte("abcdefgh\r\nnext"))
+
+		lines := s.VisibleLines()
+		if len(lines) < 2 || lines[0].Text != "abcde" || lines[1].Text != "fgh" {
+			t.Fatalf("VisibleLines = %#v, want wrapped abcdefgh rows", lines)
+		}
+		if !lines[0].SoftWrap || lines[1].SoftWrap {
+			t.Fatalf("VisibleLines wrap metadata = %#v, want soft then hard", lines[:2])
+		}
+	})
+
+	t.Run("hard break at width", func(t *testing.T) {
+		s := NewVTScreen(5, 4)
+		s.Write([]byte("abcde\r\nnext"))
+
+		lines := s.VisibleLines()
+		if len(lines) == 0 || lines[0].SoftWrap {
+			t.Fatalf("VisibleLines wrap metadata = %#v, exact-width CRLF must remain hard", lines)
+		}
+	})
+
+	t.Run("soft wrap ending in space", func(t *testing.T) {
+		s := NewVTScreen(5, 4)
+		s.Write([]byte("abcd efgh\r\n"))
+
+		lines := s.VisibleLines()
+		if len(lines) < 2 || lines[0].Text != "abcd" || !lines[0].SoftWrap {
+			t.Fatalf("VisibleLines wrap metadata = %#v, trailing-space row must remain soft", lines)
+		}
+	})
+
+	t.Run("tab-expanded full width fallback", func(t *testing.T) {
+		s := NewVTScreen(10, 4)
+		s.Write([]byte("ab\tcdefgh\r\n"))
+
+		lines := s.VisibleLines()
+		if len(lines) < 2 || lines[0].Text != "ab      cd" || lines[1].Text != "efgh" || !lines[0].SoftWrap {
+			t.Fatalf("VisibleLines wrap metadata = %#v, tab-expanded row must remain soft", lines)
+		}
+	})
 }

@@ -59,6 +59,27 @@ type connectionState struct {
 	callbacksBound bool
 }
 
+func (m Model) localAttachSnapshot() string {
+	frame := strings.ReplaceAll(m.viewString(), "\n", "\r\n")
+	snapshot := ansi.SetModeAltScreenSaveCursor +
+		ansi.EraseEntireScreen +
+		ansi.CursorHomePosition +
+		frame +
+		m.s.mouseEnableSequence()
+	cursor := m.cursor()
+	if cursor == nil {
+		return snapshot + ansi.HideCursor
+	}
+	style := (int(cursor.Shape) * 2) + 1
+	if !cursor.Blink {
+		style++
+	}
+	return snapshot +
+		ansi.SetCursorStyle(style) +
+		ansi.CursorPosition(cursor.X+1, cursor.Y+1) +
+		ansi.ShowCursor
+}
+
 type state struct {
 	manager                *session.SessionManager
 	viewports              map[int]*viewport.Model
@@ -110,10 +131,12 @@ type state struct {
 	connectionHitboxes     []mouseHitbox
 	newSessionHitbox       mouseHitbox
 	newConnectionHitbox    mouseHitbox
+	appMenuHitbox          mouseHitbox
 	helpHitbox             mouseHitbox
 	connectionsHitbox      mouseHitbox
 	hasNewSessionHitbox    bool
 	hasNewConnectionHitbox bool
+	hasAppMenuHitbox       bool
 	hasHelpHitbox          bool
 	hasConnectionsHitbox   bool
 	mouseDrag              mouseDrag
@@ -127,6 +150,7 @@ type state struct {
 	initialCfg             []startupSession // sessions to spawn on Init (instead of agentCmd)
 	statusMsg              string           // transient status line (e.g. config save result)
 	clipboardWrite         func(string)
+	detachClient           func()
 	quitting               bool         // suppresses redraw after the terminal is explicitly cleared
 	renderPending          bool         // a render tick is in flight (coalescing PTY bursts)
 	scrollbackMode         map[int]bool // sessions currently scrolled up (need full scrollback in viewport)
@@ -163,6 +187,7 @@ type startupSession struct {
 	Title   string
 	Cmd     []string
 	CmdLine string
+	Cwd     string
 	SSH     *config.SSHEntry
 }
 
@@ -251,6 +276,10 @@ func (m *Model) SetClipboardHandler(handler func(string)) {
 		}
 		handler(text)
 	}
+}
+
+func (m *Model) SetDetachHandler(handler func()) {
+	m.s.detachClient = handler
 }
 
 // SetConfigPath records the path the layout-save shortcut writes to.
@@ -492,7 +521,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					sess, err = conn.manager.NewWithSSH(cmd, client)
 				} else {
-					sess, err = conn.manager.New(cmd)
+					sess, err = conn.manager.NewInDir(cmd, entry.Cwd)
 				}
 				if err != nil {
 					failed = append(failed, fmt.Sprintf("%s: %v", conn.name, err))
@@ -530,17 +559,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		attached := int(msg) > s.localClients
 		s.localClients = int(msg)
 		if attached {
-			// A newly attached client's terminal has not seen the mouse-enable
-			// sequence: bubbletea's renderer only emits it on the first flush /
-			// a MouseMode change, and for a detached owner that first flush
-			// happened with no client connected (or before this client
-			// attached), so the enable was lost. Re-assert it (and repaint) so
-			// wheel/selection work immediately without toggling mouse mode.
-			return m, tea.Batch(tea.ClearScreen, func() tea.Msg {
-				return tea.RawMsg{Msg: s.mouseEnableSequence()}
-			})
+			// The detached owner's renderer already believes the current frame
+			// is painted, but a newly attached terminal has never received it.
+			// Send the complete frame and cursor state explicitly so the new
+			// terminal matches the renderer's existing screen bookkeeping.
+			snapshot := m.localAttachSnapshot()
+			return m, func() tea.Msg {
+				return tea.RawMsg{Msg: snapshot}
+			}
 		}
-		return m, tea.ClearScreen
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		s.width = msg.Width
@@ -844,6 +872,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.mode == modeContextMenu {
 			return m, s.handleContextMenuMouse(m, ev)
 		}
+		if s.mode == modeExitPrompt {
+			if handled, cmd := s.handleMouseScopeClick(m, ev); handled {
+				return m, cmd
+			}
+		}
 		if s.centeredModalOpen() {
 			return m, s.handleModalMouse(m, ev)
 		}
@@ -1115,22 +1148,28 @@ func (m Model) viewString() string {
 	geom := s.geometry()
 	tabBar := m.renderTabBar()
 	pane := m.renderPane()
+	var frame string
 	if geom.ConnectionRail.Width == 0 {
 		status := m.renderStatusBar()
-		return strings.Join([]string{tabBar, pane, status}, "\n")
-	}
-	rail := m.renderConnectionRail(geom)
-	mainRows := append([]string{tabBar}, strings.Split(pane, "\n")...)
-	divider := dividerStyle.Render("│")
-	rows := make([]string, geom.Screen.Height)
-	for y := range rows {
-		main := strings.Repeat(" ", geom.TabBar.Width)
-		if y < len(mainRows) {
-			main = padLine(mainRows[y], geom.TabBar.Width)
+		frame = strings.Join([]string{tabBar, pane, status}, "\n")
+	} else {
+		rail := m.renderConnectionRail(geom)
+		mainRows := append([]string{tabBar}, strings.Split(pane, "\n")...)
+		divider := dividerStyle.Render("│")
+		rows := make([]string, geom.Screen.Height)
+		for y := range rows {
+			main := strings.Repeat(" ", geom.TabBar.Width)
+			if y < len(mainRows) {
+				main = padLine(mainRows[y], geom.TabBar.Width)
+			}
+			rows[y] = padLine(rail[y], geom.ConnectionRail.Width) + divider + main
 		}
-		rows[y] = padLine(rail[y], geom.ConnectionRail.Width) + divider + main
+		frame = strings.Join(rows, "\n")
 	}
-	return strings.Join(rows, "\n")
+	if s.mode == modeContextMenu {
+		frame = m.overlayContextMenu(frame)
+	}
+	return frame
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1511,8 +1550,6 @@ func (s *state) handleExitPromptKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 	case tea.KeyEnter:
 		return s.resolveExitPrompt(m)
 	case tea.KeyEscape:
-		s.mode = modeNormal
-		s.exitError = ""
 		return nil
 	}
 	switch msg.String() {
@@ -1986,6 +2023,8 @@ func (m Model) renderTabBar() string {
 		label := fmt.Sprintf("[%d] %s", sess.Index()+1, sess.Title())
 		var tab string
 		switch {
+		case sess.Exited() && sess.Index() == focused:
+			tab = tabActiveStyle.Render(label + " ✗")
 		case sess.Exited():
 			tab = tabExitedStyle.Render(label + " ✗")
 		case sess.Index() == focused:
@@ -2179,8 +2218,6 @@ func (m Model) renderPane() string {
 		return m.overlayBox(pane, m.renderQuitConfirmModal())
 	case modeDeleteConfirm:
 		return m.overlayBox(pane, m.renderDeleteConfirmModal())
-	case modeContextMenu:
-		return m.overlayContextMenu(pane)
 	}
 	return pane
 }

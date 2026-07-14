@@ -23,6 +23,7 @@ type SessionEntry struct {
 	Title   string    `yaml:"title,omitempty"`
 	CmdLine string    `yaml:"cmdline,omitempty"`
 	Cmd     []string  `yaml:"cmd,omitempty"`
+	Cwd     string    `yaml:"cwd,omitempty"`
 	SSH     *SSHEntry `yaml:"ssh,omitempty"`
 }
 

@@ -107,7 +107,11 @@ Implemented in `pkg/ssh_client/`:
 - `main.go` exposes `--ssh`, `-i/--ssh-key`, `--ssh-passwd`, `--ssh-use-default-keys`, `--ssh-agent`, `--ssh-known-hosts`, and `--ssh-insecure-ignore-host-key`.
 - `ui.NewModelWithSSH` passes the default SSH client factory into `SessionManager`.
 - `Ctrl+Alt+T` opens `modeNewSession`, where Enter keeps the old/default behavior and the user can choose a typed local command or a remote SSH target/password/key/command. Errors remain inline in the modal and wrap across at least four lines.
-- Mouse selection/copy is implemented through `pkg/ui/selection.go` and `pkg/ui/clipboard.go`; `VTScreen.BufferLines()` is used to preserve soft-wrap semantics.
+- Mouse selection/copy is implemented through `pkg/ui/selection.go` and
+  `pkg/ui/clipboard.go`. Scrollback uses cached logical `BufferLines`; live
+  mode uses the last painted viewport snapshot plus `VisibleLines` wrap
+  metadata so terminal-grid and narrower-pane continuation rows copy without
+  inserted newlines.
 
 ## Proposed Package Layout
 
@@ -351,7 +355,8 @@ Do not log passwords or private key material.
 ### Phase 2: Interactive session backend
 
 - Implement `RemoteSession` with `Read`, `Write`, `Resize`, `Close`, `Done`.
-- Verify with a small smoke test that remote shell output passes through vt10x.
+- Verify with a small smoke test that remote shell output passes through the
+  Charm vt emulator.
 - Ensure resize propagation works.
 
 ### Phase 3: CLI and multiplexer integration

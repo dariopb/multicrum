@@ -34,6 +34,7 @@ type hitboxAction int
 const (
 	hitboxSession hitboxAction = iota
 	hitboxConnection
+	hitboxAppMenu
 	hitboxNewSession
 	hitboxNewConnection
 	hitboxHelp
@@ -95,6 +96,12 @@ func (s *state) handleMouseScopeClick(m Model, ev mouseEvent) (bool, tea.Cmd) {
 		return false, nil
 	}
 	geom := s.geometry()
+	if s.hasAppMenuHitbox && (ev.Button == tea.MouseLeft || ev.Button == tea.MouseRight) {
+		if _, ok := hitboxAt([]mouseHitbox{s.appMenuHitbox}, ev.X, ev.Y); ok {
+			s.openContextMenu(appContextMenu, -1, ev.X, ev.Y)
+			return true, nil
+		}
+	}
 	if ev.Button == tea.MouseLeft && geom.Contains(geom.ConnectionDivider, ev.X, ev.Y) {
 		s.mouseDrag = mouseDrag{kind: mouseDragConnectionDivider}
 		return true, nil
@@ -128,6 +135,16 @@ func (s *state) handleMouseScopeClick(m Model, ev mouseEvent) (bool, tea.Cmd) {
 			return false, nil
 		}
 		s.clearSelection()
+		if s.mode == modeExitPrompt {
+			if s.manager != nil && box.Index != s.manager.FocusedIndex() {
+				s.mode = modeNormal
+				s.exitError = ""
+				s.manager.Focus(box.Index)
+				s.refreshFocused()
+				s.notifyMeta()
+			}
+			return true, nil
+		}
 		if s.manager != nil {
 			s.mouseDrag = mouseDrag{
 				kind:    mouseDragSessionTab,
@@ -145,6 +162,14 @@ func (s *state) handleMouseScopeClick(m Model, ev mouseEvent) (bool, tea.Cmd) {
 			return false, nil
 		}
 		s.clearSelection()
+		if s.mode == modeExitPrompt {
+			if box.Index >= 0 && box.Index < len(s.connections) && box.Index != s.activeConn {
+				s.mode = modeNormal
+				s.exitError = ""
+				s.focusConnection(box.Index)
+			}
+			return true, nil
+		}
 		if box.Index >= 0 && box.Index < len(s.connections) {
 			s.mouseDrag = mouseDrag{
 				kind:       mouseDragConnectionItem,

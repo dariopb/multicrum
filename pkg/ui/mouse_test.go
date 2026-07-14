@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -69,6 +70,45 @@ func TestMouseEnableSequenceMatchesMode(t *testing.T) {
 	seq = m.s.mouseEnableSequence()
 	if !strings.Contains(seq, ansi.SetModeMouseAnyEvent) || !strings.Contains(seq, ansi.SetModeMouseExtSgr) {
 		t.Fatalf("app-mode enable seq %q missing any-event/SGR enable", seq)
+	}
+}
+
+func TestLocalAttachSnapshotIncludesCurrentFrameAndTerminalModes(t *testing.T) {
+	m, _ := mouseTestModel(t, 1)
+	m.s.ensureViewport(0, 80, 24)
+	vp := m.s.viewports[0]
+	vp.SetContent("attached frame")
+
+	snapshot := m.localAttachSnapshot()
+	for _, want := range []string{
+		ansi.SetModeAltScreenSaveCursor,
+		ansi.EraseEntireScreen,
+		ansi.CursorHomePosition,
+		"attached frame",
+		ansi.SetModeMouseButtonEvent,
+		ansi.SetModeMouseExtSgr,
+		ansi.ShowCursor,
+	} {
+		if !strings.Contains(snapshot, want) {
+			t.Fatalf("attach snapshot missing %q: %q", want, snapshot)
+		}
+	}
+	if strings.Contains(strings.ReplaceAll(snapshot, "\r\n", ""), "\n") {
+		t.Fatalf("attach snapshot contains bare newlines: %q", snapshot)
+	}
+	cursorAtEnd := regexp.MustCompile(
+		`\x1b\[[1-9][0-9]*;[1-9][0-9]*H` + regexp.QuoteMeta(ansi.ShowCursor) + `$`,
+	)
+	if !cursorAtEnd.MatchString(snapshot) {
+		t.Fatalf("attach snapshot does not end at the active cursor: %q", snapshot)
+	}
+	if strings.HasSuffix(snapshot, ansi.CursorPosition(m.s.width, m.s.height)+ansi.ShowCursor) {
+		t.Fatalf("attach snapshot leaves cursor in bottom-right cell: %q", snapshot)
+	}
+
+	m.s.mode = modeHelp
+	if snapshot := m.localAttachSnapshot(); !strings.HasSuffix(snapshot, ansi.HideCursor) {
+		t.Fatalf("modal attach snapshot must hide cursor: %q", snapshot)
 	}
 }
 

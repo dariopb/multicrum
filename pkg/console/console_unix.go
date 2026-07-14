@@ -17,14 +17,26 @@ type UnixConsole struct {
 	done    chan struct{}
 }
 
-func NewUnixConsole(args []string, cols, rows int) (*UnixConsole, error) {
+func NewUnixConsole(args []string, cols, rows int, workDir string) (*UnixConsole, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("empty command")
 	}
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
-
+	newCommand := func(dir string) *exec.Cmd {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+		cmd.Dir = dir
+		return cmd
+	}
+	dir := ""
+	if info, err := os.Stat(workDir); err == nil && info.IsDir() {
+		dir = workDir
+	}
+	cmd := newCommand(dir)
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	if err != nil && dir != "" {
+		cmd = newCommand("")
+		ptmx, err = pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
@@ -59,5 +71,12 @@ func (uc *UnixConsole) Resize(cols, rows int) error {
 }
 
 func (uc *UnixConsole) Done() <-chan struct{} { return uc.done }
+
+func (uc *UnixConsole) PID() int {
+	if uc.command == nil || uc.command.Process == nil {
+		return 0
+	}
+	return uc.command.Process.Pid
+}
 
 var _ io.ReadWriteCloser = (*UnixConsole)(nil)

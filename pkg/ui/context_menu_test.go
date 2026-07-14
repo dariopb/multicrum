@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"multicrum/pkg/session"
 )
 
@@ -105,6 +107,7 @@ func TestConnectionTabContextMenuDispatchesFocusKey(t *testing.T) {
 			scrollbackMode: make(map[int]bool),
 		},
 	}
+
 	m.s.activeConn = 0
 	m.s.syncActiveConnectionFields()
 
@@ -123,5 +126,147 @@ func TestConnectionTabContextMenuDispatchesFocusKey(t *testing.T) {
 	_ = m.s.handleContextMenuMouse(*m, contextMenuOptionClick(m))
 	if m.s.mode != modeNormal || m.s.activeConn != 1 {
 		t.Fatalf("focus menu action left mode=%v active=%d, want normal/1", m.s.mode, m.s.activeConn)
+	}
+}
+
+func TestVerticalConnectionContextMenuUsesScreenCoordinates(t *testing.T) {
+	m := NewModel([]string{"bash"}, 80, 24)
+	manager := contextMenuTestManager(t, 64, 23, 1)
+	defer manager.CloseAll()
+	m.s.manager = manager
+	m.s.connections[0].manager = manager
+	m.SetConnectionLayout("left")
+	_ = m.renderConnectionRail(m.s.geometry())
+
+	target := m.s.connectionHitboxes[0]
+	x := target.Bounds.X + 2
+	y := target.Bounds.Y + 1
+	if handled, _ := m.s.handleMouseScopeClick(*m, mouseEvent{
+		X: x, Y: y, Button: tea.MouseRight, Action: mousePress,
+	}); !handled {
+		t.Fatal("right-click on vertical connection was not handled")
+	}
+
+	left, top, _, _ := m.contextMenuBounds()
+	if left != x || top != y {
+		t.Fatalf("vertical menu position = (%d,%d), want pointer (%d,%d)", left, top, x, y)
+	}
+	frame := m.viewString()
+	rows := strings.Split(frame, "\n")
+	if top >= len(rows) || lipgloss.Width(rows[top]) != m.s.geometry().Screen.Width {
+		t.Fatal("full-screen context-menu overlay changed frame geometry")
+	}
+}
+
+func TestVerticalBrandOpensGlobalActionsMenu(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		button tea.MouseButton
+	}{
+		{name: "left", button: tea.MouseLeft},
+		{name: "right", button: tea.MouseRight},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModel([]string{"bash"}, 80, 24)
+			manager := contextMenuTestManager(t, 64, 23, 1)
+			defer manager.CloseAll()
+			m.s.manager = manager
+			m.s.connections[0].manager = manager
+			m.SetConnectionLayout("left")
+			_ = m.renderConnectionRail(m.s.geometry())
+
+			hit := m.s.appMenuHitbox.Bounds
+			if handled, _ := m.s.handleMouseScopeClick(*m, mouseEvent{
+				X: hit.X + 1, Y: hit.Y, Button: tc.button, Action: mousePress,
+			}); !handled {
+				t.Fatal("Multicrum click was not handled")
+			}
+			if m.s.mode != modeContextMenu || m.s.contextMenu.kind != appContextMenu {
+				t.Fatalf("brand menu mode=%v menu=%#v", m.s.mode, m.s.contextMenu)
+			}
+			want := []string{
+				"Help", "New Session", "Sessions", "New Connection",
+				"Connections", "Toggle Mouse (select)", "Save Layout", "Detach", "Quit",
+			}
+			if got := m.contextMenuOptions(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("global menu options = %#v, want %#v", got, want)
+			}
+
+		})
+	}
+}
+
+func TestGlobalActionsMenuShowsCurrentMouseMode(t *testing.T) {
+	m := NewModel([]string{"bash"}, 80, 24)
+	m.s.contextMenu.kind = appContextMenu
+	if got := m.contextMenuOptions()[5]; got != "Toggle Mouse (select)" {
+		t.Fatalf("select-mode label = %q", got)
+	}
+	m.s.mouseCapture = true
+	if got := m.contextMenuOptions()[5]; got != "Toggle Mouse (app)" {
+		t.Fatalf("app-mode label = %q", got)
+	}
+}
+
+func TestGlobalActionsMenuDispatchesExistingShortcuts(t *testing.T) {
+	m := NewModel([]string{"bash"}, 80, 24)
+	manager := contextMenuTestManager(t, 64, 23, 1)
+	defer manager.CloseAll()
+	m.s.manager = manager
+	m.s.connections[0].manager = manager
+	m.SetConnectionLayout("left")
+
+	m.s.openContextMenu(appContextMenu, -1, 1, 0)
+	left, top, _, _ := m.contextMenuBounds()
+	toggleMouse := mouseEvent{
+		X: left, Y: top + 1 + 5, Button: tea.MouseLeft, Action: mousePress,
+	}
+	if cmd := m.s.handleContextMenuMouse(*m, toggleMouse); cmd != nil {
+		t.Fatalf("toggle mouse command = %v, want nil", cmd)
+	}
+	if !m.s.mouseCapture || m.s.mode != modeNormal {
+		t.Fatalf("toggle mouse left capture=%v mode=%v", m.s.mouseCapture, m.s.mode)
+	}
+
+	m.s.openContextMenu(appContextMenu, -1, 1, 0)
+	left, top, _, _ = m.contextMenuBounds()
+	detached := false
+	m.SetDetachHandler(func() { detached = true })
+	detach := mouseEvent{
+		X: left, Y: top + 1 + appContextMenuDetachOption, Button: tea.MouseLeft, Action: mousePress,
+	}
+	if cmd := m.s.handleContextMenuMouse(*m, detach); cmd != nil {
+		t.Fatalf("detach command = %v, want nil", cmd)
+	}
+	if !detached || m.s.mode != modeNormal {
+		t.Fatalf("detach menu detached=%v mode=%v", detached, m.s.mode)
+	}
+
+	m.s.openContextMenu(appContextMenu, -1, 1, 0)
+	left, top, _, _ = m.contextMenuBounds()
+	quit := mouseEvent{
+		X: left, Y: top + 1 + 8, Button: tea.MouseLeft, Action: mousePress,
+	}
+	_ = m.s.handleContextMenuMouse(*m, quit)
+	if m.s.mode != modeQuitConfirm {
+		t.Fatalf("quit menu mode = %v, want quit confirmation", m.s.mode)
+	}
+}
+
+func TestGlobalActionsMenuUsesShortcutBindings(t *testing.T) {
+	want := map[int]string{
+		0: shortcutHelp,
+		1: shortcutNew,
+		2: shortcutSessions,
+		3: shortcutNewConn,
+		4: shortcutConnections,
+		5: shortcutMouse,
+		6: shortcutSaveLayout,
+		8: shortcutQuit,
+	}
+	for option, shortcut := range want {
+		if got := appContextMenuKey(option).Keystroke(); got != shortcut {
+			t.Errorf("option %d keystroke = %q, want %q", option, got, shortcut)
+		}
 	}
 }

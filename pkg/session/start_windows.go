@@ -16,13 +16,14 @@ func (s *Session) Start(cols, rows int) error {
 		return s.startSSH(cols, rows)
 	}
 	cmd := strings.Join(s.cmd, " ")
-	wc, err := console.NewWinConsole(cmd, cols, rows)
+	wc, err := console.NewWinConsole(cmd, cols, rows, s.workDir)
 	if err != nil {
 		return fmt.Errorf("ConPTY start: %w", err)
 	}
 
 	s.mu.Lock()
 	s.rw = wc
+	s.processID = wc.PID()
 	s.resizeFn = func(cols, rows int) error {
 		return wc.Resize(cols, rows)
 	}

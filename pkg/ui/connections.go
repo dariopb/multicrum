@@ -239,7 +239,7 @@ func (m *Model) SetConfigConnections(cfg *config.Config) {
 			if entry.CmdLine != "" {
 				cmd = ParseCmdLine(entry.CmdLine)
 			}
-			sessions = append(sessions, startupSession{Title: entry.Title, Cmd: cmd, CmdLine: entry.CmdLine, SSH: entry.SSH})
+			sessions = append(sessions, startupSession{Title: entry.Title, Cmd: cmd, CmdLine: entry.CmdLine, Cwd: entry.Cwd, SSH: entry.SSH})
 		}
 		entries = append(entries, startupConnection{Name: conn.Name, Sessions: sessions})
 	}
@@ -266,6 +266,7 @@ func (s *state) applyGeometry() {
 	s.connectionHitboxes = nil
 	s.hasNewSessionHitbox = false
 	s.hasNewConnectionHitbox = false
+	s.hasAppMenuHitbox = false
 	s.hasHelpHitbox = false
 	s.hasConnectionsHitbox = false
 	for _, conn := range s.connections {

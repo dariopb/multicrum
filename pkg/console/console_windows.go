@@ -21,7 +21,7 @@ type WinConsole struct {
 }
 
 // NewWinConsole launches cmdStr inside a ConPTY of the given size.
-func NewWinConsole(cmdStr string, cols, rows int) (*WinConsole, error) {
+func NewWinConsole(cmdStr string, cols, rows int, workDir string) (*WinConsole, error) {
 	// Pipe layout (mirrors go-pty exactly):
 	//   ptyIn    – ConPTY reads from here  (input path)  → we own the write end (inPipeOurs)
 	//   ptyOut   – ConPTY writes here      (output path) → we own the read end  (outPipeOurs)
@@ -91,16 +91,34 @@ func NewWinConsole(cmdStr string, cols, rows int) (*WinConsole, error) {
 	}
 
 	var pi windows.ProcessInformation
+	var currentDir *uint16
+	if info, statErr := os.Stat(workDir); statErr == nil && info.IsDir() {
+		currentDir, _ = windows.UTF16PtrFromString(workDir)
+	}
 	err = windows.CreateProcess(
 		nil,
 		cmdlinePtr,
 		nil, nil,
 		false,
 		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT,
-		nil, nil,
+		nil, currentDir,
 		&siEx.StartupInfo,
 		&pi,
 	)
+	if err != nil && currentDir != nil {
+		if retryCmdlinePtr, ptrErr := windows.UTF16PtrFromString(cmdStr); ptrErr == nil {
+			err = windows.CreateProcess(
+				nil,
+				retryCmdlinePtr,
+				nil, nil,
+				false,
+				windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT,
+				nil, nil,
+				&siEx.StartupInfo,
+				&pi,
+			)
+		}
+	}
 	attrList.Delete() // safe to delete after CreateProcess returns
 	if err != nil {
 		windows.ClosePseudoConsole(hpc)
@@ -149,5 +167,12 @@ func (wc *WinConsole) Resize(cols, rows int) error {
 }
 
 func (wc *WinConsole) Done() <-chan struct{} { return wc.done }
+
+func (wc *WinConsole) PID() int {
+	if wc.process == nil {
+		return 0
+	}
+	return wc.process.Pid
+}
 
 var _ io.ReadWriteCloser = (*WinConsole)(nil)

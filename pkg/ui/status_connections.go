@@ -43,6 +43,11 @@ func (m Model) renderConnectionRail(geom layoutGeometry) []string {
 		return rows
 	}
 	rows[0] = railBrandStyle.Render(padLine("Multicrum", geom.ConnectionRail.Width))
+	s.appMenuHitbox = mouseHitbox{
+		Bounds: rect{X: geom.ConnectionRail.X, Y: geom.ConnectionRail.Y, Width: lipgloss.Width("Multicrum"), Height: 1},
+		Action: hitboxAppMenu,
+	}
+	s.hasAppMenuHitbox = true
 	if len(rows) > 1 {
 		rows[1] = railInactiveStyle.Render(padLine("server: "+s.serverName, geom.ConnectionRail.Width))
 	}

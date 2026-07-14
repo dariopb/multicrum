@@ -61,8 +61,9 @@ type CursorInfo struct {
 // the row is soft-wrapped. The UI uses these to extract selection text with
 // correct line breaks.
 type BufferLine struct {
-	Text     string
-	SoftWrap bool
+	Text      string
+	SoftWrap  bool
+	WrapKnown bool
 }
 
 type logicalLine struct {
@@ -324,13 +325,13 @@ func wrappedLineCount(text string, width int) int {
 func appendWrappedBufferLines(out []BufferLine, text string, width int) []BufferLine {
 	runes := []rune(text)
 	if width <= 0 || len(runes) <= width {
-		return append(out, BufferLine{Text: text})
+		return append(out, BufferLine{Text: text, WrapKnown: true})
 	}
 	for len(runes) > width {
-		out = append(out, BufferLine{Text: string(runes[:width]), SoftWrap: true})
+		out = append(out, BufferLine{Text: string(runes[:width]), SoftWrap: true, WrapKnown: true})
 		runes = runes[width:]
 	}
-	return append(out, BufferLine{Text: string(runes)})
+	return append(out, BufferLine{Text: string(runes), WrapKnown: true})
 }
 
 func trimLastRune(b *strings.Builder) {
@@ -543,8 +544,10 @@ func (s *VTScreen) BufferLines() []BufferLine {
 // scrolling at the bottom), VisibleLines() always matches what the user sees —
 // e.g. immediately after `clear`, when the screen is a fresh top-aligned frame
 // with blank padding below the cursor rather than the tail of the logical
-// buffer. Rows are not marked SoftWrap: each visible row is copied as its own
-// line since the emulator grid does not preserve logical wrap boundaries.
+// buffer. SoftWrap is reconstructed from the bounded set of pending logical
+// lines when their wrapped rows still match the visible grid. Rows changed by
+// cursor-addressed applications remain hard boundaries because their logical
+// origin cannot be determined safely.
 func (s *VTScreen) VisibleLines() []BufferLine {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -552,7 +555,43 @@ func (s *VTScreen) VisibleLines() []BufferLine {
 	for y := 0; y < s.rows; y++ {
 		out = append(out, BufferLine{Text: strings.TrimRight(s.plainRowAtLocked(y), " ")})
 	}
+	logical := make([]BufferLine, 0, s.pendingRows+s.rows)
+	for _, line := range s.pendingLines {
+		logical = appendWrappedBufferLines(logical, line.Plain, s.cols)
+	}
+	if current := s.linePlain.String(); current != "" {
+		logical = appendWrappedBufferLines(logical, current, s.cols)
+	}
+	if len(logical) > s.rows*2 {
+		logical = logical[len(logical)-s.rows*2:]
+	}
+	applyMatchingWrapMetadata(out, logical)
+	for i := 0; i+1 < len(out); i++ {
+		if !out[i].WrapKnown && ansi.StringWidth(out[i].Text) >= s.cols {
+			out[i].SoftWrap = true
+		}
+	}
 	return out
+}
+
+func applyMatchingWrapMetadata(visible, logical []BufferLine) {
+	bestVisible, bestLogical, bestLen := 0, 0, 0
+	for vi := range visible {
+		for li := range logical {
+			n := 0
+			for vi+n < len(visible) && li+n < len(logical) &&
+				visible[vi+n].Text == strings.TrimRight(logical[li+n].Text, " ") {
+				n++
+			}
+			if n > bestLen {
+				bestVisible, bestLogical, bestLen = vi, li, n
+			}
+		}
+	}
+	for i := 0; i < bestLen; i++ {
+		visible[bestVisible+i].SoftWrap = logical[bestLogical+i].SoftWrap
+		visible[bestVisible+i].WrapKnown = true
+	}
 }
 
 func (s *VTScreen) plainRowAtLocked(y int) string {

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"multicrum/pkg/config"
+	"multicrum/pkg/session"
 )
 
 func sanitizePaste(in string) string {
@@ -36,16 +37,7 @@ func (s *state) saveLayout() {
 		sessions := conn.manager.Sessions()
 		entries := make([]config.SessionEntry, 0, len(sessions))
 		for _, sess := range sessions {
-			entry := config.SessionEntry{Title: sess.Title()}
-			if line := sess.CmdLine(); line != "" {
-				entry.CmdLine = line
-			} else {
-				entry.Cmd = sess.Cmd()
-			}
-			if sshCfg, ok := sess.SSHConfig(); ok {
-				entry.SSH = sshEntryFromResolved(sshCfg)
-			}
-			entries = append(entries, entry)
+			entries = append(entries, sessionEntryForSave(sess))
 		}
 		total += len(entries)
 		connections = append(connections, config.ConnectionEntry{Name: conn.name, Sessions: entries})
@@ -66,4 +58,23 @@ func (s *state) saveLayout() {
 		return
 	}
 	s.statusMsg = fmt.Sprintf("layout saved to %s (%d connections, %d sessions)", s.configPath, len(connections), total)
+}
+
+func sessionEntryForSave(sess *session.Session) config.SessionEntry {
+	entry := config.SessionEntry{Title: sess.Title()}
+	if line := sess.CmdLine(); line != "" {
+		entry.CmdLine = line
+	} else {
+		entry.Cmd = sess.Cmd()
+	}
+	if sshCfg, ok := sess.SSHConfig(); ok {
+		entry.SSH = sshEntryFromResolved(sshCfg)
+	} else if sess.IsInteractiveShell() {
+		if cwd, err := sess.CurrentDirectory(); err == nil {
+			entry.Cwd = cwd
+		} else {
+			entry.Cwd = sess.ConfiguredWorkingDirectory()
+		}
+	}
+	return entry
 }

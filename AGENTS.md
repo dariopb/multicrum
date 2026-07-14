@@ -7,7 +7,7 @@
 - A local Bubble Tea TUI.
 - An optional browser UI served over WebSocket with embedded xterm.js.
 
-Each session is backed by a real PTY/ConPTY and a `vt10x` screen model. The app treats child CLIs as black boxes and forwards terminal input/output rather than using any agent-specific protocol.
+Each session is backed by a real PTY/ConPTY and a Charm `vt.Emulator` screen model. The app treats child CLIs as black boxes and forwards terminal input/output rather than using any agent-specific protocol.
 
 ## Commands
 
@@ -111,7 +111,10 @@ ui.Model Update loop
 - `Ctrl+Up` / `Ctrl+Down`: scroll local TUI scrollback one line.
 - `Ctrl+Home` / `Ctrl+End`: jump to top/bottom of local TUI scrollback.
 - `Ctrl+Alt+Q`: owner TUI opens server quit confirmation; attached clients use `Ctrl+Alt+Q` to detach without killing sessions. Plain `Ctrl+Q` is forwarded.
-- Right-click a session tab or connection tab to open a modal-styled context menu anchored inside the pane next to it. Its focus, rename, move, and remove items must route through `handleSelectKey` / `handleConnectionsKey` with synthetic `Enter`, `R`, `M`, or `Delete` keys after selecting the clicked target; do not add a duplicate action implementation. `View()` uses `AllMotion` while `modeContextMenu` is open so the item beneath the pointer is highlighted with `selectorActiveStyle`; restore select mode by closing the menu. Right-clicking a second tab while a menu is open must replace it with the new tab's menu, not merely dismiss it.
+- Clicking the left-rail `Multicrum` title opens global actions. `Detach`
+  disconnects only the attach client that generated the click; `Quit` remains
+  the owner/server-wide confirmation.
+- Right-click a session tab or connection tab to open a modal-styled context menu in full-screen coordinates at the pointer. Its focus, rename, move, and remove items must route through `handleSelectKey` / `handleConnectionsKey` with synthetic `Enter`, `R`, `M`, or `Delete` keys after selecting the clicked target; do not add a duplicate action implementation. `View()` uses `AllMotion` while `modeContextMenu` is open so the item beneath the pointer is highlighted with `selectorActiveStyle`; restore select mode by closing the menu. Right-clicking a second tab while a menu is open must replace it with the new tab's menu, not merely dismiss it.
 - Left-click `[+] Ctrl+Alt+T` in the tab bar or the Help label in the status bar to dispatch the existing new-session or help shortcut. Their bounds are recorded as `newSessionHitbox` and `helpHitbox` while rendering; do not create duplicate action paths.
 
 Global shortcuts (`Ctrl+Alt+T`, `Ctrl+Alt+Left/Right`, `Ctrl+Alt+[`/`]`, `Ctrl+Alt+Q`) are centralized in `state.handleGlobalShortcut` and run before modal-specific handlers. Do not duplicate these bindings inside individual modal handlers; that caused regressions where exited-session dialogs blocked connection/session switching or quit.
@@ -220,19 +223,19 @@ When adding new code paths that mutate the session set (focus change, new sessio
 
 ## VTScreen Rendering and Replay
 
-`VTScreen` maintains two separate representations:
+`VTScreen` maintains separate representations:
 
-- `vt10x.Terminal` for visible screen state.
+- `vt.Emulator` for visible screen state.
 - `rawHistory` capped at 256 KiB for WebSocket replay.
 - TUI-only semantic scrollback capped at 10000 rendered lines.
 
 Important details:
 
-- `vt10x.String()` returns characters only and drops color attributes. The TUI must use `VTScreen.Render()`, which walks `vt10x.Cell()` and emits ANSI SGR sequences so Bubble Tea can show colors.
+- The emulator's plain string form drops color attributes. The TUI must use `VTScreen.Render()`, which walks `vt.Emulator.CellAt()` and emits ANSI SGR sequences so Bubble Tea can show colors.
 - xterm.js receives raw PTY bytes from `SendPTY()` and snapshots from `RawSnapshot()`.
 - `rawHistory` is not a full semantic terminal state; it is replay bytes for xterm. Keep the cap in mind when changing replay behavior.
-- `Render()` emits ANSI foreground/background color sequences from vt10x cell attributes. If changing vt10x or rendering libraries, verify both local TUI colors and browser xterm colors.
-- `RenderWithScrollback()` prepends captured scrolled-off lines to the current vt10x screen for local TUI scrolling/copying. WebSocket replay remains raw xterm bytes.
+- `Render()` emits ANSI foreground/background color sequences from Charm vt cell attributes. If changing the emulator or rendering libraries, verify both local TUI colors and browser xterm colors.
+- `RenderWithScrollback()` prepends captured scrolled-off lines to the current Charm vt screen for local TUI scrolling/copying. WebSocket replay remains raw xterm bytes.
 
 ### Resize reflow (`VTScreen.Resize`)
 
@@ -244,7 +247,7 @@ The underlying emulator does **not** reflow: shrinking width crops the right edg
 
 ### Scrollback pane soft-wrap alignment
 
-The TUI scrollback pane (`renderPaneContent`) windows content with the viewport's `YOffset`, which the viewport computes in **soft-wrapped** row space. `RenderWithScrollback()` returns full, un-wrapped logical lines (so copy/selection keep real line breaks), so in scrollback mode `renderPaneContent` must first expand each logical line into fixed-width wrapped rows (`softWrapRows`, mirroring `viewport.softWrap`) before applying `YOffset`. Without this the offset counts wrapped rows while the renderer indexes logical lines and scrolling drifts/duplicates rows. The live/alt-screen path keeps strict no-wrap behavior so cell-accurate grids (btop dialogs) never shift.
+The TUI scrollback pane's viewport `YOffset` is measured in **soft-wrapped** row space. `RenderWithScrollback()` returns full logical lines, so `setScrollbackContent` expands and caches matching ANSI/plain fixed-width rows before loading the viewport, then sets `SoftWrap=false`. This keeps wheel/keyboard offset changes constant-time and ensures selection/search use the exact displayed rows. Do not restore viewport-managed wrapping for scrollback; it recalculates and rejoins the full history on every offset change. The live/alt-screen source remains the cell-accurate VT grid, with selection separately expanding rows only when a narrower local pane displays virtual wraps.
 
 ### Mouse reporting must survive the startup input-mode reset and client attach
 
@@ -252,13 +255,15 @@ Two things must be true for wheel/selection to work from launch:
 
 1. `Model.Init()` runs `resetTerminalInputModes` (a `tea.RawMsg`) to clear stray legacy/keyboard input modes. It must **not** reset the button-event (1002), any-event (1003) or SGR-extended (1006) mouse modes; `Model.View()` owns those via `MouseMode` (`CellMotion` in select mode, `AllMotion` in app mode) and the renderer enables them on its first flush. Since the reset runs after that flush, resetting the mouse modes there disables reporting.
 
-2. **The bigger issue with a detached owner:** the owner's renderer emits the mouse-enable CSI only once (first flush / on a `MouseMode` change), and that first flush happens with no attach client connected — so the enable is written to the socket fan-out and lost. A later-attaching client's terminal therefore never receives `?1002h/?1006h`, and mouse stays dead until the user toggles mouse mode (`Ctrl+Alt+M`) twice (which forces a `MouseMode` change → re-emit). Fix: on client attach the owner sends `LocalClientCountMsg`; the handler detects an increased count and re-asserts `state.mouseEnableSequence()` (matching the current capture mode) via a `tea.RawMsg`, alongside `tea.ClearScreen`. Keep mouse-enable owned by `MouseMode` for changes, but re-assert it on every new attach.
+2. **The bigger issue with a detached owner:** the owner's renderer emits the mouse-enable CSI only once (first flush / on a `MouseMode` change), and that first flush happens with no attach client connected — so the enable is written to the socket fan-out and lost. A later-attaching client's terminal therefore never receives `?1002h/?1006h`, and mouse stays dead until the user toggles mouse mode (`Ctrl+Alt+M`) twice (which forces a `MouseMode` change → re-emit). Fix: on client attach the owner sends `LocalClientCountMsg`; the handler detects an increased count and emits `localAttachSnapshot()`, which contains the complete frame, current mouse-enable sequence, alternate-screen state, and exact cursor position/style/visibility. This also bypasses Bubble Tea's already-painted renderer cache, preventing a blank new client and a cursor left in the bottom-right cell.
 
 Regression tests: `TestResetTerminalInputModesKeepsMouseReporting` and `TestMouseEnableSequenceMatchesMode` in `pkg/ui/mouse_test.go`.
 
 ### Mouse selection source must match the displayed pane
 
-Live-mode selection maps mouse rows onto the **viewport's rendered `Render()` snapshot**, while scrollback-mode selection maps onto `VTScreen.BufferLines()` (the logical scrollback — what `RenderWithScrollback()` paints). `state.selectionLines(idx, vp)` picks the source by `scrollbackMode[idx]`, and `state.paneRowBase` is just the viewport `YOffset` in both modes. Do **not** map live-mode rows onto the `BufferLines()` tail: `BufferLines()` is the logical history and only coincides with the visible screen while output is scrolling at the bottom. After a `clear` (fresh top-aligned screen with blank padding below the cursor) the two diverge, so selecting the first on-screen lines returned unrelated logical-history text until enough output realigned them. Also do not read live selection from the current emulator cells: resize/reflow or child redraw output can advance them between the last render tick and the mouse event, making a visibly populated row copy newer or blank content. `overlaySelection` and `selectionText` must both read from `selectionLines`. Regression tests: `TestVisibleLinesMatchScreenAfterClear` and `TestLiveSelectionUsesRenderedViewportSnapshot`.
+Live-mode selection maps mouse rows onto the **viewport's rendered `Render()` snapshot**, while scrollback-mode selection maps onto the cached plain rows corresponding to `RenderWithScrollback()`. `state.selectionLines(idx, vp)` picks the source by `scrollbackMode[idx]`, and `state.paneRowBase` is just the viewport `YOffset` in both modes. Do **not** map live-mode rows onto the `BufferLines()` tail: `BufferLines()` is the logical history and only coincides with the visible screen while output is scrolling at the bottom. After a `clear` (fresh top-aligned screen with blank padding below the cursor) the two diverge, so selecting the first on-screen lines returned unrelated logical-history text until enough output realigned them. Also do not read live selection text from the current emulator cells: resize/reflow or child redraw output can advance them between the last render tick and the mouse event, making a visibly populated row copy newer or blank content.
+
+Live selection must expand each painted VT row to the current pane width because another viewer can leave the PTY wider than this TUI, causing Bubble Tea to display multiple virtual rows for one terminal row. Preserve `SoftWrap` across both viewport-generated rows and terminal-grid wraps. `VisibleLines()` reconstructs terminal wrap metadata from matching logical rows and uses a full-width fallback for trailing spaces, tabs, and cursor-driven redraws. `overlaySelection` and `selectionText` must both read from `selectionLines`. Regression tests include `TestVisibleLinesMatchScreenAfterClear`, `TestLiveSelectionUsesRenderedViewportSnapshot`, `TestVisibleLinesDistinguishesSoftWrapFromHardLineBreak`, and `TestLiveSelectionPreservesMatchingSoftWrapMetadata`.
 
 ### Emulator quirks worked around in `VTScreen.Write`
 
@@ -327,7 +332,7 @@ There are unit tests in config, localserver, SSH parsing/session helpers, keyboa
 - `charm.land/bubbletea/v2` — TUI event loop.
 - `charm.land/bubbles/v2/viewport` — local viewport rendering.
 - `charm.land/lipgloss/v2` — TUI styling.
-- `github.com/hinshun/vt10x` — virtual terminal screen model.
+- `github.com/charmbracelet/x/vt` — virtual terminal screen model.
 - `github.com/creack/pty` — Unix PTY.
 - `golang.org/x/sys/windows` — Windows ConPTY syscalls.
 - `github.com/gorilla/websocket` — browser transport.
