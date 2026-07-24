@@ -24,15 +24,16 @@ type ExitMsg struct {
 
 // Session owns a PTY/ConPTY and the process running inside it.
 type Session struct {
-	mu        sync.Mutex
-	index     int
-	cmd       []string
-	cmdLine   string
-	workDir   string
-	title     string
-	screen    *VTScreen
-	exited    bool
-	processID int
+	mu         sync.Mutex
+	index      int
+	cmd        []string
+	cmdLine    string
+	workDir    string
+	title      string
+	screen     *VTScreen
+	exited     bool
+	processID  int
+	generation uint64
 
 	// rw is the bidirectional channel to the child process (unix pty master,
 	// Windows ConPTY pipe pair, or SSH remote PTY). Set by Start().
@@ -57,25 +58,39 @@ func newSession(index int, cmd []string, cols, rows int, sshClient *ssh_client.C
 	return s, nil
 }
 
-func (s *Session) readLoop() {
+func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation uint64) {
 	buf := make([]byte, 4096)
 	for {
-		n, err := s.rw.Read(buf)
+		n, err := rw.Read(buf)
 		if n > 0 {
+			s.mu.Lock()
+			if s.generation != generation {
+				s.mu.Unlock()
+				return
+			}
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			s.screen.Write(chunk)
-			if s.SendOutput != nil {
-				s.SendOutput(OutputMsg{Index: s.index, Data: chunk})
+			screen.Write(chunk)
+			sendOutput := s.SendOutput
+			index := s.index
+			s.mu.Unlock()
+			if sendOutput != nil {
+				sendOutput(OutputMsg{Index: index, Data: chunk})
 			}
 		}
 		if err != nil {
 			s.mu.Lock()
+			if s.generation != generation {
+				s.mu.Unlock()
+				return
+			}
 			already := s.exited
 			s.exited = true
+			sendExit := s.SendExit
+			index := s.index
 			s.mu.Unlock()
-			if !already && s.SendExit != nil {
-				s.SendExit(ExitMsg{Index: s.index})
+			if !already && sendExit != nil {
+				sendExit(ExitMsg{Index: index})
 			}
 			return
 		}
@@ -108,6 +123,7 @@ func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.exited = true
+	s.generation++
 	if s.rw != nil {
 		return s.rw.Close()
 	}
@@ -115,7 +131,17 @@ func (s *Session) Close() error {
 }
 
 // Index returns the session's slot in the manager.
-func (s *Session) Index() int { return s.index }
+func (s *Session) Index() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.index
+}
+
+func (s *Session) setIndex(index int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.index = index
+}
 
 // Title returns a short label for the tab bar.
 func (s *Session) Title() string {
@@ -238,6 +264,7 @@ func (s *Session) Respawn(cols, rows int) error {
 	if s.rw != nil {
 		_ = s.rw.Close()
 	}
+	s.generation++
 	s.rw = nil
 	s.resizeFn = nil
 	s.exited = false
@@ -253,11 +280,15 @@ func (s *Session) startSSH(cols, rows int) error {
 	}
 	s.mu.Lock()
 	s.rw = rs
+	s.generation++
+	generation := s.generation
+	screen := s.screen
 	s.resizeFn = func(cols, rows int) error {
 		return rs.Resize(cols, rows)
 	}
 	s.mu.Unlock()
 	s.screen.SetReplyWriter(rs)
-	go s.readLoop()
+	s.screen.SetTerminalReplies(true)
+	go s.readLoop(rs, screen, generation)
 	return nil
 }

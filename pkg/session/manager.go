@@ -108,7 +108,7 @@ func (m *SessionManager) newWithOptions(cmd []string, sshClient *ssh_client.Clie
 			}
 		}
 		for i, existing := range m.sessions {
-			existing.index = i
+			existing.setIndex(i)
 		}
 		if len(m.sessions) == 0 {
 			m.focused = 0
@@ -137,7 +137,11 @@ func (m *SessionManager) Focus(index int) {
 
 func (m *SessionManager) updateTerminalRepliesLocked() {
 	for _, s := range m.sessions {
-		s.Screen().SetTerminalReplies(s.index == m.focused)
+		// Every session owns an independent emulator and PTY, so background
+		// applications must receive their own CPR/DSR replies too. Tying
+		// replies to focus makes applications started in another session time
+		// out while probing terminal capabilities.
+		s.Screen().SetTerminalReplies(true)
 	}
 }
 
@@ -168,7 +172,7 @@ func (m *SessionManager) Kill(index int) {
 	m.sessions = append(m.sessions[:index], m.sessions[index+1:]...)
 	// Re-index remaining sessions.
 	for i, s := range m.sessions {
-		s.index = i
+		s.setIndex(i)
 	}
 	if m.focused >= len(m.sessions) && m.focused > 0 {
 		m.focused = len(m.sessions) - 1
@@ -209,7 +213,7 @@ func (m *SessionManager) ResizeOne(id, cols, rows int) {
 	copy(snap, m.sessions)
 	m.mu.Unlock()
 	for _, s := range snap {
-		if s.index == id {
+		if s.Index() == id {
 			_ = s.Resize(cols, rows)
 			return
 		}
@@ -268,7 +272,7 @@ func (m *SessionManager) ByID(id int) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.sessions {
-		if s.index == id {
+		if s.Index() == id {
 			return s
 		}
 	}
@@ -300,7 +304,7 @@ func (m *SessionManager) Move(from, to int) {
 	m.sessions = append(m.sessions[:from], m.sessions[from+1:]...)
 	m.sessions = append(m.sessions[:to], append([]*Session{s}, m.sessions[to:]...)...)
 	for i, sess := range m.sessions {
-		sess.index = i
+		sess.setIndex(i)
 		if sess == focusedSess {
 			m.focused = i
 		}

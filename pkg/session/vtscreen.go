@@ -75,7 +75,7 @@ type logicalLine struct {
 func NewVTScreen(cols, rows int) *VTScreen {
 	e := vt.NewEmulator(cols, rows)
 	e.SetScrollbackSize(maxScrollbackLines * 8)
-	s := &VTScreen{cols: cols, rows: rows, term: e, cursorVisible: true, cursorShape: vt.CursorBlock, cursorBlink: true}
+	s := &VTScreen{cols: cols, rows: rows, term: e, cursorVisible: true, cursorShape: vt.CursorBlock}
 	e.SetCallbacks(vt.Callbacks{
 		EnableMode:       func(mode ansi.Mode) { s.setModeLocked(mode, true) },
 		DisableMode:      func(mode ansi.Mode) { s.setModeLocked(mode, false) },

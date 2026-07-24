@@ -22,12 +22,16 @@ func (s *Session) Start(cols, rows int) error {
 	s.mu.Lock()
 	s.rw = uc
 	s.processID = uc.PID()
+	s.generation++
+	generation := s.generation
+	screen := s.screen
 	s.resizeFn = func(cols, rows int) error {
 		return uc.Resize(cols, rows)
 	}
 	s.mu.Unlock()
 	s.screen.SetReplyWriter(uc)
+	s.screen.SetTerminalReplies(true)
 
-	go s.readLoop()
+	go s.readLoop(uc, screen, generation)
 	return nil
 }

@@ -87,6 +87,7 @@ func TestLocalAttachSnapshotIncludesCurrentFrameAndTerminalModes(t *testing.T) {
 		"attached frame",
 		ansi.SetModeMouseButtonEvent,
 		ansi.SetModeMouseExtSgr,
+		ansi.SetCursorStyle(2),
 		ansi.ShowCursor,
 	} {
 		if !strings.Contains(snapshot, want) {

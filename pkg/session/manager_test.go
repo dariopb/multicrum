@@ -1,8 +1,15 @@
 package session
 
 import (
+	"fmt"
 	"io"
+	"os"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/term"
 )
 
 type fakeRW struct{}
@@ -54,6 +61,109 @@ func TestSessionManagerMovePreservesFocusedSession(t *testing.T) {
 	if got := m.sessions[0].Index(); got != 0 {
 		t.Fatalf("first session index = %d, want 0", got)
 	}
+}
+
+func TestSessionManagerEnablesTerminalRepliesForBackgroundSessions(t *testing.T) {
+	m := &SessionManager{
+		sessions: []*Session{newTestSession(0), newTestSession(1)},
+		focused:  1,
+	}
+
+	m.updateTerminalRepliesLocked()
+
+	for i, sess := range m.sessions {
+		if !sess.Screen().replies.Load() {
+			t.Fatalf("session %d terminal replies disabled", i)
+		}
+	}
+}
+
+func TestActiveSessionReceivesCursorPositionReport(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	m := NewManager(80, 24, nil, nil)
+	sess, err := m.New([]string{
+		"env",
+		"MULTICRUM_CPR_HELPER=1",
+		executable,
+		"-test.run=TestCursorPositionReportHelperProcess",
+	})
+	if err != nil {
+		t.Fatalf("start CPR helper: %v", err)
+	}
+	defer m.CloseAll()
+
+	waitForCPR(t, sess)
+}
+
+func TestRespawnedActiveSessionReceivesCursorPositionReport(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	m := NewManager(80, 24, nil, nil)
+	_, err = m.New([]string{
+		"env",
+		"MULTICRUM_CPR_HELPER=1",
+		executable,
+		"-test.run=TestCursorPositionReportHelperProcess",
+	})
+	if err != nil {
+		t.Fatalf("start CPR helper: %v", err)
+	}
+	defer m.CloseAll()
+
+	if err := m.Respawn(0); err != nil {
+		t.Fatalf("respawn CPR helper: %v", err)
+	}
+	waitForCPR(t, m.Focused())
+}
+
+func waitForCPR(t *testing.T, sess *Session) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(ansi.Strip(sess.Screen().Render()), "CPR_OK") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("active session did not receive CPR; screen=%q", ansi.Strip(sess.Screen().Render()))
+}
+
+func TestCursorPositionReportHelperProcess(t *testing.T) {
+	if os.Getenv("MULTICRUM_CPR_HELPER") != "1" {
+		return
+	}
+	old, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "CPR_FAIL raw: %v", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprint(os.Stdout, ansi.RequestCursorPositionReport)
+	response := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := os.Stdin.Read(buf)
+		response <- string(buf[:n])
+	}()
+
+	select {
+	case got := <-response:
+		_ = term.Restore(int(os.Stdin.Fd()), old)
+		if strings.HasPrefix(got, "\x1b[") && strings.HasSuffix(got, "R") {
+			fmt.Fprint(os.Stdout, "CPR_OK")
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stdout, "CPR_FAIL response=%q", got)
+	case <-time.After(time.Second):
+		_ = term.Restore(int(os.Stdin.Fd()), old)
+		fmt.Fprint(os.Stdout, "CPR_FAIL timeout")
+	}
+	os.Exit(1)
 }
 
 func TestSessionManagerRespawnUsesCachedSize(t *testing.T) {

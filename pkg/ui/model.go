@@ -731,12 +731,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case renderTickMsg:
 		s.renderPending = false
-		// Re-arm the active connection's output coalescing flag now that this
-		// frame is being drawn: child writes during the frame window were
-		// collapsed into the single notification that scheduled this tick, and
-		// the next write should schedule the following frame.
-		if s.activeConn >= 0 && s.activeConn < len(s.connections) {
-			s.connections[s.activeConn].outputPending.Store(false)
+		// A connection or session switch can happen after one connection
+		// schedules this shared render tick. Output from the newly active
+		// connection then joins the same frame window, so re-arming only the
+		// connection active at tick time can leave another connection stuck
+		// pending forever. Re-arm every connection covered by the shared tick.
+		for _, conn := range s.connections {
+			conn.outputPending.Store(false)
 		}
 		idx := s.manager.FocusedIndex()
 		s.ensureViewport(idx, s.width, s.height)

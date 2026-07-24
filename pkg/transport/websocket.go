@@ -617,7 +617,7 @@ function fontFamilyChoice(value, s){ if(value === 'inter') return 'Inter, Helvet
 function uiFontFamily(s){ return fontFamilyChoice(s.uiFont, s); }
 function topbarFontFamily(s){ return fontFamilyChoice(s.topbarFont, s); }
 const initialSettings = loadSettings();
-const term = new Terminal({cursorBlink:true,scrollback:Number(initialSettings.scrollback||4000),fontSize:Number(initialSettings.terminalFontSize||14),fontFamily:monoFontFamily(initialSettings),theme:Object.assign({background:getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim()||'#0b0b10'}, paletteTheme(initialSettings))});
+const term = new Terminal({cursorBlink:false,scrollback:Number(initialSettings.scrollback||4000),fontSize:Number(initialSettings.terminalFontSize||14),fontFamily:monoFontFamily(initialSettings),theme:Object.assign({background:getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim()||'#0b0b10'}, paletteTheme(initialSettings))});
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal'));

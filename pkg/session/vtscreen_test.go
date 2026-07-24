@@ -1,11 +1,48 @@
 package session
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 )
+
+type replyCapture struct {
+	ch chan []byte
+}
+
+func TestVTScreenDefaultsToSteadyBlockCursor(t *testing.T) {
+	cursor := NewVTScreen(80, 24).Cursor()
+	if cursor.Shape != vt.CursorBlock || cursor.Blink {
+		t.Fatalf("default cursor = shape %v, blink %v; want steady block", cursor.Shape, cursor.Blink)
+	}
+}
+
+func (w replyCapture) Write(p []byte) (int, error) {
+	w.ch <- bytes.Clone(p)
+	return len(p), nil
+}
+
+func TestVTScreenForwardsCursorPositionReports(t *testing.T) {
+	s := NewVTScreen(80, 24)
+	replies := make(chan []byte, 1)
+	s.SetReplyWriter(replyCapture{ch: replies})
+	s.SetTerminalReplies(true)
+
+	s.Write([]byte(ansi.RequestCursorPositionReport))
+
+	select {
+	case got := <-replies:
+		if want := []byte(ansi.CursorPositionReport(1, 1)); !bytes.Equal(got, want) {
+			t.Fatalf("CPR = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for CPR")
+	}
+}
 
 func TestScrollbackStoresLogicalLinesAcrossResize(t *testing.T) {
 	s := NewVTScreen(20, 2)
