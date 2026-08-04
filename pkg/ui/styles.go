@@ -1,6 +1,9 @@
 package ui
 
-import "charm.land/lipgloss/v2"
+import (
+	"charm.land/lipgloss/v2"
+	"multicrum/pkg/agentdetect"
+)
 
 var (
 	tabActiveStyle = lipgloss.NewStyle().
@@ -124,3 +127,20 @@ var (
 				Background(lipgloss.Color("199")).
 				Padding(0, 1)
 )
+
+func agentStateStyle(base lipgloss.Style, status agentdetect.Status) lipgloss.Style {
+	switch status.State {
+	case agentdetect.StateWorking:
+		return base.Foreground(lipgloss.Color("220"))
+	case agentdetect.StateBlocked:
+		return base.Foreground(lipgloss.Color("218"))
+	case agentdetect.StateIdle:
+		return base.Foreground(lipgloss.Color("151"))
+	default:
+		return base
+	}
+}
+
+func agentProviderStyle(base lipgloss.Style) lipgloss.Style {
+	return base.Bold(false).Faint(true)
+}

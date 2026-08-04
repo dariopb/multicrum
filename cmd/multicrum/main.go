@@ -166,6 +166,7 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 	}
 
 	model := ui.NewModelWithSSH(agentCmd, cols, rows, sshClient)
+	defer model.CloseAgentDetection()
 	model.SetAgentCmdLine(agentCmdLine)
 	model.SetServerName(serverName)
 

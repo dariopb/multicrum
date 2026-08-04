@@ -19,10 +19,19 @@ var upgrader = websocket.Upgrader{
 }
 
 // SessionInfo is sent to browsers to render the tab bar.
+type AgentInfo struct {
+	Provider string `json:"provider"`
+	State    string `json:"state"`
+	Source   string `json:"source"`
+	Animate  bool   `json:"animate,omitempty"`
+	Spinner  string `json:"spinner,omitempty"`
+}
+
 type SessionInfo struct {
-	ID     int    `json:"id"`
-	Title  string `json:"title"`
-	Exited bool   `json:"exited"`
+	ID     int        `json:"id"`
+	Title  string     `json:"title"`
+	Exited bool       `json:"exited"`
+	Agent  *AgentInfo `json:"agent,omitempty"`
 }
 
 type ConnectionInfo struct {
@@ -31,6 +40,7 @@ type ConnectionInfo struct {
 	FocusedID    int           `json:"focusedId"`
 	SessionCount int           `json:"sessionCount"`
 	Sessions     []SessionInfo `json:"sessions,omitempty"`
+	Agent        *AgentInfo    `json:"agent,omitempty"`
 }
 
 type MetaMsg struct {
@@ -425,6 +435,11 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 .tab-pill:hover{background:color-mix(in srgb,var(--accent-violet) 20%,transparent)}
 .tab-pill.active{background:var(--accent-violet);color:#fff;font-weight:700}
 .tab-pill.exited{color:#fb7185;text-decoration:line-through}
+.agent-state.agent-working{color:#facc15}
+.agent-state.agent-blocked{color:#f9a8d4}
+.agent-state.agent-idle{color:#86efac}
+.agent-provider{opacity:.58}
+.agent-spinner{display:inline-block;width:1ch;text-align:center}
 .tab-newtab{color:var(--text-muted);font-family:var(--font-mono);flex-shrink:0}
 .tab-newtab:hover{background:color-mix(in srgb,var(--accent-violet) 30%,transparent);color:#fff}
 #brand{display:inline-flex;align-items:center;padding:4px 12px;font-weight:700;color:#fff;background:color-mix(in srgb,var(--accent-pink) 60%,transparent);margin-left:auto;flex-shrink:0}
@@ -654,6 +669,29 @@ let connectionFiltering = false;
 let connectionMoving = false;
 let moveMode = false;
 let moveStart = -1;
+const agentSpinnerFrames = {
+  rectangle: ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'],
+  circle: ['●','◉','◎','○'],
+};
+let agentSpinnerFrame = 0;
+function agentSpinnerStyle(agent){
+  return agent && agent.spinner === 'circle' ? 'circle' : 'rectangle';
+}
+function agentSpinnerGlyph(agent){
+  const frames = agentSpinnerFrames[agentSpinnerStyle(agent)];
+  if(!agent || !agent.animate) return frames[0];
+  return frames[agentSpinnerFrame % frames.length];
+}
+setInterval(() => {
+  const animated = document.querySelectorAll('.agent-spinner[data-animate="true"]');
+  if(!animated.length) return;
+  agentSpinnerFrame++;
+  animated.forEach(el => {
+    const frames = agentSpinnerFrames[el.dataset.spinner === 'circle' ? 'circle' : 'rectangle'];
+    el.textContent = frames[agentSpinnerFrame % frames.length];
+  });
+}, 450);
+function agentProviderName(provider){ return provider==='copilot' ? 'Copilot' : provider; }
 let newChoice = 0;
 let newReturnMode = '';
 let exitChoice = 0;
@@ -895,8 +933,31 @@ function renderTabs(){
   sessions.forEach(s => {
     const b = document.createElement('button');
     b.className = 'tab-pill' + (s.id===focusedID?' active':'') + (s.exited?' exited':'');
-    b.title = (s.title||'Session '+(s.id+1));
-    b.textContent = (s.title||'Session '+(s.id+1)) + (s.exited?' ✗':'');
+    const title = s.title||'Session '+(s.id+1);
+    const providerName = s.agent ? agentProviderName(s.agent.provider) : '';
+    const agent = s.agent ? (s.agent.state==='unknown'?'':s.agent.state+' ')+providerName : '';
+    b.title = title + (agent?' · '+agent:'');
+    b.textContent = title;
+    if(agent){
+      b.appendChild(document.createTextNode(' · '));
+      const spinner = document.createElement('span');
+      spinner.className = 'agent-spinner';
+      spinner.dataset.animate = s.agent.animate ? 'true' : 'false';
+      spinner.dataset.spinner = agentSpinnerStyle(s.agent);
+      spinner.textContent = s.agent.state==='working' ? agentSpinnerGlyph(s.agent) : ' ';
+      b.appendChild(spinner);
+      b.appendChild(document.createTextNode(' '));
+      const state = document.createElement('span');
+      state.className = 'agent-state agent-'+s.agent.state;
+      state.textContent = s.agent.state==='unknown' ? '' : s.agent.state;
+      b.appendChild(state);
+      if(s.agent.state!=='unknown') b.appendChild(document.createTextNode(' '));
+      const provider = document.createElement('span');
+      provider.className = 'agent-provider';
+      provider.textContent = providerName;
+      b.appendChild(provider);
+    }
+    if(s.exited) b.appendChild(document.createTextNode(' ✗'));
     b.onclick = () => focusSession(s.id);
     if(s.id===focusedID) active = b;
     list.appendChild(b);
@@ -1308,6 +1369,7 @@ function renderConnectionsModal(){
     row.innerHTML =
       '<span class="sess-num">'+(c.__index+1)+'</span>'+
       '<span class="sess-title">'+escHtml(name)+'</span>'+
+      (c.agent ? '<span class="sess-badge"><span class="agent-spinner" data-animate="'+(c.agent.animate?'true':'false')+'" data-spinner="'+agentSpinnerStyle(c.agent)+'">'+(c.agent.state==='working'?agentSpinnerGlyph(c.agent):' ')+'</span> <span class="agent-state agent-'+escHtml(c.agent.state)+'">'+escHtml(c.agent.state==='unknown'?'':c.agent.state)+'</span> <span class="agent-provider">'+escHtml(agentProviderName(c.agent.provider))+'</span></span>' : '')+
       '<span class="sess-badge running">'+(c.sessionCount||0)+' sessions</span>';
     row.onclick = () => { focusConnection(name); closeModal(); };
     el.appendChild(row);

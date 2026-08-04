@@ -32,13 +32,42 @@ type ConnectionEntry struct {
 	Sessions []SessionEntry `yaml:"sessions"`
 }
 
+const (
+	AgentSpinnerStyleRectangle = "rectangle"
+	AgentSpinnerStyleCircle    = "circle"
+)
+
+type AgentDetectionConfig struct {
+	SpinnerAnimation *bool  `yaml:"spinnerAnimation,omitempty" json:"spinnerAnimation,omitempty"`
+	SpinnerStyle     string `yaml:"spinnerStyle,omitempty" json:"spinnerStyle,omitempty"`
+}
+
 type Config struct {
-	Server              string            `yaml:"server,omitempty"`
-	ActiveConnection    string            `yaml:"activeConnection,omitempty"`
-	ConnectionLayout    string            `yaml:"connectionLayout,omitempty" json:"connectionLayout,omitempty"`
-	ConnectionRailWidth int               `yaml:"connectionRailWidth,omitempty" json:"connectionRailWidth,omitempty"`
-	Connections         []ConnectionEntry `yaml:"connections,omitempty"`
-	Sessions            []SessionEntry    `yaml:"sessions,omitempty"`
+	Server              string                `yaml:"server,omitempty"`
+	ActiveConnection    string                `yaml:"activeConnection,omitempty"`
+	ConnectionLayout    string                `yaml:"connectionLayout,omitempty" json:"connectionLayout,omitempty"`
+	ConnectionRailWidth int                   `yaml:"connectionRailWidth,omitempty" json:"connectionRailWidth,omitempty"`
+	AgentDetection      *AgentDetectionConfig `yaml:"agentDetection,omitempty" json:"agentDetection,omitempty"`
+	Connections         []ConnectionEntry     `yaml:"connections,omitempty"`
+	Sessions            []SessionEntry        `yaml:"sessions,omitempty"`
+}
+
+func (c *Config) AgentSpinnerAnimationEnabled() bool {
+	return c == nil || c.AgentDetection == nil ||
+		c.AgentDetection.SpinnerAnimation == nil ||
+		*c.AgentDetection.SpinnerAnimation
+}
+
+func (c *Config) AgentSpinnerStyle() string {
+	if c != nil && c.AgentDetection != nil {
+		switch c.AgentDetection.SpinnerStyle {
+		case AgentSpinnerStyleCircle:
+			return AgentSpinnerStyleCircle
+		case AgentSpinnerStyleRectangle:
+			return AgentSpinnerStyleRectangle
+		}
+	}
+	return AgentSpinnerStyleRectangle
 }
 
 func (c *Config) Normalize() *Config {
@@ -50,6 +79,15 @@ func (c *Config) Normalize() *Config {
 	case "left", "bottom":
 	default:
 		out.ConnectionLayout = "bottom"
+	}
+	if out.AgentDetection != nil {
+		agentDetection := *out.AgentDetection
+		switch agentDetection.SpinnerStyle {
+		case AgentSpinnerStyleRectangle, AgentSpinnerStyleCircle:
+		default:
+			agentDetection.SpinnerStyle = AgentSpinnerStyleRectangle
+		}
+		out.AgentDetection = &agentDetection
 	}
 	if len(out.Connections) == 0 && len(out.Sessions) > 0 {
 		out.Connections = []ConnectionEntry{{Name: "default", Sessions: out.Sessions}}

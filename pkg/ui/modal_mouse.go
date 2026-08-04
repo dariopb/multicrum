@@ -22,7 +22,7 @@ type modalAction struct {
 func (s *state) centeredModalOpen() bool {
 	switch s.mode {
 	case modeHelp, modeRenaming, modeExitPrompt, modeNewSession, modeSelecting,
-		modeConnections, modeQuitConfirm, modeDeleteConfirm, modeFilePicker:
+		modeConnections, modeQuitConfirm, modeDeleteConfirm, modeFilePicker, modeSettings:
 		return true
 	}
 	return false
@@ -62,6 +62,8 @@ func (m Model) currentModalBox() string {
 		return m.renderSessionSelectorModal()
 	case modeConnections:
 		return m.renderConnectionsModal()
+	case modeSettings:
+		return m.renderSettingsModal()
 	case modeQuitConfirm:
 		return m.renderQuitConfirmModal()
 	case modeDeleteConfirm:
@@ -115,6 +117,8 @@ func (s *state) handleModalMouse(m Model, ev mouseEvent) tea.Cmd {
 		return s.handleSessionSelectorMouse(m, contentX, contentY, geometry.Content.Height)
 	case modeConnections:
 		return s.handleConnectionsModalMouse(m, contentX, contentY, geometry.Content.Height)
+	case modeSettings:
+		return s.handleSettingsModalMouse(contentX, contentY)
 	case modeQuitConfirm:
 		return s.handleQuitModalMouse(contentX, contentY)
 	case modeDeleteConfirm:

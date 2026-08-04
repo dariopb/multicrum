@@ -24,7 +24,10 @@ type contextMenu struct {
 	hover    int
 }
 
-const appContextMenuDetachOption = 7
+const (
+	appContextMenuDetachOption   = 7
+	appContextMenuSettingsOption = 8
+)
 
 func (s *state) openContextMenu(kind contextMenuKind, target, pointerX, pointerY int) {
 	s.contextMenu = contextMenu{
@@ -74,6 +77,7 @@ func (m Model) contextMenuOptions() []string {
 			fmt.Sprintf("Toggle Mouse (%s)", mouseMode),
 			"Save Layout",
 			"Detach",
+			"Settings",
 			"Quit",
 		}
 	}
@@ -162,6 +166,10 @@ func (s *state) handleContextMenuMouse(m Model, ev mouseEvent) tea.Cmd {
 			if s.detachClient != nil {
 				s.detachClient()
 			}
+			return nil
+		}
+		if option == appContextMenuSettingsOption {
+			s.openSettings()
 			return nil
 		}
 		_, cmd := s.handleShortcut(m, appContextMenuKey(option))

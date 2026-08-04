@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
+	"multicrum/pkg/agentdetect"
 	"multicrum/pkg/config"
 	"multicrum/pkg/session"
 	"multicrum/pkg/ssh_client"
@@ -39,6 +41,7 @@ const (
 	modeScrollSearch
 	modeContextMenu
 	modeFilePicker
+	modeSettings
 )
 
 type connectionState struct {
@@ -59,6 +62,11 @@ type connectionState struct {
 	outputPending  atomic.Bool
 	webActive      atomic.Bool
 	callbacksBound bool
+}
+
+type detectedAgent struct {
+	status     agentdetect.Status
+	generation uint64
 }
 
 func (m Model) localAttachSnapshot() string {
@@ -131,6 +139,8 @@ type state struct {
 	connFiltering          bool
 	connMoving             bool
 	contextMenu            contextMenu
+	settingsCursor         int
+	settingsDirty          bool
 	sessionHitboxes        []mouseHitbox
 	connectionHitboxes     []mouseHitbox
 	newSessionHitbox       mouseHitbox
@@ -160,6 +170,13 @@ type state struct {
 	lastRender             time.Time    // leading-edge render immediately after idle, then cap at frame rate
 	scrollbackMode         map[int]bool // sessions currently scrolled up (need full scrollback in viewport)
 	paneCache              paneCache    // memoizes renderPaneContent across redundant View() calls
+	agentMu                sync.RWMutex
+	agentStatuses          map[string]detectedAgent
+	agentMonitor           *agentdetect.Monitor
+	agentSpinnerEnabled    bool
+	agentSpinnerStyle      string
+	agentSpinnerRunning    bool
+	agentSpinnerFrame      int
 }
 
 // paneCache memoizes the output of renderPaneContent, which is a pure function
@@ -239,6 +256,9 @@ func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Cl
 		connectionRailWidth: connectionRailWidth,
 		sshClient:           sshClient,
 		clipboardWrite:      copyToClipboard,
+		agentStatuses:       make(map[string]detectedAgent),
+		agentSpinnerEnabled: true,
+		agentSpinnerStyle:   config.AgentSpinnerStyleRectangle,
 	}
 	return &Model{agentCmd: agentCmd, s: st}
 }
@@ -348,6 +368,16 @@ func (m *Model) SetProgram(p *tea.Program) {
 	m.s.program = p
 	geom := m.s.geometry()
 	m.s.initManagers(geom.Pane.Width, geom.Pane.Height)
+	m.s.agentMonitor = agentdetect.NewMonitor(agentdetect.NewProcessInventory(), 2*time.Second, func(update agentdetect.Update) {
+		p.Send(agentStatusMsg(update))
+	})
+	m.s.agentMonitor.Start()
+}
+
+func (m *Model) CloseAgentDetection() {
+	if m.s.agentMonitor != nil {
+		m.s.agentMonitor.Close()
+	}
 }
 
 // StartWSTransport starts the WebSocket transport wired to the session manager.
@@ -384,6 +414,7 @@ func StartWSTransport(addr, token string, m *Model) (*transport.WSTransport, err
 				ID:     s.Index(),
 				Title:  s.Title(),
 				Exited: s.Exited(),
+				Agent:  m.s.sessionAgentInfo(s),
 			})
 		}
 		return out
@@ -395,12 +426,15 @@ func StartWSTransport(addr, token string, m *Model) (*transport.WSTransport, err
 	wst.Connections = func() []transport.ConnectionInfo {
 		out := make([]transport.ConnectionInfo, 0, len(m.s.connections))
 		for _, conn := range m.s.connections {
-			info := transport.ConnectionInfo{ID: conn.name, Name: conn.name}
+			info := transport.ConnectionInfo{ID: conn.name, Name: conn.name, Agent: m.s.connectionAgentInfo(conn)}
 			if conn.manager != nil {
 				info.FocusedID = conn.manager.FocusedIndex()
 				info.SessionCount = conn.manager.Len()
 				for _, sess := range conn.manager.Sessions() {
-					info.Sessions = append(info.Sessions, transport.SessionInfo{ID: sess.Index(), Title: sess.Title(), Exited: sess.Exited()})
+					info.Sessions = append(info.Sessions, transport.SessionInfo{
+						ID: sess.Index(), Title: sess.Title(), Exited: sess.Exited(),
+						Agent: m.s.sessionAgentInfo(sess),
+					})
 				}
 			}
 			out = append(out, info)
@@ -435,6 +469,10 @@ type wsControlMsg transport.ControlMsg
 
 // wsResizeMsg carries a terminal resize report from a browser client.
 type wsResizeMsg transport.ResizeMsg
+
+type agentStatusMsg agentdetect.Update
+
+type agentSpinnerTickMsg struct{}
 
 type connectionOutputMsg struct {
 	Conn *connectionState
@@ -584,6 +622,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.notifyMeta()
 		return m, nil
 
+	case agentStatusMsg:
+		if s.applyAgentUpdate(agentdetect.Update(msg)) {
+			s.notifyMeta()
+		}
+		return m, s.startAgentSpinner()
+
+	case agentSpinnerTickMsg:
+		if !s.agentSpinnerEnabled || !s.hasWorkingAgent() {
+			s.agentSpinnerRunning = false
+			s.agentSpinnerFrame = 0
+			return m, nil
+		}
+		s.agentSpinnerFrame = (s.agentSpinnerFrame + 1) % len(s.agentSpinnerFrames())
+		return m, agentSpinnerTick()
+
 	case localClientCountMsg:
 		attached := int(msg) > s.localClients
 		s.localClients = int(msg)
@@ -721,39 +774,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connectionOutputMsg:
+		s.evaluateCopilotScreen(msg.Conn, msg.Msg.Index)
+		spinnerCmd := s.startAgentSpinner()
 		connIndex := connectionIndex(s.connections, msg.Conn)
 		if connIndex < 0 {
 			msg.Conn.outputPending.Store(false)
-			return m, nil
+			return m, spinnerCmd
 		}
 		if connIndex != s.activeConn {
 			// Not visible: re-arm this connection's coalescing flag so its
 			// next output still notifies (we just don't render it).
 			msg.Conn.outputPending.Store(false)
-			return m, nil
+			return m, spinnerCmd
 		}
 		if msg.Msg.Index != s.manager.FocusedIndex() {
 			// Active connection but a background session produced the output;
 			// re-arm so that session keeps notifying, but don't render it.
 			msg.Conn.outputPending.Store(false)
-			return m, nil
+			return m, spinnerCmd
 		}
 		s.ensureViewport(msg.Msg.Index, s.width, s.height)
 		if cmd := s.scheduleRender(time.Now()); cmd == nil {
 			// A frame is already scheduled; leave outputPending set so every
 			// further child write in this frame window coalesces into it. The
 			// flag is re-armed by renderTickMsg once the frame is drawn.
-			return m, nil
+			return m, spinnerCmd
 		} else {
-			return m, cmd
+			return m, tea.Batch(cmd, spinnerCmd)
 		}
 
 	case OutputMsg:
+		s.evaluateCopilotScreen(s.activeConnection(), msg.Index)
+		spinnerCmd := s.startAgentSpinner()
 		if msg.Index != s.manager.FocusedIndex() {
-			return m, nil
+			return m, spinnerCmd
 		}
 		s.ensureViewport(msg.Index, s.width, s.height)
-		return m, s.scheduleRender(time.Now())
+		return m, tea.Batch(s.scheduleRender(time.Now()), spinnerCmd)
 
 	case renderTickMsg:
 		s.renderPending = false
@@ -808,10 +865,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					anchorViewportToCursor(vp, sess)
 				}
 				s.viewports[idx] = vp
+				s.evaluateCopilotSession(sess)
 				break
 			}
 		}
-		return m, nil
+		return m, s.startAgentSpinner()
 
 	case connectionExitMsg:
 		connIndex := connectionIndex(s.connections, msg.Conn)
@@ -1052,6 +1110,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := s.handleConnectionsKey(m, msg)
 			return m, cmd
 		}
+		if s.mode == modeSettings {
+			return m, s.handleSettingsKey(msg)
+		}
 		if s.mode == modeContextMenu {
 			if msg.Key().Code == tea.KeyEscape {
 				s.closeContextMenu()
@@ -1211,6 +1272,7 @@ func (m Model) viewString() string {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func (s *state) notifyMeta() {
+	s.syncAgentSessions()
 	if s.onMetaChange != nil {
 		go s.onMetaChange()
 	}
@@ -1372,6 +1434,7 @@ func (s *state) refreshFocused() {
 			s.scrollbackMode[idx] = false
 			s.clearSearch()
 			s.viewports[idx] = vp
+			s.acknowledgeFocusedAgent(sess)
 			s.maybePromptExited(sess)
 			return
 		}
@@ -2073,15 +2136,22 @@ func (m Model) renderTabBar() string {
 	for i, sess := range sessions {
 		label := fmt.Sprintf("[%d] %s", sess.Index()+1, sess.Title())
 		var tab string
+		style := tabInactiveStyle
+		suffix := ""
 		switch {
 		case sess.Exited() && sess.Index() == focused:
-			tab = tabActiveStyle.Render(label + " ✗")
+			style = tabActiveStyle
+			suffix = " ✗"
 		case sess.Exited():
-			tab = tabExitedStyle.Render(label + " ✗")
+			style = tabExitedStyle
+			suffix = " ✗"
 		case sess.Index() == focused:
-			tab = tabActiveStyle.Render(label)
-		default:
-			tab = tabInactiveStyle.Render(label)
+			style = tabActiveStyle
+		}
+		if status, ok := s.agentStatus(sess); ok {
+			tab = s.renderAgentContainer(style, label+" · ", suffix, status, 1)
+		} else {
+			tab = style.Render(label + suffix)
 		}
 		tabs[i] = tab
 		widths[i] = lipgloss.Width(tab)
@@ -2267,6 +2337,8 @@ func (m Model) renderPane() string {
 		return m.overlayBox(pane, m.renderSessionSelectorModal())
 	case modeConnections:
 		return m.overlayBox(pane, m.renderConnectionsModal())
+	case modeSettings:
+		return m.overlayBox(pane, m.renderSettingsModal())
 	case modeQuitConfirm:
 		return m.overlayBox(pane, m.renderQuitConfirmModal())
 	case modeDeleteConfirm:
@@ -2720,16 +2792,29 @@ func (m Model) renderSessionSelectorModal() string {
 			if sess.Exited() {
 				state = "exited"
 			}
-			marker := "  "
-			label := fmt.Sprintf("[%d] %s  %s", sess.Index()+1, sess.Title(), state)
-			label = truncate(label, width-4)
-			line := marker + label
+			prefix := fmt.Sprintf("[%d] %s  %s", sess.Index()+1, sess.Title(), state)
+			status, hasAgent := s.agentStatus(sess)
+			var line string
 			if i == s.selectCursor {
+				style := selectorActiveStyle
+				marker := "▶ "
 				if s.selectMoving {
-					line = selectorMovingStyle.Render("↕ " + label)
-				} else {
-					line = selectorActiveStyle.Render("▶ " + label)
+					style = selectorMovingStyle
+					marker = "↕ "
 				}
+				if hasAgent {
+					line = s.renderAgentContainer(style, marker+prefix+" · ", "", status, 1)
+				} else {
+					line = style.Render(marker + prefix)
+				}
+			} else {
+				line = "  " + prefix
+				if hasAgent {
+					line += " · " + s.renderAgentLabel(lipgloss.NewStyle(), status, 1)
+				}
+			}
+			if ansi.StringWidth(line) > width {
+				line = ansi.Truncate(line, width, "")
 			}
 			rows = append(rows, line)
 		}
@@ -2806,6 +2891,14 @@ func (m Model) renderStatusBar() string {
 	}
 	if s.mode == modeConnections {
 		help := helpStyle.Render(" Connections — see modal")
+		left := status
+		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
+			left += statusBarStyle.Render(strings.Repeat(" ", pad))
+		}
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
+	}
+	if s.mode == modeSettings {
+		help := helpStyle.Render(" Settings — arrows change, Esc close")
 		left := status
 		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"multicrum/pkg/ssh_client"
 )
@@ -22,9 +23,12 @@ type ExitMsg struct {
 	Index int
 }
 
+var nextRuntimeSessionID atomic.Uint64
+
 // Session owns a PTY/ConPTY and the process running inside it.
 type Session struct {
 	mu         sync.Mutex
+	runtimeID  string
 	index      int
 	cmd        []string
 	cmdLine    string
@@ -50,6 +54,7 @@ type Session struct {
 
 func newSession(index int, cmd []string, cols, rows int, sshClient *ssh_client.Client) (*Session, error) {
 	s := &Session{
+		runtimeID: fmt.Sprintf("%d-%d", os.Getpid(), nextRuntimeSessionID.Add(1)),
 		index:     index,
 		cmd:       cmd,
 		screen:    NewVTScreen(cols, rows),
@@ -86,6 +91,7 @@ func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation uint64) {
 			}
 			already := s.exited
 			s.exited = true
+			s.processID = 0
 			sendExit := s.SendExit
 			index := s.index
 			s.mu.Unlock()
@@ -124,6 +130,7 @@ func (s *Session) Close() error {
 	defer s.mu.Unlock()
 	s.exited = true
 	s.generation++
+	s.processID = 0
 	if s.rw != nil {
 		return s.rw.Close()
 	}
@@ -135,6 +142,14 @@ func (s *Session) Index() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.index
+}
+
+// RuntimeSnapshot returns immutable process identity used by owner-level
+// monitors. RuntimeID remains stable while indexes may change after moves.
+func (s *Session) RuntimeSnapshot() (runtimeID string, generation uint64, processID int, local bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runtimeID, s.generation, s.processID, s.sshClient == nil
 }
 
 func (s *Session) setIndex(index int) {
@@ -265,6 +280,7 @@ func (s *Session) Respawn(cols, rows int) error {
 		_ = s.rw.Close()
 	}
 	s.generation++
+	s.processID = 0
 	s.rw = nil
 	s.resizeFn = nil
 	s.exited = false

@@ -70,10 +70,13 @@ func TestLeftRailRenderingAndHitboxes(t *testing.T) {
 	if strings.Contains(footer, "\x1b[48;5;236m") {
 		t.Fatal("rail footer actions must not use the status-bar background")
 	}
-	if got := ansi.Strip(rows[3]); got != "[1] default    " {
+	if got := ansi.Strip(rows[3]); got != "default        " {
 		t.Fatalf("first rail entry = %q", got)
 	}
-	if got := ansi.Strip(rows[5]); got != "[2] work       " {
+	if got := ansi.Strip(rows[4]); got != "  0 sessions   " {
+		t.Fatalf("first rail session count = %q", got)
+	}
+	if got := ansi.Strip(rows[5]); got != "work           " {
 		t.Fatalf("active rail entry = %q", got)
 	}
 	if !strings.Contains(rows[5], "\x1b[") || !strings.Contains(rows[6], "\x1b[") {
@@ -228,7 +231,13 @@ func TestLeftLayoutDividerDragResizesRail(t *testing.T) {
 
 func TestConnectionLayoutConfigToggleAndSave(t *testing.T) {
 	m := NewModel([]string{"bash"}, 80, 24)
-	m.SetConfigConnections(&config.Config{ConnectionLayout: "left", ConnectionRailWidth: 22})
+	m.SetConfigConnections(&config.Config{
+		ConnectionLayout:    "left",
+		ConnectionRailWidth: 22,
+		AgentDetection: &config.AgentDetectionConfig{
+			SpinnerStyle: config.AgentSpinnerStyleCircle,
+		},
+	})
 	if m.s.connectionLayout != connectionLayoutLeft || m.s.geometry().Pane.Width != 57 {
 		t.Fatalf("config layout was not applied before render: %q %#v", m.s.connectionLayout, m.s.geometry())
 	}
@@ -254,5 +263,8 @@ func TestConnectionLayoutConfigToggleAndSave(t *testing.T) {
 	}
 	if cfg.ConnectionRailWidth != 22 {
 		t.Fatalf("saved rail width = %d, want 22", cfg.ConnectionRailWidth)
+	}
+	if got := cfg.AgentSpinnerStyle(); got != config.AgentSpinnerStyleCircle {
+		t.Fatalf("saved spinner style = %q, want %q", got, config.AgentSpinnerStyleCircle)
 	}
 }

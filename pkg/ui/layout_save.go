@@ -46,12 +46,17 @@ func (s *state) saveLayout() {
 	if c := s.activeConnection(); c != nil {
 		active = c.name
 	}
+	spinnerAnimation := s.agentSpinnerEnabled
 	cfg := &config.Config{
 		Server:              s.serverName,
 		ActiveConnection:    active,
 		ConnectionLayout:    string(s.connectionLayout),
 		ConnectionRailWidth: s.connectionRailWidth,
-		Connections:         connections,
+		AgentDetection: &config.AgentDetectionConfig{
+			SpinnerAnimation: &spinnerAnimation,
+			SpinnerStyle:     s.agentSpinnerStyle,
+		},
+		Connections: connections,
 	}
 	if err := config.Save(s.configPath, cfg); err != nil {
 		s.statusMsg = fmt.Sprintf("save layout failed: %v", err)

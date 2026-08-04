@@ -232,6 +232,9 @@ func (m *Model) SetConfigConnections(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
+	m.s.agentSpinnerEnabled = cfg.AgentSpinnerAnimationEnabled()
+	m.s.agentSpinnerStyle = cfg.AgentSpinnerStyle()
+	m.s.agentSpinnerFrame = 0
 	m.SetConnectionRailWidth(cfg.ConnectionRailWidth)
 	m.SetConnectionLayout(cfg.ConnectionLayout)
 	if len(cfg.Connections) == 0 {

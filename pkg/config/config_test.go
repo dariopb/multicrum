@@ -86,3 +86,36 @@ func TestLoadParseError(t *testing.T) {
 		t.Fatal("expected parse error")
 	}
 }
+
+func TestAgentSpinnerAnimationDefaultsOnAndCanBeDisabled(t *testing.T) {
+	if !(&Config{}).AgentSpinnerAnimationEnabled() {
+		t.Fatal("spinner animation should default to enabled")
+	}
+	disabled := false
+	cfg := &Config{AgentDetection: &AgentDetectionConfig{SpinnerAnimation: &disabled}}
+	if cfg.AgentSpinnerAnimationEnabled() {
+		t.Fatal("explicitly disabled spinner animation reported enabled")
+	}
+	enabled := true
+	cfg.AgentDetection.SpinnerAnimation = &enabled
+	if !cfg.AgentSpinnerAnimationEnabled() {
+		t.Fatal("explicitly enabled spinner animation reported disabled")
+	}
+}
+
+func TestAgentSpinnerStyleDefaultsToRectangleAndSupportsCircle(t *testing.T) {
+	if got := (&Config{}).AgentSpinnerStyle(); got != AgentSpinnerStyleRectangle {
+		t.Fatalf("default spinner style = %q, want %q", got, AgentSpinnerStyleRectangle)
+	}
+	cfg := (&Config{AgentDetection: &AgentDetectionConfig{
+		SpinnerStyle: AgentSpinnerStyleCircle,
+	}}).Normalize()
+	if got := cfg.AgentSpinnerStyle(); got != AgentSpinnerStyleCircle {
+		t.Fatalf("configured spinner style = %q, want %q", got, AgentSpinnerStyleCircle)
+	}
+	cfg.AgentDetection.SpinnerStyle = "invalid"
+	cfg = cfg.Normalize()
+	if got := cfg.AgentSpinnerStyle(); got != AgentSpinnerStyleRectangle {
+		t.Fatalf("invalid spinner style = %q, want fallback %q", got, AgentSpinnerStyleRectangle)
+	}
+}

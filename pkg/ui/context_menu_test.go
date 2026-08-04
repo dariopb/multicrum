@@ -186,7 +186,7 @@ func TestVerticalBrandOpensGlobalActionsMenu(t *testing.T) {
 			}
 			want := []string{
 				"Help", "New Session", "Sessions", "New Connection",
-				"Connections", "Toggle Mouse (select)", "Save Layout", "Detach", "Quit",
+				"Connections", "Toggle Mouse (select)", "Save Layout", "Detach", "Settings", "Quit",
 			}
 			if got := m.contextMenuOptions(); !reflect.DeepEqual(got, want) {
 				t.Fatalf("global menu options = %#v, want %#v", got, want)
@@ -244,8 +244,21 @@ func TestGlobalActionsMenuDispatchesExistingShortcuts(t *testing.T) {
 
 	m.s.openContextMenu(appContextMenu, -1, 1, 0)
 	left, top, _, _ = m.contextMenuBounds()
+	settings := mouseEvent{
+		X: left, Y: top + 1 + appContextMenuSettingsOption, Button: tea.MouseLeft, Action: mousePress,
+	}
+	if cmd := m.s.handleContextMenuMouse(*m, settings); cmd != nil {
+		t.Fatalf("settings command = %v, want nil", cmd)
+	}
+	if m.s.mode != modeSettings {
+		t.Fatalf("settings menu mode = %v, want settings", m.s.mode)
+	}
+
+	m.s.mode = modeNormal
+	m.s.openContextMenu(appContextMenu, -1, 1, 0)
+	left, top, _, _ = m.contextMenuBounds()
 	quit := mouseEvent{
-		X: left, Y: top + 1 + 8, Button: tea.MouseLeft, Action: mousePress,
+		X: left, Y: top + 1 + 9, Button: tea.MouseLeft, Action: mousePress,
 	}
 	_ = m.s.handleContextMenuMouse(*m, quit)
 	if m.s.mode != modeQuitConfirm {
@@ -262,7 +275,7 @@ func TestGlobalActionsMenuUsesShortcutBindings(t *testing.T) {
 		4: shortcutConnections,
 		5: shortcutMouse,
 		6: shortcutSaveLayout,
-		8: shortcutQuit,
+		9: shortcutQuit,
 	}
 	for option, shortcut := range want {
 		if got := appContextMenuKey(option).Keystroke(); got != shortcut {

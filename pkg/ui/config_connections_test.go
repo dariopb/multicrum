@@ -59,3 +59,26 @@ func TestSetConfigConnectionsPreservesSSH(t *testing.T) {
 		t.Fatalf("ssh entry = %#v, want %#v", entries[0].SSH, cfg.Connections[0].Sessions[0].SSH)
 	}
 }
+
+func TestSetConfigConnectionsDisablesAgentSpinner(t *testing.T) {
+	m := NewModel([]string{"sh"}, 80, 24)
+	disabled := false
+	m.SetConfigConnections(&config.Config{
+		AgentDetection: &config.AgentDetectionConfig{SpinnerAnimation: &disabled},
+	})
+	if m.s.agentSpinnerEnabled {
+		t.Fatal("agent spinner animation remained enabled")
+	}
+}
+
+func TestSetConfigConnectionsSelectsCircleSpinner(t *testing.T) {
+	m := NewModel([]string{"sh"}, 80, 24)
+	m.SetConfigConnections(&config.Config{
+		AgentDetection: &config.AgentDetectionConfig{
+			SpinnerStyle: config.AgentSpinnerStyleCircle,
+		},
+	})
+	if m.s.agentSpinnerStyle != config.AgentSpinnerStyleCircle {
+		t.Fatalf("spinner style = %q, want %q", m.s.agentSpinnerStyle, config.AgentSpinnerStyleCircle)
+	}
+}

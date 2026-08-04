@@ -29,8 +29,7 @@ func (s *state) renderConnectionPills() string {
 	return strings.Join(parts, "")
 }
 
-// renderConnectionRail renders fixed two-row connection controls in the left
-// layout. It intentionally records only visible controls, so clipped entries
+// renderConnectionRail records only visible controls, so clipped entries
 // cannot receive stale mouse events.
 func (m Model) renderConnectionRail(geom layoutGeometry) []string {
 	s := m.s
@@ -75,24 +74,29 @@ func (m Model) renderConnectionRail(geom layoutGeometry) []string {
 		Action: hitboxHelp,
 	}
 	s.hasHelpHitbox = true
-	capacity := (len(rows) - 4) / 2
-	if capacity <= 0 {
+	available := len(rows) - 4
+	if available < 2 {
 		return rows
 	}
-	start, end := 0, len(s.connections)
-	if end-start > capacity {
-		start = s.activeConn - capacity/2
-		if start < 0 {
-			start = 0
+	entryHeight := func(index int) int {
+		if available >= 3 && s.connectionAgentLabel(s.connections[index]) != "" {
+			return 3
 		}
-		if start+capacity > len(s.connections) {
-			start = len(s.connections) - capacity
-		}
-		end = start + capacity
+		return 2
 	}
-	for display, index := 0, start; index < end; display, index = display+1, index+1 {
-		y := 3 + display*2
-		if y+1 >= footerY {
+	start, end, used := s.activeConn, s.activeConn+1, entryHeight(s.activeConn)
+	for end < len(s.connections) && used+entryHeight(end) <= available {
+		used += entryHeight(end)
+		end++
+	}
+	for start > 0 && used+entryHeight(start-1) <= available {
+		start--
+		used += entryHeight(start)
+	}
+	y := 3
+	for index := start; index < end; index++ {
+		height := entryHeight(index)
+		if y+height > footerY {
 			break
 		}
 		conn := s.connections[index]
@@ -104,8 +108,8 @@ func (m Model) renderConnectionRail(geom layoutGeometry) []string {
 		if index == s.activeConn {
 			style = railActiveStyle
 		}
-		label := truncate(fmt.Sprintf("[%d] %s", index+1, conn.name), geom.ConnectionRail.Width)
-		count := truncate(fmt.Sprintf("    %d sessions", sessionCount), geom.ConnectionRail.Width)
+		label := truncate(conn.name, geom.ConnectionRail.Width)
+		count := truncate(fmt.Sprintf("  %d sessions", sessionCount), geom.ConnectionRail.Width)
 		if index == start && start > 0 {
 			label = "↑ " + truncate(label, geom.ConnectionRail.Width-2)
 		}
@@ -114,10 +118,14 @@ func (m Model) renderConnectionRail(geom layoutGeometry) []string {
 		}
 		rows[y] = style.Render(padLine(label, geom.ConnectionRail.Width))
 		rows[y+1] = style.Render(padLine(count, geom.ConnectionRail.Width))
+		if status, count, ok := s.connectionAgentSummary(conn); ok && height == 3 {
+			rows[y+2] = s.renderAgentLine(style, status, count, geom.ConnectionRail.Width)
+		}
 		s.connectionHitboxes = append(s.connectionHitboxes, mouseHitbox{
-			Bounds: rect{X: geom.ConnectionRail.X, Y: y, Width: geom.ConnectionRail.Width, Height: 2},
+			Bounds: rect{X: geom.ConnectionRail.X, Y: y, Width: geom.ConnectionRail.Width, Height: height},
 			Index:  index, Action: hitboxConnection,
 		})
+		y += height
 	}
 	return rows
 }
