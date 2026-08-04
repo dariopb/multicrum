@@ -69,7 +69,7 @@ func TestLiveSelectionPreservesMatchingSoftWrapMetadata(t *testing.T) {
 	m := NewModel([]string{"bash"}, 5, 6)
 	m.s.manager = session.NewManager(10, 4, nil, nil)
 	m.s.connections[0].manager = m.s.manager
-	sess, err := m.s.manager.New([]string{"sh"})
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -87,6 +87,263 @@ func TestLiveSelectionPreservesMatchingSoftWrapMetadata(t *testing.T) {
 	m.s.sel = selection{startL: 0, startC: 0, endL: 1, endC: 2, hasRange: true}
 	if got := m.s.selectionText(); got != "abcdefgh" {
 		t.Fatalf("selectionText() = %q, want joined soft-wrapped line", got)
+	}
+}
+
+func TestLiveSelectionUsesWrapMetadataFromPaintedSnapshot(t *testing.T) {
+	m := NewModel([]string{"bash"}, 5, 6)
+	m.s.manager = session.NewManager(10, 4, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	sess.Screen().Write([]byte("\x1b[2J\x1b[Habcdefghijklmnop\r\nnext"))
+	m.s.ensureViewport(0, 5, 6)
+	vp := m.s.viewports[0]
+	m.s.setLiveContent(0, vp, sess)
+
+	// Advance the emulator after the painted frame. Selection still targets
+	// the viewport snapshot, so its terminal-wrap metadata must do the same.
+	sess.Screen().Write([]byte("\x1b[2J\x1b[Hnew frame"))
+
+	lines := m.s.selectionLines(0, vp)
+	if len(lines) < 4 || !lines[0].SoftWrap || !lines[1].SoftWrap || !lines[2].SoftWrap {
+		t.Fatalf("snapshot selection lines = %#v, want all virtual segments joined", lines)
+	}
+	m.s.sel = selection{startL: 0, startC: 0, endL: 3, endC: 0, hasRange: true}
+	if got := m.s.selectionText(); got != "abcdefghijklmnop" {
+		t.Fatalf("selectionText() = %q, want one logical line", got)
+	}
+}
+
+func TestLiveSelectionJoinsLongLineAfterHeavyScroll(t *testing.T) {
+	for terminalWidth := 6; terminalWidth <= 20; terminalWidth++ {
+		for paneWidth := 3; paneWidth <= terminalWidth; paneWidth++ {
+			m := NewModel([]string{"bash"}, paneWidth, 8)
+			m.s.manager = session.NewManager(terminalWidth, 6, nil, nil)
+			m.s.connections[0].manager = m.s.manager
+			m.s.syncActiveConnectionFields()
+			sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+			if err != nil {
+				t.Fatalf("new session: %v", err)
+			}
+
+			for i := 0; i < 100; i++ {
+				sess.Screen().Write([]byte("repeated output\r\n"))
+			}
+			line := strings.Repeat("x", terminalWidth*2+3)
+			sess.Screen().Write([]byte(line))
+			m.s.ensureViewport(0, paneWidth, 8)
+			vp := m.s.viewports[0]
+			m.s.setLiveContent(0, vp, sess)
+			lines := m.s.selectionLines(0, vp)
+
+			start := -1
+			for i := range lines {
+				if strings.Contains(lines[i].Text, "xxx") {
+					start = i
+					break
+				}
+			}
+			if start < 0 {
+				m.s.manager.CloseAll()
+				t.Fatalf("widths %d/%d: long line not found in %#v", terminalWidth, paneWidth, lines)
+			}
+			remaining := len(line)
+			end := start
+			endCol := 0
+			for end < len(lines) && remaining > 0 {
+				rowLen := len([]rune(lines[end].Text))
+				if remaining <= rowLen {
+					endCol = remaining - 1
+					remaining = 0
+					break
+				}
+				remaining -= rowLen
+				end++
+			}
+			m.s.sel = selection{
+				startL:   start,
+				startC:   0,
+				endL:     end,
+				endC:     endCol,
+				hasRange: true,
+			}
+			if got := m.s.selectionText(); got != line {
+				m.s.manager.CloseAll()
+				t.Fatalf("widths %d/%d: selectionText() = %q, want %q; rows=%#v",
+					terminalWidth, paneWidth, got, line, lines[start:end+1])
+			}
+			m.s.manager.CloseAll()
+		}
+	}
+}
+
+func TestLiveSelectionCopiesCloudHypervisorCommandAsOneLine(t *testing.T) {
+	const line = `sudo ./cloud-hypervisor-41 --kernel vmlinux-6.8.0-52-generic --cpus boot=1 --memory size=2G --cmdline "root=/dev/vda console=hvc0 panic=0 ip=169.254.0.2::169.254.0.1:255.255.255.0:vm:eth0:off init=/sbin/init.sh" --disk path=./rootfs.ext4,readonly=off`
+	for terminalWidth := 20; terminalWidth <= 160; terminalWidth++ {
+		m := NewModel([]string{"bash"}, terminalWidth, 32)
+		m.s.manager = session.NewManager(terminalWidth, 30, nil, nil)
+		m.s.connections[0].manager = m.s.manager
+		m.s.syncActiveConnectionFields()
+		sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+		if err != nil {
+			t.Fatalf("new session: %v", err)
+		}
+		sess.Screen().Write([]byte(line))
+
+		for paneWidth := 5; paneWidth <= terminalWidth; paneWidth++ {
+			m.s.width = paneWidth
+			m.s.resetViewport(0, paneWidth, 32)
+			m.s.ensureViewport(0, paneWidth, 32)
+			vp := m.s.viewports[0]
+			m.s.setLiveContent(0, vp, sess)
+			lines := m.s.selectionLines(0, vp)
+
+			end := 0
+			for end+1 < len(lines) && lines[end].SoftWrap {
+				end++
+			}
+			m.s.sel = selection{
+				startL:   0,
+				startC:   0,
+				endL:     end,
+				endC:     len([]rune(lines[end].Text)) - 1,
+				hasRange: true,
+			}
+			if got := m.s.selectionText(); got != line {
+				t.Fatalf("widths %d/%d: selectionText() = %q, want one command; rows=%#v snapshot=%#v",
+					terminalWidth, paneWidth, got, lines[:end+1], m.s.liveLines[0])
+			}
+		}
+		m.s.manager.CloseAll()
+	}
+}
+
+func TestLiveSelectionCopiesRedrawnCommandEndingWrapInSpace(t *testing.T) {
+	const line = `sudo ./cloud-hypervisor-41 --kernel vmlinux-6.8.0-52-generic --cpus boot=1 --memory size=2G --cmdline "root=/dev/vda console=hvc0 panic=0 ip=169.254.0.2::169.254.0.1:255.255.255.0:vm:eth0:off init=/sbin/init.sh" --disk path=./rootfs.ext4,readonly=off`
+	m := NewModel([]string{"bash"}, 138, 12)
+	m.s.manager = session.NewManager(138, 10, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	// Cursor-addressed prompts can leave extra text in the semantic byte
+	// capture even though it has been erased from the visible screen.
+	sess.Screen().Write([]byte("stale prompt\x1b[H\x1b[2K" + line))
+	m.s.ensureViewport(0, 138, 12)
+	vp := m.s.viewports[0]
+	m.s.setLiveContent(0, vp, sess)
+	lines := m.s.selectionLines(0, vp)
+
+	end := 0
+	for end+1 < len(lines) && lines[end].SoftWrap {
+		end++
+	}
+	m.s.sel = selection{
+		startL: 0, startC: 0,
+		endL: end, endC: len([]rune(lines[end].Text)) - 1,
+		hasRange: true,
+	}
+	if got := m.s.selectionText(); got != line {
+		t.Fatalf("selectionText() = %q, want one command; rows=%#v snapshot=%#v",
+			got, lines[:end+1], m.s.liveLines[0])
+	}
+}
+
+func TestLiveSelectionJoinsANSISeparatedCRLFAfterWrapBoundarySpace(t *testing.T) {
+	const line = "abcdefghijklmnopqrs continuation after boundary"
+	m := NewModel([]string{"bash"}, 20, 6)
+	m.s.manager = session.NewManager(20, 4, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	sess.Screen().Write([]byte(line + "\r\x1b[0m\nnext"))
+	m.s.ensureViewport(0, 20, 6)
+	vp := m.s.viewports[0]
+	m.s.setLiveContent(0, vp, sess)
+	lines := m.s.selectionLines(0, vp)
+
+	end := 0
+	for end+1 < len(lines) && lines[end].SoftWrap {
+		end++
+	}
+	m.s.sel = selection{
+		startL: 0, startC: 0,
+		endL: end, endC: len([]rune(lines[end].Text)) - 1,
+		hasRange: true,
+	}
+	if got := m.s.selectionText(); got != line {
+		t.Fatalf("selectionText() = %q, want %q; rows=%#v", got, line, lines[:end+1])
+	}
+}
+
+func TestLiveSelectionJoinsBoundarySpaceFromLogicalScrollbackTail(t *testing.T) {
+	m := NewModel([]string{"bash"}, 5, 7)
+	m.s.manager = session.NewManager(5, 5, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	sess.Screen().Write([]byte("abcdefghijklmn p\r\none\r\ntwo\r\nthree"))
+	m.s.ensureViewport(0, 5, 7)
+	vp := m.s.viewports[0]
+	m.s.setLiveContent(0, vp, sess)
+	lines := m.s.selectionLines(0, vp)
+
+	m.s.sel = selection{
+		startL: 0, startC: 0,
+		endL: 1, endC: 0,
+		hasRange: true,
+	}
+	if got := m.s.selectionText(); got != "klmn p" {
+		t.Fatalf("selectionText() = %q, want %q; rows=%#v", got, "klmn p", lines[:2])
+	}
+}
+
+func TestLiveSelectionJoinsObservedBoundarySpaceAfterRedrawControl(t *testing.T) {
+	const line = "abcd efgh"
+	m := NewModel([]string{"bash"}, 5, 6)
+	m.s.manager = session.NewManager(5, 4, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	sess.Screen().Write([]byte(line))
+	sess.Screen().Write([]byte("\r\x1b[?25l"))
+	m.s.ensureViewport(0, 5, 6)
+	vp := m.s.viewports[0]
+	m.s.setLiveContent(0, vp, sess)
+	lines := m.s.selectionLines(0, vp)
+
+	m.s.sel = selection{
+		startL: 0, startC: 0,
+		endL: 1, endC: 3,
+		hasRange: true,
+	}
+	if got := m.s.selectionText(); got != line {
+		t.Fatalf("selectionText() = %q, want %q; rows=%#v", got, line, lines[:2])
 	}
 }
 
@@ -127,6 +384,94 @@ func TestScrollbackSelectionUsesDisplayedWrappedRows(t *testing.T) {
 				t.Fatal("selection overlay did not highlight the displayed wrapped rows")
 			}
 		})
+	}
+}
+
+func TestScrollbackSelectionJoinsLogicalLineAfterHeavyOutput(t *testing.T) {
+	m := NewModel([]string{"bash"}, 12, 8)
+	m.s.manager = session.NewManager(12, 6, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	for i := 0; i < 100; i++ {
+		sess.Screen().Write([]byte("repeated output\r\n"))
+	}
+	const line = "this is one logical line spanning several displayed rows"
+	sess.Screen().Write([]byte(line + "\r\nlast"))
+	m.s.ensureViewport(0, 12, 8)
+	vp := m.s.viewports[0]
+	m.s.setScrollbackContent(0, vp, sess.Screen().RenderWithScrollback())
+	m.s.scrollbackMode[0] = true
+
+	lines := m.s.selectionLines(0, vp)
+	start := -1
+	for i := range lines {
+		if strings.HasPrefix(lines[i].Text, "this is one") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("logical line not found in %#v", lines)
+	}
+	end := start
+	for end+1 < len(lines) && lines[end].SoftWrap {
+		end++
+	}
+	m.s.sel = selection{
+		startL:   start,
+		startC:   0,
+		endL:     end,
+		endC:     len([]rune(lines[end].Text)) - 1,
+		hasRange: true,
+	}
+	if got := m.s.selectionText(); got != line {
+		t.Fatalf("selectionText() = %q, want %q; rows=%#v", got, line, lines[start:end+1])
+	}
+}
+
+func TestScrollbackSelectionCopiesCloudHypervisorCommandAsOneLine(t *testing.T) {
+	const line = `sudo ./cloud-hypervisor-41 --kernel vmlinux-6.8.0-52-generic --cpus boot=1 --memory size=2G --cmdline "root=/dev/vda console=hvc0 panic=0 ip=169.254.0.2::169.254.0.1:255.255.255.0:vm:eth0:off init=/sbin/init.sh" --disk path=./rootfs.ext4,readonly=off`
+	m := NewModel([]string{"bash"}, 160, 32)
+	m.s.manager = session.NewManager(160, 30, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+	sess.Screen().Write([]byte(line + "\r\nlast"))
+	content := sess.Screen().RenderWithScrollback()
+
+	for paneWidth := 5; paneWidth <= 160; paneWidth++ {
+		m.s.width = paneWidth
+		m.s.resetViewport(0, paneWidth, 32)
+		vp := m.s.viewports[0]
+		m.s.setScrollbackContent(0, vp, content)
+		m.s.scrollbackMode[0] = true
+		lines := m.s.selectionLines(0, vp)
+
+		end := 0
+		for end+1 < len(lines) && lines[end].SoftWrap {
+			end++
+		}
+		m.s.sel = selection{
+			startL:   0,
+			startC:   0,
+			endL:     end,
+			endC:     len([]rune(lines[end].Text)) - 1,
+			hasRange: true,
+		}
+		if got := m.s.selectionText(); got != line {
+			t.Fatalf("pane width %d: selectionText() = %q, want one command; rows=%#v",
+				paneWidth, got, lines[:end+1])
+		}
 	}
 }
 

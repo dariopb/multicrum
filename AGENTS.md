@@ -141,7 +141,7 @@ Web shortcut handling uses both xterm's custom key handler and a capture-phase `
 
 ## Long-running server and connections
 
-`multicrum --server NAME` attaches to an existing per-user local server named `NAME` (default `default`). If no live server exists, the visible process starts a detached `--owner` daemon, waits for the endpoint, then attaches as a client. Unix uses `$XDG_RUNTIME_DIR/multicrum/<server>.sock` or `/tmp/multicrum-$UID/multicrum/<server>.sock`; Windows uses a loopback TCP address stored in `%LOCALAPPDATA%\multicrum\<server>.addr`.
+`multicrum --server NAME` attaches to an existing per-user local server named `NAME` (default `default`). If no live server exists, the visible process starts a detached `--owner` daemon, waits for the endpoint, then attaches as a client. Unix uses `/tmp/multicrum-$UID/<server>.sock` so the endpoint survives the final SSH login ending; Windows uses a loopback TCP address stored in `%LOCALAPPDATA%\multicrum\<server>.addr`.
 
 Lifecycle commands are `multicrum list` / `multicrum ls`, `multicrum status --server NAME`, and `multicrum stop --server NAME`. Status/list output includes PID, socket path, and startup settings such as command, config, WebSocket address, token presence (redacted as `token=set`), and SSH options.
 

@@ -105,6 +105,10 @@ func (s *state) handleNewSessionKey(m Model, msg tea.KeyPressMsg) tea.Cmd {
 		s.mode = s.newSessionReturn
 		return nil
 	case tea.KeyEnter:
+		if ns.choice == 2 && ns.field == newFieldKey {
+			s.openSSHKeyPicker()
+			return nil
+		}
 		return s.resolveNewSession(m)
 	case tea.KeyUp:
 		if ns.choice > 0 {
@@ -424,7 +428,7 @@ func (m Model) renderNewSessionModal() string {
 	}
 	rows = append(rows,
 		"",
-		"Enter start   Esc cancel   ↑/↓ choose   Tab fields   1/2/3 choose",
+		"Enter start/browse   Esc cancel   ↑/↓ choose   Tab fields   1/2/3 choose",
 	)
 	return padBox(rows, width)
 }

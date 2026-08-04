@@ -22,7 +22,7 @@ type modalAction struct {
 func (s *state) centeredModalOpen() bool {
 	switch s.mode {
 	case modeHelp, modeRenaming, modeExitPrompt, modeNewSession, modeSelecting,
-		modeConnections, modeQuitConfirm, modeDeleteConfirm:
+		modeConnections, modeQuitConfirm, modeDeleteConfirm, modeFilePicker:
 		return true
 	}
 	return false
@@ -56,6 +56,8 @@ func (m Model) currentModalBox() string {
 		return m.renderExitModal()
 	case modeNewSession:
 		return m.renderNewSessionModal()
+	case modeFilePicker:
+		return m.renderFilePickerModal()
 	case modeSelecting:
 		return m.renderSessionSelectorModal()
 	case modeConnections:
@@ -107,6 +109,8 @@ func (s *state) handleModalMouse(m Model, ev mouseEvent) tea.Cmd {
 		return s.handleExitModalMouse(m, contentX, contentY)
 	case modeNewSession:
 		return s.handleNewSessionModalMouse(m, contentX, contentY, geometry.Content.Height)
+	case modeFilePicker:
+		s.handleFilePickerModalMouse(contentX, contentY, geometry.Content.Height)
 	case modeSelecting:
 		return s.handleSessionSelectorMouse(m, contentX, contentY, geometry.Content.Height)
 	case modeConnections:
@@ -161,14 +165,38 @@ func (s *state) handleNewSessionModalMouse(m Model, x, y, contentHeight int) tea
 		}
 	}
 	if y == contentHeight-1 {
-		if key, ok := modalActionAt(x, "Enter start   Esc cancel   ↑/↓ choose   Tab fields   1/2/3 choose", []modalAction{
-			{label: "Enter start", key: enterKey()},
+		if key, ok := modalActionAt(x, "Enter start/browse   Esc cancel   ↑/↓ choose   Tab fields   1/2/3 choose", []modalAction{
+			{label: "Enter start/browse", key: enterKey()},
 			{label: "Esc cancel", key: escapeKey()},
 		}); ok {
 			return s.handleNewSessionKey(m, key)
 		}
 	}
 	return nil
+}
+
+func (s *state) handleFilePickerModalMouse(x, y, contentHeight int) {
+	start := 4
+	rows := s.filePickerListRows()
+	if y >= start && y < start+rows {
+		index := s.filePicker.scroll + y - start
+		if index >= 0 && index < len(s.filePicker.entries) {
+			s.filePicker.cursor = index
+			s.chooseFilePickerEntry()
+		}
+		return
+	}
+	if y != contentHeight-1 {
+		return
+	}
+	footer := "Up/Down select   Enter open/select   Backspace parent   Esc cancel"
+	if key, ok := modalActionAt(x, footer, []modalAction{
+		{label: "Enter open/select", key: enterKey()},
+		{label: "Backspace parent", key: tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace})},
+		{label: "Esc cancel", key: escapeKey()},
+	}); ok {
+		s.handleFilePickerKey(key)
+	}
 }
 
 func (s *state) handleSessionSelectorMouse(m Model, x, y, contentHeight int) tea.Cmd {

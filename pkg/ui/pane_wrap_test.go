@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
+	"multicrum/pkg/session"
 )
 
 // TestSoftWrapRowsMatchesViewportModel verifies that softWrapRows expands
@@ -73,6 +75,36 @@ func TestRenderPaneContentCacheMatchesUncached(t *testing.T) {
 
 	vp.SetYOffset(1)
 	check("changed offset")
+}
+
+func TestLiveViewportUsesPhysicalTerminalRows(t *testing.T) {
+	m := NewModel([]string{"bash"}, 20, 6)
+	m.s.manager = session.NewManager(20, 4, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	sess.Screen().Write([]byte("one\r\ntwo\r\nthree\r\nfour"))
+	m.s.ensureViewport(0, 20, 6)
+	vp := m.s.viewports[0]
+	vp.SoftWrap = true
+	m.s.setLiveContent(0, vp, sess)
+	anchorViewportToCursor(vp, sess)
+
+	if vp.SoftWrap {
+		t.Fatal("live viewport must count physical terminal rows without soft wrapping")
+	}
+	if got := vp.YOffset(); got != 0 {
+		t.Fatalf("live viewport YOffset = %d, want 0", got)
+	}
+	pane := m.s.renderPaneContent(0, vp, 20, 4, false)
+	if strings.Contains(pane, "three\n                    \nfour") {
+		t.Fatalf("live pane inserted an empty row before the prompt: %q", pane)
+	}
 }
 
 func TestRenderScrollbackWrapCacheMatchesUncached(t *testing.T) {

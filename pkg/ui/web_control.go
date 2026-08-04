@@ -74,6 +74,7 @@ func (s *state) handleWSExit(msg transport.ControlMsg) {
 		}
 		delete(s.viewports, id)
 		delete(s.scrollbackCache, id)
+		delete(s.liveLines, id)
 		s.manager.Kill(id)
 		s.refreshFocused()
 		s.notifyMeta()

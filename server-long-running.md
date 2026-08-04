@@ -89,13 +89,7 @@ pkg/localserver/
 
 ```text
 # Unix
-$XDG_RUNTIME_DIR/multicrum/<safe-server>.sock
-```
-
-Fallback when `XDG_RUNTIME_DIR` is empty:
-
-```text
-/tmp/multicrum-$UID/multicrum/<safe-server>.sock
+/tmp/multicrum-$UID/<safe-server>.sock
 ```
 
 Windows stores the loopback TCP listener address here:

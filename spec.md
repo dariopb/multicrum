@@ -204,16 +204,14 @@ Socket path:
 
 ```text
 # Unix:
-$XDG_RUNTIME_DIR/multicrum/<safe-server>.sock
-# Unix fallback:
-/tmp/multicrum-$UID/multicrum/<safe-server>.sock
+/tmp/multicrum-$UID/<safe-server>.sock
 
 # Windows:
 %LOCALAPPDATA%\multicrum\<safe-server>.addr
 # contains a 127.0.0.1:<port> loopback TCP address
 ```
 
-`SocketPath` sanitizes server names to filesystem-safe names using `path.go:sanitize` and creates the parent directory with `0700`. On Windows, the path is an address file rather than a socket file.
+`SocketPath` sanitizes server names to filesystem-safe names using `path.go:sanitize`. The Unix parent directory is owned by the current user with mode `0700`; this persistent `/tmp` location keeps the socket reachable after the final SSH login ends. On Windows, the path is an address file rather than a socket file.
 
 Frame format:
 

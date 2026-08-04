@@ -104,6 +104,10 @@ var (
 				Foreground(lipgloss.Color("15")).
 				Background(lipgloss.Color("62"))
 
+	filePickerDirStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("15")).
+				Background(lipgloss.Color("235"))
+
 	// selectorMovingStyle marks the row currently being moved (Space
 	// reorder mode) so the user can see what's being dragged.
 	selectorMovingStyle = lipgloss.NewStyle().

@@ -90,7 +90,7 @@ func TestCenteredModalButtonsDispatchKeyboardHandlers(t *testing.T) {
 		}
 		geometry := m.centeredModalGeometry(m.currentModalBox())
 		clickModalLabel(t, m, geometry.Content.Height-1,
-			"Enter start   Esc cancel   ↑/↓ choose   Tab fields   1/2/3 choose", "Esc cancel")
+			"Enter start/browse   Esc cancel   ↑/↓ choose   Tab fields   1/2/3 choose", "Esc cancel")
 		if m.s.mode != modeNormal {
 			t.Fatalf("new-session cancel left mode %v", m.s.mode)
 		}

@@ -23,7 +23,7 @@ type VTScreen struct {
 	cols       int
 	rows       int
 	dirty      bool
-	rawHistory []byte // raw PTY bytes capped at maxScrollback, for WS replay
+	rawHistory byteRing // raw PTY bytes capped at maxScrollback, for WS replay
 
 	logicalScrollback []logicalLine
 	pendingLines      []logicalLine
@@ -32,6 +32,11 @@ type VTScreen struct {
 	lineANSI          strings.Builder
 	pendingControl    []byte
 	pendingCR         bool
+	pendingCRANSI     []byte
+	observedLines     []string
+	observedPlain     strings.Builder
+	observedControl   []byte
+	observedCR        bool
 
 	reply     atomic.Pointer[io.Writer]
 	replyOnce sync.Once
@@ -71,10 +76,69 @@ type logicalLine struct {
 	Plain string
 }
 
+// byteRing keeps the replay tail without reallocating and copying the full
+// 256 KiB history on every PTY write after the cap is reached.
+type byteRing struct {
+	buf   []byte
+	start int
+}
+
+func (r *byteRing) append(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	if len(p) >= maxScrollback {
+		if cap(r.buf) < maxScrollback {
+			r.buf = make([]byte, maxScrollback)
+		} else {
+			r.buf = r.buf[:maxScrollback]
+		}
+		copy(r.buf, p[len(p)-maxScrollback:])
+		r.start = 0
+		return
+	}
+	if len(r.buf) < maxScrollback {
+		if len(r.buf)+len(p) <= maxScrollback {
+			r.buf = append(r.buf, p...)
+			return
+		}
+		keep := maxScrollback - len(p)
+		next := make([]byte, maxScrollback)
+		copy(next, r.buf[len(r.buf)-keep:])
+		copy(next[keep:], p)
+		r.buf = next
+		r.start = 0
+		return
+	}
+
+	first := copy(r.buf[r.start:], p)
+	copy(r.buf, p[first:])
+	r.start = (r.start + len(p)) % maxScrollback
+}
+
+func (r *byteRing) len() int {
+	return len(r.buf)
+}
+
+func (r *byteRing) bytes() []byte {
+	out := make([]byte, len(r.buf))
+	if r.start == 0 || len(r.buf) < maxScrollback {
+		copy(out, r.buf)
+		return out
+	}
+	n := copy(out, r.buf[r.start:])
+	copy(out[n:], r.buf[:r.start])
+	return out
+}
+
 // NewVTScreen creates a VT screen of given dimensions.
 func NewVTScreen(cols, rows int) *VTScreen {
 	e := vt.NewEmulator(cols, rows)
-	e.SetScrollbackSize(maxScrollbackLines * 8)
+	// VTScreen owns semantic scrollback in logicalScrollback. Keeping another
+	// 80,000-line cell buffer inside the emulator made every line after the
+	// buffer filled shift a huge slice, dominating continuous-output workloads.
+	// The emulator API cannot disable scrollback entirely, so retain one line.
+	e.SetScrollbackSize(1)
 	s := &VTScreen{cols: cols, rows: rows, term: e, cursorVisible: true, cursorShape: vt.CursorBlock}
 	e.SetCallbacks(vt.Callbacks{
 		EnableMode:       func(mode ansi.Mode) { s.setModeLocked(mode, true) },
@@ -145,11 +209,9 @@ func (s *VTScreen) Write(p []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.rawHistory = append(s.rawHistory, p...)
-	if len(s.rawHistory) > maxScrollback {
-		s.rawHistory = s.rawHistory[len(s.rawHistory)-maxScrollback:]
-	}
+	s.rawHistory.append(p)
 
+	s.captureObservedLines(p)
 	s.captureLogicalLines(p)
 	_, _ = s.term.Write(translateSCORC(p))
 	s.dirty = true
@@ -196,12 +258,75 @@ func containsESC(p []byte) bool {
 	return false
 }
 
+func (s *VTScreen) captureObservedLines(p []byte) {
+	for _, b := range p {
+		if len(s.observedControl) > 0 {
+			s.observedControl = append(s.observedControl, b)
+			if ansiSequenceComplete(s.observedControl) {
+				s.observedControl = nil
+			}
+			continue
+		}
+		if s.observedCR {
+			switch b {
+			case '\n':
+				s.observedCR = false
+				s.finishObservedLine()
+				continue
+			case '\r':
+				continue
+			case 0x1b:
+				s.observedControl = append(s.observedControl[:0], b)
+				continue
+			}
+			s.observedCR = false
+			s.observedPlain.Reset()
+		}
+		switch b {
+		case 0x1b:
+			s.observedControl = append(s.observedControl[:0], b)
+		case '\r':
+			s.observedCR = true
+		case '\n':
+			s.finishObservedLine()
+		case '\b':
+			trimLastRune(&s.observedPlain)
+		case '\t':
+			s.observedPlain.WriteByte('\t')
+		default:
+			if b >= 0x20 || b >= 0x80 {
+				s.observedPlain.WriteByte(b)
+			}
+		}
+	}
+}
+
+func (s *VTScreen) finishObservedLine() {
+	if line := s.observedPlain.String(); line != "" {
+		s.observedLines = append(s.observedLines, line)
+		if overflow := len(s.observedLines) - 256; overflow > 0 {
+			s.observedLines = s.observedLines[overflow:]
+		}
+	}
+	s.observedPlain.Reset()
+}
+
 func (s *VTScreen) captureLogicalLines(p []byte) {
 	for _, b := range p {
 		if len(s.pendingControl) > 0 {
 			s.pendingControl = append(s.pendingControl, b)
 			if ansiSequenceComplete(s.pendingControl) {
-				s.captureControlSequence(s.pendingControl)
+				if s.pendingCR && isSGR(s.pendingControl) {
+					s.pendingCRANSI = append(s.pendingCRANSI, s.pendingControl...)
+				} else {
+					if s.pendingCR {
+						s.pendingCR = false
+						s.pendingCRANSI = nil
+						s.linePlain.Reset()
+						s.lineANSI.Reset()
+					}
+					s.captureControlSequence(s.pendingControl)
+				}
 				s.pendingControl = nil
 			}
 			continue
@@ -216,20 +341,32 @@ func (s *VTScreen) captureLogicalLines(p []byte) {
 		// prompt redraw, so scrolled-back output filled with duplicated,
 		// blank-looking prompt lines that were absent from the live screen.
 		if s.pendingCR {
-			s.pendingCR = false
-			if b == '\n' {
+			switch b {
+			case '\n':
+				s.pendingCR = false
+				s.pendingCRANSI = nil
 				s.finishLogicalLine()
+				continue
+			case '\r':
+				s.pendingCRANSI = nil
+				continue
+			case 0x1b:
+				s.pendingControl = append(s.pendingControl[:0], b)
 				continue
 			}
 			// Lone CR: overwrite the current (still-uncommitted) line.
+			s.pendingCR = false
 			s.linePlain.Reset()
 			s.lineANSI.Reset()
+			s.lineANSI.Write(s.pendingCRANSI)
+			s.pendingCRANSI = nil
 		}
 		switch b {
 		case 0x1b:
 			s.pendingControl = append(s.pendingControl[:0], b)
 		case '\r':
 			s.pendingCR = true
+			s.pendingCRANSI = nil
 		case '\n':
 			s.finishLogicalLine()
 		case '\b':
@@ -394,7 +531,7 @@ func (s *VTScreen) Resize(cols, rows int) {
 // SIGWINCH that accompanies a resize, so replaying their old absolute-coordinate
 // drawing at a new width would only flash a garbage frame before their redraw.
 func (s *VTScreen) reflowEmulatorLocked(cols, rows int) {
-	if len(s.rawHistory) == 0 || s.term.IsAltScreen() {
+	if s.rawHistory.len() == 0 || s.term.IsAltScreen() {
 		return
 	}
 	// Render() only shows the visible rows x cols screen, so we only need to
@@ -404,7 +541,7 @@ func (s *VTScreen) reflowEmulatorLocked(cols, rows int) {
 	// logical lines ahead of it — each logical line yields >= 1 physical row,
 	// so rows+pad newlines guarantee the visible screen fills without leaving
 	// blank ghost rows at the top.
-	tail := reflowTail(s.rawHistory, rows)
+	tail := reflowTail(s.rawHistory.bytes(), rows)
 
 	// Suppress terminal replies while replaying: the history may contain DSR/CPR
 	// queries whose responses would otherwise be forwarded to the child as if it
@@ -473,6 +610,16 @@ func (s *VTScreen) Render() string {
 	defer s.mu.Unlock()
 	s.dirty = false
 	return s.term.Render()
+}
+
+// RenderSnapshot returns the ANSI screen and matching plain rows/wrap metadata
+// from the same emulator state. Selection must not combine a previously
+// painted frame with metadata read after newer PTY output arrives.
+func (s *VTScreen) RenderSnapshot() (string, []BufferLine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dirty = false
+	return s.term.Render(), s.visibleLinesLocked()
 }
 
 // RenderWithScrollback returns scrollback lines followed by the current screen.
@@ -551,27 +698,77 @@ func (s *VTScreen) BufferLines() []BufferLine {
 func (s *VTScreen) VisibleLines() []BufferLine {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.visibleLinesLocked()
+}
+
+func (s *VTScreen) visibleLinesLocked() []BufferLine {
 	out := make([]BufferLine, 0, s.rows)
 	for y := 0; y < s.rows; y++ {
 		out = append(out, BufferLine{Text: strings.TrimRight(s.plainRowAtLocked(y), " ")})
 	}
 	logical := make([]BufferLine, 0, s.pendingRows+s.rows)
+	logicalSources := make([]string, 0, len(s.pendingLines)+s.rows+1)
+	scrollbackStart := len(s.logicalScrollback)
+	scrollbackRows := 0
+	for scrollbackStart > 0 && scrollbackRows < s.rows*2 {
+		scrollbackStart--
+		scrollbackRows += wrappedLineCount(s.logicalScrollback[scrollbackStart].Plain, s.cols)
+	}
+	for _, line := range s.logicalScrollback[scrollbackStart:] {
+		logical = appendWrappedBufferLines(logical, line.Plain, s.cols)
+		logicalSources = append(logicalSources, line.Plain)
+	}
 	for _, line := range s.pendingLines {
 		logical = appendWrappedBufferLines(logical, line.Plain, s.cols)
+		logicalSources = append(logicalSources, line.Plain)
 	}
 	if current := s.linePlain.String(); current != "" {
 		logical = appendWrappedBufferLines(logical, current, s.cols)
+		logicalSources = append(logicalSources, current)
+	}
+	observedStart := len(s.observedLines) - s.rows*2
+	if observedStart < 0 {
+		observedStart = 0
+	}
+	logicalSources = append(logicalSources, s.observedLines[observedStart:]...)
+	if current := s.observedPlain.String(); current != "" {
+		logicalSources = append(logicalSources, current)
 	}
 	if len(logical) > s.rows*2 {
 		logical = logical[len(logical)-s.rows*2:]
 	}
 	applyMatchingWrapMetadata(out, logical)
+	applyAdjacentWrapMetadata(out, logicalSources, s.cols)
 	for i := 0; i+1 < len(out); i++ {
 		if !out[i].WrapKnown && ansi.StringWidth(out[i].Text) >= s.cols {
 			out[i].SoftWrap = true
 		}
 	}
 	return out
+}
+
+func applyAdjacentWrapMetadata(visible []BufferLine, logical []string, width int) {
+	if width <= 0 {
+		return
+	}
+	for i := 0; i+1 < len(visible); i++ {
+		if visible[i].WrapKnown || visible[i].Text == "" || visible[i+1].Text == "" {
+			continue
+		}
+		padding := width - ansi.StringWidth(visible[i].Text)
+		if padding <= 0 {
+			continue
+		}
+		joined := visible[i].Text + strings.Repeat(" ", padding) + visible[i+1].Text
+		for _, source := range logical {
+			if strings.Contains(source, joined) {
+				visible[i].Text += strings.Repeat(" ", padding)
+				visible[i].SoftWrap = true
+				visible[i].WrapKnown = true
+				break
+			}
+		}
+	}
 }
 
 func applyMatchingWrapMetadata(visible, logical []BufferLine) {
@@ -589,8 +786,16 @@ func applyMatchingWrapMetadata(visible, logical []BufferLine) {
 		}
 	}
 	for i := 0; i < bestLen; i++ {
-		visible[bestVisible+i].SoftWrap = logical[bestLogical+i].SoftWrap
+		logicalLine := logical[bestLogical+i]
+		visible[bestVisible+i].SoftWrap = logicalLine.SoftWrap
 		visible[bestVisible+i].WrapKnown = true
+		// A space in the terminal's last column is visually blank and is
+		// trimmed from the cell snapshot, but it remains selected content
+		// regardless of whether the following boundary is soft or CR/LF.
+		trimmed := strings.TrimRight(logicalLine.Text, " ")
+		if trailing := len(logicalLine.Text) - len(trimmed); trailing > 0 {
+			visible[bestVisible+i].Text += strings.Repeat(" ", trailing)
+		}
 	}
 }
 
@@ -618,9 +823,7 @@ func cellText(cell *uv.Cell) string {
 func (s *VTScreen) RawSnapshot() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snap := make([]byte, len(s.rawHistory))
-	copy(snap, s.rawHistory)
-	return snap
+	return s.rawHistory.bytes()
 }
 
 // Dirty reports whether the screen has changed since the last Render.

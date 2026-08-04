@@ -23,6 +23,9 @@ func (s *state) syncActiveConnectionFields() {
 	if c.scrollbackCache == nil {
 		c.scrollbackCache = make(map[int]scrollWrapCache)
 	}
+	if c.liveLines == nil {
+		c.liveLines = make(map[int][]session.BufferLine)
+	}
 	for _, conn := range s.connections {
 		conn.webActive.Store(conn == c)
 	}
@@ -31,6 +34,7 @@ func (s *state) syncActiveConnectionFields() {
 	s.altScreens = c.altScreens
 	s.scrollbackMode = c.scrollbackMode
 	s.scrollbackCache = c.scrollbackCache
+	s.liveLines = c.liveLines
 }
 
 func (s *state) addConnection(name string) *connectionState {
@@ -43,6 +47,7 @@ func (s *state) addConnection(name string) *connectionState {
 		altScreens:      make(map[int]bool),
 		scrollbackMode:  make(map[int]bool),
 		scrollbackCache: make(map[int]scrollWrapCache),
+		liveLines:       make(map[int][]session.BufferLine),
 	}
 	s.connections = append(s.connections, c)
 	if len(s.connections) == 1 {
@@ -151,6 +156,7 @@ func (s *state) removeConnection(index int) {
 	conn.altScreens = nil
 	conn.scrollbackMode = nil
 	conn.scrollbackCache = nil
+	conn.liveLines = nil
 	s.connections = append(s.connections[:index], s.connections[index+1:]...)
 	if s.activeConn >= len(s.connections) {
 		s.activeConn = len(s.connections) - 1
@@ -294,7 +300,7 @@ func (s *state) applyGeometry() {
 		} else {
 			delete(s.scrollbackCache, idx)
 			vp.SoftWrap = true
-			vp.SetContent(sess.Screen().Render())
+			s.setLiveContent(idx, vp, sess)
 			anchorViewportToCursor(vp, sess)
 		}
 		s.viewports[idx] = vp

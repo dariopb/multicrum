@@ -38,6 +38,7 @@ const (
 	modeDeleteConfirm
 	modeScrollSearch
 	modeContextMenu
+	modeFilePicker
 )
 
 type connectionState struct {
@@ -47,6 +48,7 @@ type connectionState struct {
 	altScreens      map[int]bool
 	scrollbackMode  map[int]bool
 	scrollbackCache map[int]scrollWrapCache
+	liveLines       map[int][]session.BufferLine
 	initialCfg      []startupSession
 	// outputPending coalesces PTY output notifications: the read loop sets it
 	// and only enqueues a connectionOutputMsg when it was previously clear, so
@@ -85,6 +87,7 @@ type state struct {
 	viewports              map[int]*viewport.Model
 	altScreens             map[int]bool // last-seen alt-screen state per session index, for transition detection
 	scrollbackCache        map[int]scrollWrapCache
+	liveLines              map[int][]session.BufferLine
 	connections            []*connectionState
 	activeConn             int
 	serverName             string
@@ -118,6 +121,7 @@ type state struct {
 	deleteChoice           int
 	newSession             newSessionState // state for the new-session modal
 	newSessionReturn       mode
+	filePicker             filePickerState
 	connCursor             int
 	connRename             string
 	connRenameCursor       int
@@ -153,6 +157,7 @@ type state struct {
 	detachClient           func()
 	quitting               bool         // suppresses redraw after the terminal is explicitly cleared
 	renderPending          bool         // a render tick is in flight (coalescing PTY bursts)
+	lastRender             time.Time    // leading-edge render immediately after idle, then cap at frame rate
 	scrollbackMode         map[int]bool // sessions currently scrolled up (need full scrollback in viewport)
 	paneCache              paneCache    // memoizes renderPaneContent across redundant View() calls
 }
@@ -218,12 +223,14 @@ func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Cl
 		altScreens:      make(map[int]bool),
 		scrollbackMode:  make(map[int]bool),
 		scrollbackCache: make(map[int]scrollWrapCache),
+		liveLines:       make(map[int][]session.BufferLine),
 	}
 	st := &state{
 		viewports:           conn.viewports,
 		altScreens:          conn.altScreens,
 		scrollbackMode:      conn.scrollbackMode,
 		scrollbackCache:     conn.scrollbackCache,
+		liveLines:           conn.liveLines,
 		connections:         []*connectionState{conn},
 		serverName:          "default",
 		width:               cols,
@@ -443,15 +450,37 @@ type LocalClientCountMsg int
 
 type localClientCountMsg = LocalClientCountMsg
 
-// renderTickMsg is sent ~at renderInterval after an OutputMsg arrives so the
-// visible viewport gets refreshed once per frame rather than once per PTY
-// chunk. Coalescing avoids the per-keystroke lag that builds up when a busy
-// child (htop, btop, vim, fast-scrolling logs) generates many small writes:
-// re-rendering 60 times/s is plenty for visual fluidity, far cheaper than
-// running RenderWithScrollback + viewport.SetContent on every read.
-type renderTickMsg struct{}
+// renderTickMsg refreshes the visible viewport. The first output after an idle
+// period is rendered immediately for responsive command echo; sustained output
+// is then capped to one refresh per renderInterval.
+type renderTickMsg struct {
+	at time.Time
+}
 
 const renderInterval = 16 * time.Millisecond
+
+func renderDelay(lastRender, now time.Time) time.Duration {
+	if lastRender.IsZero() {
+		return 0
+	}
+	delay := lastRender.Add(renderInterval).Sub(now)
+	if delay < 0 {
+		return 0
+	}
+	return delay
+}
+
+func (s *state) scheduleRender(now time.Time) tea.Cmd {
+	if s.renderPending {
+		return nil
+	}
+	s.renderPending = true
+	delay := renderDelay(s.lastRender, now)
+	if delay == 0 {
+		return func() tea.Msg { return renderTickMsg{at: now} }
+	}
+	return tea.Tick(delay, func(at time.Time) tea.Msg { return renderTickMsg{at: at} })
+}
 
 // Init starts the first session.
 func (m Model) Init() tea.Cmd {
@@ -609,6 +638,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if s.manager.Len() > 1 {
 				delete(s.viewports, msg.ID)
 				delete(s.scrollbackCache, msg.ID)
+				delete(s.liveLines, msg.ID)
 				s.manager.Kill(msg.ID)
 				s.refreshFocused()
 				s.notifyMeta()
@@ -709,28 +739,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		s.ensureViewport(msg.Msg.Index, s.width, s.height)
-		if s.renderPending {
+		if cmd := s.scheduleRender(time.Now()); cmd == nil {
 			// A frame is already scheduled; leave outputPending set so every
 			// further child write in this frame window coalesces into it. The
 			// flag is re-armed by renderTickMsg once the frame is drawn.
 			return m, nil
+		} else {
+			return m, cmd
 		}
-		s.renderPending = true
-		return m, tea.Tick(renderInterval, func(time.Time) tea.Msg { return renderTickMsg{} })
 
 	case OutputMsg:
 		if msg.Index != s.manager.FocusedIndex() {
 			return m, nil
 		}
 		s.ensureViewport(msg.Index, s.width, s.height)
-		if s.renderPending {
-			return m, nil
-		}
-		s.renderPending = true
-		return m, tea.Tick(renderInterval, func(time.Time) tea.Msg { return renderTickMsg{} })
+		return m, s.scheduleRender(time.Now())
 
 	case renderTickMsg:
 		s.renderPending = false
+		if msg.at.IsZero() {
+			s.lastRender = time.Now()
+		} else {
+			s.lastRender = msg.at
+		}
 		// A connection or session switch can happen after one connection
 		// schedules this shared render tick. Output from the newly active
 		// connection then joins the same frame window, so re-arming only the
@@ -751,7 +782,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.scrollbackMode[idx] = false
 					delete(s.scrollbackCache, idx)
 					vp.SoftWrap = true
-					vp.SetContent(sess.Screen().Render())
+					s.setLiveContent(idx, vp, sess)
 					vp.GotoBottom()
 					s.clearSelection()
 					s.clearSearch()
@@ -766,14 +797,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						s.scrollbackMode[idx] = false
 						delete(s.scrollbackCache, idx)
 						vp.SoftWrap = true
-						vp.SetContent(sess.Screen().Render())
+						s.setLiveContent(idx, vp, sess)
 						anchorViewportToCursor(vp, sess)
 						s.clearSearch()
 					}
 				} else {
 					// Hot path: only the visible screen, bounded cols x rows
 					// of work per frame regardless of scrollback depth.
-					vp.SetContent(sess.Screen().Render())
+					s.setLiveContent(idx, vp, sess)
 					anchorViewportToCursor(vp, sess)
 				}
 				s.viewports[idx] = vp
@@ -1013,6 +1044,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := s.handleNewSessionKey(m, msg)
 			return m, cmd
 		}
+		if s.mode == modeFilePicker {
+			s.handleFilePickerKey(msg)
+			return m, nil
+		}
 		if s.mode == modeConnections {
 			cmd := s.handleConnectionsKey(m, msg)
 			return m, cmd
@@ -1190,10 +1225,21 @@ func (s *state) ensureViewport(idx, w, h int) {
 func (s *state) resetViewport(idx, w, h int) {
 	geom := s.geometry()
 	vp := viewport.New(viewport.WithWidth(geom.Pane.Width), viewport.WithHeight(geom.Pane.Height))
-	vp.SoftWrap = true
+	vp.SoftWrap = false
 	vp.SetContent("")
 	s.viewports[idx] = &vp
 	delete(s.scrollbackCache, idx)
+	delete(s.liveLines, idx)
+}
+
+func (s *state) setLiveContent(idx int, vp *viewport.Model, sess *session.Session) {
+	content, lines := sess.Screen().RenderSnapshot()
+	// Live content is already an exact terminal cell grid. The pane renders
+	// those physical rows without wrapping, so viewport offset math must count
+	// the same rows or it can skip a row at the bottom of a full screen.
+	vp.SoftWrap = false
+	vp.SetContent(content)
+	s.liveLines[idx] = lines
 }
 
 func (s *state) setScrollbackContent(idx int, vp *viewport.Model, content string) {
@@ -1293,7 +1339,7 @@ func (s *state) bottomFocused() {
 		vp.SoftWrap = true
 		for _, sess := range s.manager.Sessions() {
 			if sess.Index() == idx {
-				vp.SetContent(sess.Screen().Render())
+				s.setLiveContent(idx, vp, sess)
 				break
 			}
 		}
@@ -1321,7 +1367,7 @@ func (s *state) refreshFocused() {
 			vp := s.viewports[idx]
 			delete(s.scrollbackCache, idx)
 			vp.SoftWrap = true
-			vp.SetContent(sess.Screen().Render())
+			s.setLiveContent(idx, vp, sess)
 			vp.GotoBottom()
 			s.scrollbackMode[idx] = false
 			s.clearSearch()
@@ -1456,6 +1502,7 @@ func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			idx := s.manager.FocusedIndex()
 			delete(s.viewports, idx)
 			delete(s.scrollbackCache, idx)
+			delete(s.liveLines, idx)
 			s.manager.Kill(idx)
 			s.refreshFocused()
 			s.notifyMeta()
@@ -1604,6 +1651,7 @@ func (s *state) resolveExitPrompt(m Model) tea.Cmd {
 	}
 	delete(s.viewports, id)
 	delete(s.scrollbackCache, id)
+	delete(s.liveLines, id)
 	s.manager.Kill(id)
 	s.refreshFocused()
 	s.notifyMeta()
@@ -1903,6 +1951,7 @@ func (s *state) moveSession(from, to int) {
 	conn.altScreens = moveIndexedMap(conn.altScreens, from, to)
 	conn.scrollbackMode = moveIndexedMap(conn.scrollbackMode, from, to)
 	conn.scrollbackCache = moveIndexedMap(conn.scrollbackCache, from, to)
+	conn.liveLines = moveIndexedMap(conn.liveLines, from, to)
 	s.manager.Move(from, to)
 	s.syncActiveConnectionFields()
 	s.notifyMeta()
@@ -1953,6 +2002,7 @@ func (s *state) removeSessionAtSelectorCursor() {
 	idx := matches[s.selectCursor].Index()
 	delete(s.viewports, idx)
 	delete(s.scrollbackCache, idx)
+	delete(s.liveLines, idx)
 	s.manager.Kill(idx)
 	s.refreshFocused()
 	s.notifyMeta()
@@ -2211,6 +2261,8 @@ func (m Model) renderPane() string {
 		return m.overlayBox(pane, m.renderExitModal())
 	case modeNewSession:
 		return m.overlayBox(pane, m.renderNewSessionModal())
+	case modeFilePicker:
+		return m.overlayBox(pane, m.renderFilePickerModal())
 	case modeSelecting:
 		return m.overlayBox(pane, m.renderSessionSelectorModal())
 	case modeConnections:
@@ -2332,10 +2384,15 @@ func softWrapRowsWithPlain(lines []string, maxWidth int) ([]string, []session.Bu
 		}
 		for idx := 0; idx < w; idx += maxWidth {
 			row := ansi.Cut(line, idx, maxWidth+idx)
+			softWrap := idx+maxWidth < w
+			text := ansi.Strip(row)
+			if !softWrap {
+				text = strings.TrimRight(text, " ")
+			}
 			out = append(out, row)
 			plain = append(plain, session.BufferLine{
-				Text:     strings.TrimRight(ansi.Strip(row), " "),
-				SoftWrap: idx+maxWidth < w,
+				Text:     text,
+				SoftWrap: softWrap,
 			})
 		}
 	}

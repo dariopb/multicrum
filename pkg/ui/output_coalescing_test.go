@@ -2,9 +2,23 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	"multicrum/pkg/session"
 )
+
+func TestRenderDelayUsesLeadingEdgeThenFrameCap(t *testing.T) {
+	now := time.Unix(100, 0)
+	if got := renderDelay(time.Time{}, now); got != 0 {
+		t.Fatalf("idle render delay = %v, want immediate", got)
+	}
+	if got := renderDelay(now.Add(-4*time.Millisecond), now); got != 12*time.Millisecond {
+		t.Fatalf("busy render delay = %v, want 12ms", got)
+	}
+	if got := renderDelay(now.Add(-renderInterval), now); got != 0 {
+		t.Fatalf("elapsed-frame render delay = %v, want immediate", got)
+	}
+}
 
 func TestRenderTickRearmsOutputAfterConnectionSwitch(t *testing.T) {
 	m := NewModel([]string{"bash"}, 80, 24)

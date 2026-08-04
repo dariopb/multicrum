@@ -48,6 +48,16 @@ func BenchmarkScreenRender(b *testing.B) {
 	}
 }
 
+func BenchmarkScreenRenderSnapshot(b *testing.B) {
+	m := benchModel(b, 120, 40)
+	sess := m.s.manager.Focused()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = sess.Screen().RenderSnapshot()
+	}
+}
+
 func BenchmarkRenderPaneContent(b *testing.B) {
 	m := benchModel(b, 120, 40)
 	vp := m.s.viewports[0]

@@ -45,13 +45,24 @@ type client struct {
 }
 
 func SocketDir() (string, error) {
-	base := os.Getenv("XDG_RUNTIME_DIR")
-	if base == "" {
-		base = filepath.Join(os.TempDir(), "multicrum-"+strconv.Itoa(os.Getuid()))
-	}
-	dir := filepath.Join(base, "multicrum")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dir := filepath.Join(os.TempDir(), "multicrum-"+strconv.Itoa(os.Getuid()))
+	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
 		return "", err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("refusing to use non-directory socket path %s", dir)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != uint32(os.Getuid()) {
+		return "", fmt.Errorf("refusing to use socket directory not owned by current user: %s", dir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return "", fmt.Errorf("secure socket directory %s: %w", dir, err)
+		}
 	}
 	return dir, nil
 }

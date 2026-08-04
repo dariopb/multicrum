@@ -21,6 +21,29 @@ func TestVTScreenDefaultsToSteadyBlockCursor(t *testing.T) {
 	}
 }
 
+func TestByteRingPreservesCappedTail(t *testing.T) {
+	var ring byteRing
+	input := bytes.Repeat([]byte("0123456789"), maxScrollback/10+100)
+	for len(input) > 0 {
+		n := 4093
+		if n > len(input) {
+			n = len(input)
+		}
+		ring.append(input[:n])
+		input = input[n:]
+	}
+
+	got := ring.bytes()
+	if len(got) != maxScrollback {
+		t.Fatalf("ring length = %d, want %d", len(got), maxScrollback)
+	}
+	want := bytes.Repeat([]byte("0123456789"), maxScrollback/10+100)
+	want = want[len(want)-maxScrollback:]
+	if !bytes.Equal(got, want) {
+		t.Fatal("ring did not preserve the newest bytes in order")
+	}
+}
+
 func (w replyCapture) Write(p []byte) (int, error) {
 	w.ch <- bytes.Clone(p)
 	return len(p), nil
@@ -190,6 +213,24 @@ func TestScrollbackCRLFOnlyCreatesOneLogicalLine(t *testing.T) {
 	}
 }
 
+func TestScrollbackCRLFSeparatedByANSIControls(t *testing.T) {
+	s := NewVTScreen(40, 4)
+	s.Write([]byte("C:\\Users\\dario>"))
+	for i := 0; i < 10; i++ {
+		s.Write([]byte("\r\x1b[0m\nC:\\Users\\dario>"))
+	}
+
+	lines := s.BufferLines()
+	for i, line := range lines {
+		if line.Text == "" {
+			t.Fatalf("BufferLines[%d] is empty after ANSI-separated CRLF: %#v", i, lines)
+		}
+	}
+	if got := strings.Count(s.RenderWithScrollback(), "C:\\Users\\dario>"); got != 11 {
+		t.Fatalf("prompt appears %d times, want 11", got)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -294,8 +335,49 @@ func TestVisibleLinesDistinguishesSoftWrapFromHardLineBreak(t *testing.T) {
 		s.Write([]byte("abcd efgh\r\n"))
 
 		lines := s.VisibleLines()
-		if len(lines) < 2 || lines[0].Text != "abcd" || !lines[0].SoftWrap {
+		if len(lines) < 2 || lines[0].Text != "abcd " || !lines[0].SoftWrap {
 			t.Fatalf("VisibleLines wrap metadata = %#v, trailing-space row must remain soft", lines)
+		}
+	})
+
+	t.Run("cursor redraw soft wrap ending in space", func(t *testing.T) {
+		s := NewVTScreen(5, 4)
+		s.Write([]byte("xyz\x1b[H\x1b[2Kabcd efgh"))
+
+		lines := s.VisibleLines()
+		if len(lines) < 2 || lines[0].Text != "abcd " || !lines[0].SoftWrap {
+			t.Fatalf("VisibleLines wrap metadata = %#v, redrawn trailing-space row must remain soft", lines)
+		}
+	})
+
+	t.Run("scrollback tail preserves soft wrap ending in space", func(t *testing.T) {
+		s := NewVTScreen(5, 5)
+		s.Write([]byte("abcdefghijklmn p\r\none\r\ntwo\r\nthree"))
+
+		lines := s.VisibleLines()
+		if len(lines) < 2 || lines[0].Text != "klmn " || lines[1].Text != "p" || !lines[0].SoftWrap {
+			t.Fatalf("VisibleLines wrap metadata = %#v, visible scrollback tail must remain soft", lines)
+		}
+	})
+
+	t.Run("redraw controls preserve observed boundary space", func(t *testing.T) {
+		s := NewVTScreen(5, 4)
+		s.Write([]byte("abcd efgh"))
+		s.Write([]byte("\r\x1b[?25l"))
+
+		lines := s.VisibleLines()
+		if len(lines) < 2 || lines[0].Text != "abcd " || lines[1].Text != "efgh" || !lines[0].SoftWrap {
+			t.Fatalf("VisibleLines wrap metadata = %#v, observed boundary space must remain soft", lines)
+		}
+	})
+
+	t.Run("cursor redraw hard break remains hard", func(t *testing.T) {
+		s := NewVTScreen(5, 4)
+		s.Write([]byte("xyz\x1b[H\x1b[2Kabcd\r\nnext"))
+
+		lines := s.VisibleLines()
+		if len(lines) < 2 || lines[0].SoftWrap {
+			t.Fatalf("VisibleLines wrap metadata = %#v, redrawn hard break must remain hard", lines)
 		}
 	})
 
