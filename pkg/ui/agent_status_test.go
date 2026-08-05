@@ -164,6 +164,9 @@ func TestAgentMetadataAnimationFollowsConfiguration(t *testing.T) {
 		info.Spinner != config.AgentSpinnerStyleRectangle {
 		t.Fatalf("enabled metadata = %#v, want animated", info)
 	}
+	if info := m.s.connectionAgentInfo(m.s.connections[0]); info == nil || info.Count != 1 {
+		t.Fatalf("connection metadata = %#v, want agent count 1", info)
+	}
 	m.s.agentSpinnerStyle = config.AgentSpinnerStyleCircle
 	if info := m.s.sessionAgentInfo(sess); info == nil ||
 		info.Spinner != config.AgentSpinnerStyleCircle {

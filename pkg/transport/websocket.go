@@ -25,6 +25,7 @@ type AgentInfo struct {
 	Source   string `json:"source"`
 	Animate  bool   `json:"animate,omitempty"`
 	Spinner  string `json:"spinner,omitempty"`
+	Count    int    `json:"count,omitempty"`
 }
 
 type SessionInfo struct {
@@ -304,12 +305,12 @@ func indexHTML(wsQuery string) string {
 <html>
 <head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=.25,maximum-scale=5,user-scalable=yes,viewport-fit=cover"/>
 <title>multicrum</title>
 <script>
 (function(){
   try{
-    var d={theme:"light",accent:"#7c3aed",uiFont:"system",topbarFont:"system",terminalFont:"cascadia",fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:"#0b0b10",scrollback:4000,viewportMode:"device",viewportWidth:1280};
+    var d={theme:"dark",accent:"#7c3aed",uiFont:"system",topbarFont:"system",terminalFont:"cascadia",fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:"#0b0b10",scrollback:4000,viewportMode:"device",viewportWidth:1280};
     var raw=JSON.parse(localStorage.getItem("multicrum-settings")||"{}");
     if(raw.font && !raw.uiFont) raw.uiFont=raw.font;
     if(raw.fontMono && !raw.terminalFont) raw.terminalFont=raw.fontMono;
@@ -366,6 +367,7 @@ func indexHTML(wsQuery string) string {
   --font-mono:"Cascadia Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   --font-size-base:14px;
   --topbar-font-size:12px;
+  --topbar-height:calc(var(--topbar-font-size) + 23px);
   --terminal-font-size:14px;
 }
 html[data-theme="light"]{
@@ -415,11 +417,43 @@ html[data-terminalfont="roboto-mono"]{--font-mono:"Roboto Mono",ui-monospace,"SF
 @font-face{font-family:"Roboto";src:url("/static/fonts/RobotoFlex.woff2") format("woff2-variations"),url("/static/fonts/RobotoFlex.woff2") format("woff2");font-weight:100 1000;font-style:normal;font-display:swap}
 @font-face{font-family:"Roboto Mono";src:url("/static/fonts/RobotoMono.woff2") format("woff2-variations"),url("/static/fonts/RobotoMono.woff2") format("woff2");font-weight:100 700;font-style:normal;font-display:swap}
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
-body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-family:var(--font);font-size:var(--font-size-base);color:var(--text)}
-#tabbar{display:flex;align-items:stretch;background:linear-gradient(90deg,var(--panel-strong),color-mix(in srgb,var(--accent-violet) 48%,var(--panel)) 45%,color-mix(in srgb,var(--accent-pink) 48%,var(--panel)));border-bottom:1px solid var(--border);box-shadow:0 4px 18px #0008;min-height:calc(var(--topbar-font-size) + 16px);padding:4px 8px;gap:4px;flex-shrink:0;font-family:var(--topbar-font);font-size:var(--topbar-font-size);position:relative}
+html,body{width:100%;height:100%;touch-action:pan-x pan-y pinch-zoom}
+body{height:100vh;height:100dvh;background:var(--bg);font-family:var(--font);font-size:var(--font-size-base);color:var(--text);overflow:hidden}
+#viewport-root{width:100%;height:100%;transform-origin:top left;overflow:hidden}
+#app-shell{display:flex;width:100%;height:100%;min-width:0;min-height:0;touch-action:pan-x pan-y pinch-zoom}
+#connection-rail{width:220px;min-width:150px;max-width:420px;display:flex;flex-direction:column;flex:0 0 auto;background:var(--terminal-bg);border-right:1px solid var(--border);font-family:var(--topbar-font);font-size:var(--topbar-font-size);overflow:visible;position:relative;z-index:30}
+#rail-header{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height);background:color-mix(in srgb,var(--accent-pink) 42%,var(--panel));border-bottom:1px solid var(--border);flex:0 0 auto}
+#rail-header #menu-wrap{display:flex;flex:1 1 auto;min-width:0}
+#btn-menu{display:block;width:100%;border:0;background:transparent;color:#fff;text-align:left;padding:4px 10px;font:inherit;font-weight:700;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#btn-menu:hover{background:color-mix(in srgb,var(--accent-pink) 25%,transparent)}
+#rail-collapse{width:30px;border:0;border-left:1px solid var(--border);background:transparent;color:var(--text-muted);font:inherit;cursor:pointer;flex:0 0 auto}
+#rail-collapse:hover{background:var(--row-hover);color:var(--text)}
+#rail-server{padding:7px 10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid var(--border)}
+#rail-connections{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-y:auto;scrollbar-width:thin;padding:8px 0}
+.rail-connection{display:flex;flex-direction:column;width:100%;padding:6px 10px;border:0;border-left:3px solid transparent;background:transparent;color:var(--text-muted);font:inherit;text-align:left;cursor:pointer}
+.rail-connection:hover{background:var(--row-hover);color:var(--text)}
+.rail-connection.active{background:var(--row-selected);border-left-color:var(--accent-violet);color:var(--text);font-weight:700}
+.rail-connection-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail-connection-count,.rail-agent-row{padding-left:2ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400}
+.rail-connection-count{color:var(--text-soft)}
+.rail-agent-row{padding-left:0}
+.rail-agent-prefix{display:inline-block;width:2ch;text-align:left}
+#rail-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-top:1px solid var(--border);flex:0 0 auto}
+.rail-footer-action{border:0;background:transparent;color:var(--text-muted);font:inherit;cursor:pointer}
+.rail-footer-action:hover{color:var(--text)}
+#rail-resizer{width:5px;flex:0 0 5px;cursor:col-resize;background:transparent;position:relative;z-index:20}
+#rail-resizer:hover,#rail-resizer.dragging{background:var(--accent-violet)}
+body.rail-resizing{cursor:col-resize;user-select:none}
+#main-shell{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0}
+body.rail-collapsed #connection-rail{width:34px!important;min-width:34px;max-width:34px}
+body.rail-collapsed #rail-header #menu-wrap,body.rail-collapsed #rail-server,body.rail-collapsed #rail-connections,body.rail-collapsed #rail-footer{display:none}
+body.rail-collapsed #rail-header{height:100%;border-bottom:0}
+body.rail-collapsed #rail-collapse{width:34px;border-left:0}
+body.rail-collapsed #rail-resizer{display:none}
+#tabbar{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height);background:linear-gradient(90deg,var(--panel-strong),color-mix(in srgb,var(--accent-violet) 48%,var(--panel)) 45%,color-mix(in srgb,var(--accent-pink) 48%,var(--panel)));border-bottom:1px solid var(--border);box-shadow:0 4px 18px #0008;padding:4px 8px;gap:4px;flex-shrink:0;font-family:var(--topbar-font);font-size:var(--topbar-font-size);position:relative}
+#tabbar .btn{min-height:0;height:100%}
 #menu-wrap{position:relative;flex-shrink:0}
-#menu-pop{display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--panel);border:1px solid var(--border-strong);border-radius:7px;box-shadow:0 8px 24px #000a;z-index:50;min-width:200px;padding:4px;flex-direction:column}
+#menu-pop{display:none;position:absolute;top:100%;left:4px;margin-top:4px;background:var(--panel);border:1px solid var(--border-strong);border-radius:7px;box-shadow:0 8px 24px #000a;z-index:50;min-width:220px;padding:4px;flex-direction:column}
 #menu-pop.open{display:flex}
 #keys-pop{display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--panel);border:1px solid var(--border-strong);border-radius:7px;box-shadow:0 8px 24px #000a;z-index:50;padding:6px;flex-direction:column;gap:4px;max-width:calc(100vw - 16px);overflow-x:auto;scrollbar-width:thin}
 #keys-pop.open{display:flex}
@@ -440,38 +474,31 @@ body{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-f
 .agent-state.agent-idle{color:#86efac}
 .agent-provider{opacity:.58}
 .agent-spinner{display:inline-block;width:1ch;text-align:center}
+.rail-agent-prefix.agent-spinner{width:2ch;text-align:left}
 .tab-newtab{color:var(--text-muted);font-family:var(--font-mono);flex-shrink:0}
 .tab-newtab:hover{background:color-mix(in srgb,var(--accent-violet) 30%,transparent);color:#fff}
-#brand{display:inline-flex;align-items:center;padding:4px 12px;font-weight:700;color:#fff;background:color-mix(in srgb,var(--accent-pink) 60%,transparent);margin-left:auto;flex-shrink:0}
-#connection-state{display:inline-flex;align-items:center;height:auto;padding:0 8px;border-radius:5px;border:1px solid color-mix(in srgb,var(--pill-amber-fg) 45%,transparent);background:var(--pill-amber-bg);color:var(--pill-amber-fg);white-space:nowrap;font-size:11px;margin:0 4px}
-#connection-state.connected{border-color:color-mix(in srgb,var(--pill-green-fg) 45%,transparent);background:var(--pill-green-bg);color:var(--pill-green-fg)}
-#connection-state.disconnected{border-color:color-mix(in srgb,var(--pill-red-fg) 45%,transparent);background:var(--pill-red-bg);color:var(--pill-red-fg)}
 .btn{display:inline-flex;align-items:center;justify-content:center;min-height:calc(1em + 15px);padding:.35em 1em;border-radius:7px;cursor:pointer;font-size:inherit;font-family:inherit;line-height:1.2;border:1px solid var(--border);background:color-mix(in srgb,var(--accent-violet) 24%,var(--panel));color:var(--text);box-shadow:0 1px 8px #0004;transition:background .12s,border-color .12s,transform .12s}
 .btn:hover{background:color-mix(in srgb,var(--accent-violet) 36%,var(--panel));border-color:var(--border-strong);transform:translateY(-1px)}
 .btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
 .btn-green{background:color-mix(in srgb,var(--accent-violet) 28%,var(--panel));border-color:var(--border)}.btn-green:hover{background:color-mix(in srgb,var(--accent-violet) 42%,var(--panel))}
 .btn-red{background:color-mix(in srgb,#be123c 30%,var(--panel));border-color:color-mix(in srgb,#fb7185 45%,var(--border));color:var(--pill-red-fg)}.btn-red:hover{background:color-mix(in srgb,#be123c 45%,var(--panel))}
 .btn-blue{background:color-mix(in srgb,var(--accent-violet) 34%,var(--panel));border-color:color-mix(in srgb,var(--accent-violet) 55%,var(--border))}.btn-blue:hover{background:color-mix(in srgb,var(--accent-violet) 48%,var(--panel))}
-#hint,#status-help{display:none}#terminal{flex:1 1 auto;min-height:0;overflow:hidden;padding:0 0 0 6px;background:var(--terminal-bg)}
+#hint,#status-help{display:none}#terminal{flex:1 1 auto;min-height:0;overflow:hidden;padding:0 0 0 6px;background:var(--terminal-bg);touch-action:pan-x pan-y pinch-zoom}
 #terminal .xterm{font-family:var(--font-mono);height:100%}
 #terminal .xterm-viewport{overflow-y:scroll!important;scrollbar-width:none}
 #terminal .xterm-viewport::-webkit-scrollbar{display:none}
-body.ws-connecting #terminal,body.ws-disconnected #terminal,body.ws-connecting #tabbar,body.ws-disconnected #tabbar,body.ws-connecting #statusbar,body.ws-disconnected #statusbar{filter:grayscale(.55);opacity:.55;pointer-events:none}
+body.ws-connecting #terminal,body.ws-disconnected #terminal,body.ws-connecting #tabbar,body.ws-disconnected #tabbar,body.ws-connecting #connection-rail,body.ws-disconnected #connection-rail{filter:grayscale(.55);opacity:.55;pointer-events:none}
 #reconnect-overlay{display:none;position:fixed;inset:0;z-index:90;align-items:center;justify-content:center;background:rgba(0,0,0,.28);color:var(--text);font-family:var(--font)}
 body.ws-connecting #reconnect-overlay,body.ws-disconnected #reconnect-overlay{display:flex}
 #reconnect-box{display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:10px;border:1px solid var(--border-strong);background:var(--panel);box-shadow:0 8px 32px #000a;font-weight:700}
 .spinner{width:18px;height:18px;border:3px solid color-mix(in srgb,var(--accent-violet) 25%,transparent);border-top-color:var(--accent-violet);border-radius:50%;animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-#statusbar{display:flex;align-items:center;gap:8px;min-height:24px;padding:0 10px;background:var(--panel-strong);border-top:1px solid var(--border);color:var(--text-muted);font-family:var(--topbar-font);font-size:12px;flex-shrink:0;white-space:nowrap;overflow:hidden}
-#status-main{font-weight:700;color:var(--accent-violet);display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden}
-.conn-pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:var(--panel-strong);color:var(--text-muted);border:1px solid var(--border);white-space:nowrap;cursor:pointer;font-size:11px}
-.conn-pill.active{background:color-mix(in srgb,var(--accent-violet) 72%,var(--panel));color:#fff;border-color:var(--accent-violet)}
 #modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
 #modal-overlay.open{display:flex}
-/* While the session-tied exit modal is open, keep the tab bar and status bar
+/* While the session-tied exit modal is open, keep the tab bar and connection rail
    above the dimming overlay so their session/connection switch buttons stay
    clickable — switching context is the intended way to leave the modal. */
-body.exit-modal-open #tabbar,body.exit-modal-open #statusbar{position:relative;z-index:110}
+body.exit-modal-open #tabbar,body.exit-modal-open #connection-rail{position:relative;z-index:110}
 #modal{background:var(--panel);border:1px solid var(--border-strong);border-radius:10px;padding:16px;min-width:320px;max-width:620px;width:90%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px #000a;color:var(--text);font-family:var(--font)}
 #modal-body{overflow-y:auto;min-height:0;flex:1 1 auto;margin:-4px -4px 0;padding:4px}
 #modal h2{font-size:13px;color:var(--text-muted);margin-bottom:10px;font-weight:normal;text-transform:uppercase;letter-spacing:.08em}
@@ -508,15 +535,18 @@ body.exit-modal-open #tabbar,body.exit-modal-open #statusbar{position:relative;z
 .settings-preview{border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--panel-strong)}
 .settings-preview-row{display:flex;gap:8px;align-items:center;margin:6px 0}.settings-preview-row.mono{font-family:var(--font-mono);font-size:var(--terminal-font-size)}
 .pill{font-size:11px;padding:2px 7px;border-radius:999px}.pill.green{background:var(--pill-green-bg);color:var(--pill-green-fg)}.pill.amber{background:var(--pill-amber-bg);color:var(--pill-amber-fg)}.pill.red{background:var(--pill-red-bg);color:var(--pill-red-fg)}.pill.gray{background:var(--pill-gray-bg);color:var(--pill-gray-fg)}
-@media(max-width:900px){#brand{display:none}}
+@media(max-width:700px){#connection-rail{max-width:45vw}}
 @media(max-width:620px){.settings-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<div id="tabbar">
-  <div id="menu-wrap">
-    <button id="btn-menu" class="btn btn-blue" title="Menu">☰</button>
-    <div id="menu-pop">
+<div id="viewport-root">
+<div id="app-shell">
+<aside id="connection-rail">
+  <div id="rail-header">
+    <div id="menu-wrap">
+      <button id="btn-menu" title="Global actions">Multicrum</button>
+      <div id="menu-pop">
       <button id="m-sessions" class="menu-item">☰ Sessions <span class="kbd">Alt-S</span></button>
       <button id="m-connections" class="menu-item">☰ Connections <span class="kbd">Ctrl-Alt-O</span></button>
       <button id="m-prevconn" class="menu-item">‹ Prev connection <span class="kbd">Ctrl-Alt-[</span></button>
@@ -531,18 +561,30 @@ body.exit-modal-open #tabbar,body.exit-modal-open #statusbar{position:relative;z
       <button id="m-save" class="menu-item">💾 Save layout <span class="kbd">Alt-P</span></button>
       <button id="m-mouse" class="menu-item">🖱 Mouse: <span id="m-mouse-mode">app</span> <span class="kbd">Alt-M</span></button>
       <button id="m-settings" class="menu-item">⚙ Settings <span class="kbd">Alt-,</span></button>
+      </div>
     </div>
+    <button id="rail-collapse" title="Collapse connection rail">‹</button>
   </div>
+  <div id="rail-server">server: default</div>
+  <div id="rail-connections"></div>
+  <div id="rail-footer">
+    <button id="rail-new" class="rail-footer-action">New</button>
+    <button id="rail-manage" class="rail-footer-action">Manage</button>
+  </div>
+</aside>
+<div id="rail-resizer" title="Resize connection rail"></div>
+<main id="main-shell">
+<div id="tabbar">
   <div id="keys-wrap" style="position:relative;flex-shrink:0">
     <button id="btn-keys" class="btn btn-blue" title="Send key">⌨</button>
     <div id="keys-pop"></div>
   </div>
   <div id="tab-list"></div>
   <button id="btn-newtab" class="tab-pill tab-newtab" title="New session (Alt+N)">[+] Alt+N</button>
-  <span id="brand">multicrum</span>
 </div>
 <div id="terminal"></div>
-<div id="statusbar"><span id="status-main">session 1 │ connecting │ 0x0</span></div>
+</main>
+</div>
 <div id="reconnect-overlay"><div id="reconnect-box"><span class="spinner"></span><span id="reconnect-text">Connecting to multicrum…</span></div></div>
 
 <div id="modal-overlay" tabindex="-1">
@@ -604,10 +646,23 @@ body.exit-modal-open #tabbar,body.exit-modal-open #statusbar{position:relative;z
     <div id="modal-footer">Type to filter &nbsp; ↑↓ navigate &nbsp; Enter select &nbsp; Esc close</div>
   </div>
 </div>
+</div>
 
 <script>
 const SETTINGS_KEY = 'multicrum-settings';
-const DEFAULT_SETTINGS = {theme:'light',accent:'#7c3aed',uiFont:'system',topbarFont:'system',terminalFont:'cascadia',fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:'#0b0b10',palette:'vscode',scrollback:4000,viewportMode:'device',viewportWidth:1280};
+const VIEWPORT_SCALE_KEY = 'multicrum-viewport-scale';
+const DEFAULT_SETTINGS = {theme:'dark',accent:'#7c3aed',uiFont:'system',topbarFont:'system',terminalFont:'cascadia',fontSize:14,topbarFontSize:12,terminalFontSize:14,terminalBg:'#0b0b10',palette:'vscode',scrollback:4000,viewportMode:'device',viewportWidth:1280};
+let viewportScale = Math.max(.5, Math.min(2, Number(localStorage.getItem(VIEWPORT_SCALE_KEY)||1)||1));
+function applyViewportScale(){
+  const root = document.getElementById('viewport-root');
+  const viewport = window.visualViewport;
+  const width = viewport ? viewport.width : window.innerWidth;
+  const height = viewport ? viewport.height : window.innerHeight;
+  root.style.width = (width / viewportScale)+'px';
+  root.style.height = (height / viewportScale)+'px';
+  root.style.transform = 'scale('+viewportScale+')';
+}
+applyViewportScale();
 const PALETTES = {
   'xterm': null,
   'vscode': {background:'#1e1e1e',foreground:'#cccccc',cursor:'#aeafad',selectionBackground:'#264f78',
@@ -646,6 +701,10 @@ let sessions = [];
 let connections = [];
 let activeConnection = '';
 let serverName = '';
+const RAIL_WIDTH_KEY = 'multicrum-connection-rail-width';
+const RAIL_COLLAPSED_KEY = 'multicrum-connection-rail-collapsed';
+let connectionRailWidth = Math.max(150, Math.min(420, parseInt(localStorage.getItem(RAIL_WIDTH_KEY)||'220', 10)||220));
+let connectionRailCollapsed = localStorage.getItem(RAIL_COLLAPSED_KEY) === 'true';
 let filteredSessions = [];
 let focusedID = 0;
 // True only between the moment this client initiates a connection switch and
@@ -707,9 +766,9 @@ function applyViewport(s){
   if(!meta){ meta = document.createElement('meta'); meta.name='viewport'; document.head.appendChild(meta); }
   if(s.viewportMode === 'fixed'){
     const w = Math.max(320, Number(s.viewportWidth || 1280));
-    meta.content = 'width='+w+',viewport-fit=cover';
+    meta.content = 'width='+w+',initial-scale=1,minimum-scale=.25,maximum-scale=5,user-scalable=yes,viewport-fit=cover';
   } else {
-    meta.content = 'width=device-width,initial-scale=1,viewport-fit=cover';
+    meta.content = 'width=device-width,initial-scale=1,minimum-scale=.25,maximum-scale=5,user-scalable=yes,viewport-fit=cover';
   }
 }
 
@@ -788,7 +847,7 @@ function setConnectionState(state){
   document.body.classList.toggle('ws-disconnected', state === 'disconnected');
   const text = document.getElementById('reconnect-text');
   if(text) text.textContent = state === 'connected' ? '' : (state === 'connecting' ? 'Connecting to '+location.host+'…' : 'Disconnected. Reconnecting in 10s…');
-  updateStatusBar();
+  renderConnectionRail();
   renderTabs();
 }
 
@@ -915,7 +974,7 @@ function startWebSocket(){
 function updateLabel(){
   const s = sessions.find(s=>s.id===focusedID);
   renderTabs();
-  updateStatusBar();
+  renderConnectionRail();
   // The exit modal belongs to one session. If we've switched to a different
   // session (or that session is no longer exited), dismiss the stale modal so
   // it isn't shown over an unrelated session — matching the TUI, where the
@@ -965,30 +1024,56 @@ function renderTabs(){
   if(active) active.scrollIntoView({block:'nearest',inline:'nearest'});
 }
 
-function updateStatusBar(){
-  const root = document.getElementById('status-main');
+function renderConnectionRail(){
+  const server = document.getElementById('rail-server');
+  if(server) server.textContent = 'server: '+(serverName||'default');
+  const root = document.getElementById('rail-connections');
+  if(!root) return;
   root.innerHTML = '';
-  const prefix = document.createElement('span');
-  prefix.textContent = 'server:'+(serverName||'default')+' │ conn ';
-  root.appendChild(prefix);
-  if(connections.length){
-    connections.forEach(c => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'conn-pill' + (c.name===activeConnection || c.id===activeConnection ? ' active' : '');
-      b.textContent = c.name || c.id || 'connection';
-      b.onclick = () => { control({action:'focusConnection',connection:c.name||c.id}); term.focus(); };
-      root.appendChild(b);
-    });
-  } else {
-    const b = document.createElement('span');
-    b.className = 'conn-pill active';
-    b.textContent = activeConnection || 'default';
-    root.appendChild(b);
-  }
-  const suffix = document.createElement('span');
-  suffix.textContent = ' │ '+term.cols+'x'+term.rows+' │ mouse:'+mouseMode+' ';
-  root.appendChild(suffix);
+  allConnections().forEach(c => {
+    const name = c.name || c.id || 'connection';
+    const active = name===activeConnection || c.id===activeConnection;
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'rail-connection' + (active ? ' active' : '');
+    item.title = name;
+
+    const nameRow = document.createElement('span');
+    nameRow.className = 'rail-connection-name';
+    nameRow.textContent = name;
+    item.appendChild(nameRow);
+
+    const countRow = document.createElement('span');
+    countRow.className = 'rail-connection-count';
+    countRow.textContent = (c.sessionCount||0)+' sessions';
+    item.appendChild(countRow);
+
+    if(c.agent){
+      const agentRow = document.createElement('span');
+      agentRow.className = 'rail-agent-row';
+      const spinner = document.createElement('span');
+      spinner.className = 'rail-agent-prefix agent-spinner';
+      spinner.dataset.animate = c.agent.animate ? 'true' : 'false';
+      spinner.dataset.spinner = agentSpinnerStyle(c.agent);
+      spinner.textContent = c.agent.state==='working' ? agentSpinnerGlyph(c.agent)+' ' : '  ';
+      agentRow.appendChild(spinner);
+      const state = document.createElement('span');
+      state.className = 'agent-state agent-'+c.agent.state;
+      state.textContent = c.agent.state==='unknown' ? '' : c.agent.state;
+      agentRow.appendChild(state);
+      if(c.agent.state!=='unknown') agentRow.appendChild(document.createTextNode(' '));
+      const provider = document.createElement('span');
+      provider.className = 'agent-provider';
+      provider.textContent = agentProviderName(c.agent.provider);
+      agentRow.appendChild(provider);
+      if(c.agent.count > 1) agentRow.appendChild(document.createTextNode(' ('+c.agent.count+')'));
+      item.appendChild(agentRow);
+    }
+    item.onclick = () => { focusConnection(name); };
+    root.appendChild(item);
+  });
+  const active = root.querySelector('.rail-connection.active');
+  if(active) active.scrollIntoView({block:'nearest'});
 }
 
 function focusSession(id){
@@ -1058,7 +1143,7 @@ function moveConnectionAtCursor(delta){
   connections.splice(to, 0, moved);
   modalCursor = filteredCursorForConnectionIndex(to);
   renderConnectionsModal();
-  updateStatusBar();
+  renderConnectionRail();
 }
 
 function newSession(){ newReturnMode = ''; openNewSession(); }
@@ -1109,7 +1194,6 @@ function openNewSession(){
   if(sshPort && !sshPort.value) sshPort.value = '22';
   setNewChoice(0);
   document.getElementById('modal-overlay').classList.add('open');
-  updateStatusBar();
   document.querySelector('input[name="new-mode"][value="same"]').focus();
 }
 
@@ -1134,7 +1218,6 @@ function openModal(){
   modalCursor = Math.max(0, sessions.findIndex(s=>s.id===focusedID));
   renderModal();
   document.getElementById('modal-overlay').classList.add('open');
-  updateStatusBar();
   document.getElementById('modal-overlay').focus();
 }
 
@@ -1156,7 +1239,6 @@ function openConnections(){
   modalCursor = filteredCursorForConnectionIndex(Math.max(0, connections.findIndex(c => c.name===activeConnection || c.id===activeConnection)));
   renderConnectionsModal();
   document.getElementById('modal-overlay').classList.add('open');
-  updateStatusBar();
   document.getElementById('modal-overlay').focus();
 }
 
@@ -1176,7 +1258,6 @@ function openRenameConnection(name){
   document.getElementById('modal-footer').textContent = 'Enter save   Esc cancel';
   document.getElementById('rename-input').value = renameConnectionTarget;
   document.getElementById('modal-overlay').classList.add('open');
-  updateStatusBar();
   document.getElementById('rename-input').focus();
   document.getElementById('rename-input').select();
 }
@@ -1197,7 +1278,6 @@ function openExitModal(sessionID){
   document.getElementById('modal-footer').textContent = 'Enter confirm   ←/→ choose   (switch session/connection to leave)';
   setExitChoice(0);
   document.getElementById('modal-overlay').classList.add('open');
-  updateStatusBar();
   document.getElementById('exit-respawn').focus();
 }
 
@@ -1216,7 +1296,6 @@ function openSettings(){
   document.getElementById('modal-footer').textContent = 'Changes save automatically   Esc close';
   syncSettingsForm(loadSettings());
   document.getElementById('modal-overlay').classList.add('open');
-  updateStatusBar();
   document.getElementById('set-theme').focus();
 }
 
@@ -1293,7 +1372,6 @@ function closeModal(){
   connectionMoving = false;
   document.getElementById('modal-overlay').classList.remove('open');
   document.getElementById('modal-footer').textContent = 'Type to filter   ↑↓ navigate   Enter select   Esc close';
-  updateStatusBar();
   term.focus();
 }
 
@@ -1512,6 +1590,53 @@ document.getElementById('set-viewportmode').onchange = e => { applySetting('view
 document.getElementById('set-viewportwidth').oninput = e => { applySetting('viewportWidth', e.target.value); fitAndResize(); };
 document.getElementById('settings-reset').onclick = resetSettings;
 document.getElementById('settings-close').onclick = closeModal;
+function applyConnectionRailLayout(){
+  const rail = document.getElementById('connection-rail');
+  const toggle = document.getElementById('rail-collapse');
+  document.body.classList.toggle('rail-collapsed', connectionRailCollapsed);
+  rail.style.width = connectionRailWidth+'px';
+  toggle.textContent = connectionRailCollapsed ? '›' : '‹';
+  toggle.title = connectionRailCollapsed ? 'Expand connection rail' : 'Collapse connection rail';
+}
+function setConnectionRailCollapsed(collapsed){
+  connectionRailCollapsed = !!collapsed;
+  localStorage.setItem(RAIL_COLLAPSED_KEY, String(connectionRailCollapsed));
+  applyConnectionRailLayout();
+  requestAnimationFrame(fitAndResize);
+}
+applyConnectionRailLayout();
+document.getElementById('rail-collapse').onclick = () => setConnectionRailCollapsed(!connectionRailCollapsed);
+document.getElementById('rail-new').onclick = () => { newConnection(); };
+document.getElementById('rail-manage').onclick = () => { openConnections(); };
+document.getElementById('rail-resizer').addEventListener('pointerdown', e => {
+  if(connectionRailCollapsed) return;
+  e.preventDefault();
+  const resizer = e.currentTarget;
+  const startX = e.clientX;
+  const startWidth = connectionRailWidth;
+  let resizeFrame = 0;
+  resizer.classList.add('dragging');
+  document.body.classList.add('rail-resizing');
+  const move = event => {
+    connectionRailWidth = Math.max(150, Math.min(420, startWidth + (event.clientX - startX) / viewportScale));
+    document.getElementById('connection-rail').style.width = connectionRailWidth+'px';
+    if(!resizeFrame) resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      fitAndResize();
+    });
+  };
+  const done = () => {
+    if(resizeFrame) cancelAnimationFrame(resizeFrame);
+    fitAndResize();
+    localStorage.setItem(RAIL_WIDTH_KEY, String(Math.round(connectionRailWidth)));
+    resizer.classList.remove('dragging');
+    document.body.classList.remove('rail-resizing');
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', done);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', done);
+});
 function openMenu(open){
   const p = document.getElementById('menu-pop');
   if(open === undefined) open = !p.classList.contains('open');
@@ -1603,6 +1728,40 @@ term.attachCustomWheelEventHandler(e=>{
 // re-dispatch a Shift-modified clone at the same point. A WeakSet flag tags
 // the synthesized event so we don't recurse on it.
 const _synthMouse = new WeakSet();
+let pinchStartDistance = 0;
+let pinchStartScale = viewportScale;
+function pinchDistance(touches){
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.hypot(dx, dy);
+}
+function startViewportPinch(e){
+  if(!e.touches || e.touches.length < 2) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  pinchStartDistance = pinchDistance(e.touches);
+  pinchStartScale = viewportScale;
+}
+function moveViewportPinch(e){
+  if(!pinchStartDistance || !e.touches || e.touches.length < 2) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  viewportScale = Math.max(.5, Math.min(2, pinchStartScale * pinchDistance(e.touches) / pinchStartDistance));
+  applyViewportScale();
+}
+function endViewportPinch(e){
+  if(!pinchStartDistance || (e.touches && e.touches.length >= 2)) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  pinchStartDistance = 0;
+  localStorage.setItem(VIEWPORT_SCALE_KEY, String(viewportScale));
+  requestAnimationFrame(fitAndResize);
+}
+const viewportRoot = document.getElementById('viewport-root');
+viewportRoot.addEventListener('touchstart', startViewportPinch, {capture:true,passive:false});
+viewportRoot.addEventListener('touchmove', moveViewportPinch, {capture:true,passive:false});
+viewportRoot.addEventListener('touchend', endViewportPinch, {capture:true,passive:false});
+viewportRoot.addEventListener('touchcancel', endViewportPinch, {capture:true,passive:false});
 function forceSelectMouse(e){
   if(mouseMode!=='select') return;
   if(_synthMouse.has(e)) return;
@@ -1628,7 +1787,6 @@ function updateMouseModeUI(){
   if(label) label.textContent = mouseMode;
   const root = document.getElementById('terminal');
   if(root) root.classList.toggle('mouse-select', mouseMode==='select');
-  updateStatusBar();
 }
 
 function setMouseMode(mode){
@@ -1643,7 +1801,16 @@ updateMouseModeUI();
 
 term.onData(d=>keystroke(d));
 window.addEventListener('keydown',e=>{ handleAppShortcut(e); },{capture:true});
-window.addEventListener('resize',()=>{fitAndResize();});
+let viewportResizeFrame = 0;
+function handleViewportResize(){
+  applyViewportScale();
+  if(!viewportResizeFrame) viewportResizeFrame = requestAnimationFrame(() => {
+    viewportResizeFrame = 0;
+    fitAndResize();
+  });
+}
+window.addEventListener('resize', handleViewportResize);
+if(window.visualViewport) window.visualViewport.addEventListener('resize', handleViewportResize);
 
 function fitAndResize(){
   fitAddon.fit();
@@ -1662,7 +1829,6 @@ function fitAndResize(){
       if (extra > 0) term.resize(term.cols + extra, term.rows);
     }
   } catch(e) {}
-  updateStatusBar();
   sendResize();
 }
 

@@ -59,9 +59,9 @@ In the left connection rail, show an aggregate agent state directly below the
 existing session-count row:
 
 ```text
-[1] backend
-    3 sessions
-    blocked Copilot
+backend
+  3 sessions
+  blocked Copilot
 ```
 
 Only render the third row when that connection contains at least one detected
@@ -103,7 +103,17 @@ Extend WebSocket `SessionInfo` with optional agent metadata:
 ```
 
 The browser should render the same per-session and aggregate connection state.
-Older browsers ignore the new field, preserving protocol compatibility.
+Its primary layout uses a left connection rail with the same row disposition as
+the TUI: connection name, two-column-indented session count, then an optional
+agent row with a fixed two-column spinner slot. The rail is resizable and
+collapsible, uses the terminal background, and replaces the former bottom
+status bar. Its header height stays synchronized with the session tab bar as
+the configured top-bar font size changes. Mobile two-finger gestures scale the
+complete application root and refit xterm when the gesture ends, allowing the
+UI to shrink below the browser's device-width fit. Root dimensions come from
+`window.visualViewport` so dynamic mobile address bars do not leave the scaled
+layout too short or hidden beneath browser chrome. Older browsers ignore the
+new metadata fields, preserving protocol compatibility.
 
 ## Detection sources and precedence
 

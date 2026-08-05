@@ -364,7 +364,7 @@ func (s *state) sessionAgentInfo(sess *session.Session) *transport.AgentInfo {
 }
 
 func (s *state) connectionAgentInfo(conn *connectionState) *transport.AgentInfo {
-	selected, ok := s.connectionAgentStatus(conn)
+	selected, count, ok := s.connectionAgentSummary(conn)
 	if !ok {
 		return nil
 	}
@@ -374,5 +374,6 @@ func (s *state) connectionAgentInfo(conn *connectionState) *transport.AgentInfo 
 		Source:   string(selected.Source),
 		Animate:  s.agentSpinnerEnabled && selected.State == agentdetect.StateWorking,
 		Spinner:  s.agentSpinnerStyle,
+		Count:    count,
 	}
 }
