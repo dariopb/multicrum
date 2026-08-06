@@ -14,7 +14,7 @@ func (s *Session) Start(cols, rows int) error {
 	if s.sshClient != nil {
 		return s.startSSH(cols, rows)
 	}
-	uc, err := console.NewUnixConsole(s.cmd, cols, rows, s.workDir)
+	uc, err := console.NewUnixConsole(s.cmd, cols, rows, s.workDir, s.agentEnvironment())
 	if err != nil {
 		return fmt.Errorf("Unix PTY start: %w", err)
 	}

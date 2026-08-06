@@ -73,6 +73,17 @@ func (s *state) applyAgentUpdate(update agentdetect.Update) bool {
 	}
 	previous, exists := s.agentStatuses[update.ID]
 	next := detectedAgent{status: *update.Status, generation: update.Generation}
+	if exists && previous.generation == next.generation &&
+		sourcePriority(previous.status.Source) > sourcePriority(next.status.Source) {
+		s.agentMu.Unlock()
+		return false
+	}
+	if next.status.State == agentdetect.StateIdle && exists &&
+		(previous.status.State == agentdetect.StateWorking ||
+			previous.status.State == agentdetect.StateBlocked) &&
+		!s.isViewedSession(sess) {
+		next.status.State = agentdetect.StateDone
+	}
 	changed := !exists || previous.generation != next.generation ||
 		previous.status.Provider != next.status.Provider ||
 		previous.status.State != next.status.State ||
@@ -81,8 +92,9 @@ func (s *state) applyAgentUpdate(update agentdetect.Update) bool {
 	s.agentStatuses[update.ID] = next
 	s.agentMu.Unlock()
 
-	if update.Status.Provider == agentdetect.ProviderCopilot {
-		s.evaluateCopilotSession(sess)
+	if update.Status.Provider == agentdetect.ProviderCopilot ||
+		update.Status.Provider == agentdetect.ProviderCrush {
+		s.evaluateAgentSession(sess)
 	}
 	return changed
 }
@@ -116,16 +128,16 @@ func (s *state) agentStatus(sess *session.Session) (agentdetect.Status, bool) {
 	return detected.status, true
 }
 
-func (s *state) evaluateCopilotScreen(conn *connectionState, index int) {
+func (s *state) evaluateAgentScreen(conn *connectionState, index int) {
 	if conn == nil || conn.manager == nil {
 		return
 	}
-	s.evaluateCopilotSession(conn.manager.ByID(index))
+	s.evaluateAgentSession(conn.manager.ByID(index))
 }
 
-func (s *state) evaluateCopilotSession(sess *session.Session) {
+func (s *state) evaluateAgentSession(sess *session.Session) {
 	status, ok := s.agentStatus(sess)
-	if !ok || status.Provider != agentdetect.ProviderCopilot ||
+	if !ok ||
 		(sourcePriority(status.Source) > sourcePriority(agentdetect.SourceScreen) &&
 			status.State != agentdetect.StateUnknown) {
 		return
@@ -135,7 +147,16 @@ func (s *state) evaluateCopilotSession(sess *session.Session) {
 	for i, line := range lines {
 		text[i] = line.Text
 	}
-	nextState, matched := agentdetect.DetectCopilotScreen(text)
+	var nextState agentdetect.State
+	var matched bool
+	switch status.Provider {
+	case agentdetect.ProviderCopilot:
+		nextState, matched = agentdetect.DetectCopilotScreen(text)
+	case agentdetect.ProviderCrush:
+		nextState, matched = agentdetect.DetectCrushScreen(text)
+	default:
+		return
+	}
 	if !matched {
 		return
 	}
@@ -146,7 +167,7 @@ func (s *state) evaluateCopilotSession(sess *session.Session) {
 	next := detectedAgent{
 		generation: generation,
 		status: agentdetect.Status{
-			Provider: agentdetect.ProviderCopilot,
+			Provider: status.Provider,
 			State:    nextState, Source: agentdetect.SourceScreen,
 			Confidence: agentdetect.ConfidenceHigh, UpdatedAt: time.Now(),
 		},
@@ -164,6 +185,8 @@ func (s *state) evaluateCopilotSession(sess *session.Session) {
 
 func sourcePriority(source agentdetect.Source) int {
 	switch source {
+	case agentdetect.SourceNative:
+		return 4
 	case agentdetect.SourceHook:
 		return 3
 	case agentdetect.SourceScreen:
@@ -230,14 +253,22 @@ func (s *state) agentSpinnerFrames() []string {
 }
 
 func agentLabel(status agentdetect.Status) string {
-	provider := "Copilot"
-	if status.Provider != agentdetect.ProviderCopilot {
-		provider = string(status.Provider)
-	}
+	provider := agentProviderName(status.Provider)
 	if status.State == agentdetect.StateUnknown {
 		return provider
 	}
 	return string(status.State) + " " + provider
+}
+
+func agentProviderName(provider agentdetect.Provider) string {
+	switch provider {
+	case agentdetect.ProviderCopilot:
+		return "Copilot"
+	case agentdetect.ProviderCrush:
+		return "Crush"
+	default:
+		return string(provider)
+	}
 }
 
 func (s *state) agentSpinnerSlot(status agentdetect.Status) string {
@@ -253,10 +284,7 @@ func (s *state) agentSpinnerSlot(status agentdetect.Status) string {
 
 func (s *state) renderAgentLabel(base lipgloss.Style, status agentdetect.Status, count int) string {
 	state := string(status.State)
-	provider := "Copilot"
-	if status.Provider != agentdetect.ProviderCopilot {
-		provider = string(status.Provider)
-	}
+	provider := agentProviderName(status.Provider)
 	if status.State == agentdetect.StateUnknown {
 		state = ""
 	}

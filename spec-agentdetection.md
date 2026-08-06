@@ -247,23 +247,48 @@ and also refers to unrelated tools and services. Provider display text may say
 `Charm/Crush` if that is clearer to users.
 
 Crush is a Go/Bubble Tea application and normally runs as one process plus
-children created by tool calls. It currently documents only one lifecycle
-hook, `PreToolUse`. The hook environment includes `CRUSH=1`,
-`AI_AGENT=crush`, `CRUSH_SESSION_ID`, `CRUSH_EVENT`, and tool metadata.
+children created by tool calls. Current releases also contain a native,
+best-effort Unix-socket lifecycle reporter that activates when the parent
+terminal supplies its compatibility environment. Multicrum provides that
+environment internally for local sessions and consumes the newline-delimited
+JSON reports; this is an implementation detail rather than a public Multicrum
+protocol or user-facing integration name.
 
 Relevant Crush mapping:
 
 | Crush signal | Multicrum result |
 |---|---|
 | Process match | Presence confirmed; state `Unknown` until another source resolves it. |
-| `PreToolUse` | `Working` |
-| Permission UI screen fixture | `Blocked` |
-| Active generation/spinner screen fixture | `Working` |
-| Ready editor screen fixture after working | Completion; resolve to `Done` or `Idle`. |
+| Native initial report | Presence confirmed; `Idle`. |
+| Native assistant-output or summarization report | `Working`. |
+| Native permission-request report | `Blocked`. |
+| Native permission-resolved report | `Working` while a run remains active, otherwise `Idle`. |
+| Native run-complete report | Completion; resolve to `Done` or `Idle` based on focus. |
+| Native release report | Clear native authority and let process detection confirm removal. |
 
-The hook relay can be installed as a global `PreToolUse` entry in
-`~/.config/crush/crush.json`, but it provides only a one-way transition to
-`Working`. It cannot prove completion or idle. Do not infer completion from
+Reports include a monotonic sequence number. Multicrum rejects stale reports
+and binds each inherited pane token to the stable runtime session ID plus
+generation so a delayed report cannot affect a respawned session. The socket is
+private to the local owner, uses bounded reads and deadlines, and reporting
+failure never blocks Crush.
+
+Observed fixtures were captured from
+`v0.87.1-0.20260724225610-e68041a67471+dirty` at 120x36:
+
+- the ready editor displayed `Ready for instructions` and emitted `idle`;
+- active generation displayed `Brrrrr...` and emitted `working`;
+- the permission dialog displayed `Permission Required`, tool/file details,
+  `Allow`, `Allow for Session`, and `Deny`, and emitted `blocked`.
+
+The ready-editor and permission controls are stable enough for screen fallback
+matching. The captured `Brrrrr...` generation text is deliberately not matched:
+it is presentation copy rather than a stable lifecycle control. Native
+lifecycle reports remain authoritative when available. Screen scraping is
+still useful for older Crush releases and SSH-backed sessions that cannot reach
+the local socket.
+
+Crush also documents the `PreToolUse` hook. It can provide a one-way transition
+to `Working`, but cannot prove completion or idle. Do not infer completion from
 hook silence.
 
 `crush serve` exposes richer server/SSE state, including whether a workspace is
@@ -358,9 +383,13 @@ Matching is case-insensitive on Windows. The root process itself must be
 included because a session can start directly as the agent rather than starting
 it from a shell. Pi requires the additional confidence rules described above.
 
-The process abstraction should expose PID, parent PID, executable name,
-command line, and start time. Start time prevents PID reuse from attaching old
-state to a replacement process. Platform implementations may use `/proc` on
+The process abstraction should expose PID, parent PID, executable name, argv0,
+command line, and start time. Match the exact executable basename or argv0
+basename; do not search arbitrary argument text. On Linux, normalize the
+` (deleted)` suffix appended to `/proc/<pid>/exe` after an in-place binary
+replacement and retain argv0 because Go programs may expose a thread comm name
+such as `MainThread` instead of the product name. Start time prevents PID reuse
+from attaching old state to a replacement process. Platform implementations may use `/proc` on
 Linux, `sysctl`/libproc on macOS, and Toolhelp APIs on Windows, or use
 `github.com/shirou/gopsutil/v4/process` behind a narrow internal interface.
 Tests must use a fake inventory rather than real system processes.
@@ -453,18 +482,18 @@ Every heuristic needs:
 Crush is itself a Bubble Tea TUI, so use the same emulator-derived footer
 strategy as Copilot:
 
-- capture real working, permission, question, ready-editor, notification, and
-  error screens;
+- retain versioned working, permission, and ready-editor fixtures from real
+  captures, adding question, notification, and error fixtures as they become
+  available;
 - match layout-independent labels and controls rather than colors, spinners,
   token counts, models, or full rows;
 - require a provider-specific combination of rows before reporting `Blocked`;
 - debounce ready-editor detection before converting a previous `Working` state
-  to completion.
+  to completion when native reports are unavailable.
 
-The `PreToolUse` hook can establish `Working` immediately before a tool call,
-while screen fixtures cover model streaming, permission prompts, and
-completion. Until ready and blocked fixtures are committed, leave those states
-`Unknown` instead of borrowing Copilot patterns.
+Native lifecycle reports cover working, permission prompts, and completion in
+current local releases. The `PreToolUse` hook and screen fixtures remain
+fallbacks. Never let either overwrite a fresh native state.
 
 ### Pi
 

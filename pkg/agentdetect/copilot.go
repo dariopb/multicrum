@@ -1,40 +1,16 @@
 package agentdetect
 
 import (
-	"path/filepath"
 	"strings"
 	"unicode/utf8"
 )
 
 func copilotPresent(rootPID int, processes []Process) bool {
-	children := make(map[int][]Process, len(processes))
-	byPID := make(map[int]Process, len(processes))
-	for _, process := range processes {
-		byPID[process.PID] = process
-		children[process.ParentPID] = append(children[process.ParentPID], process)
-	}
-	stack := []int{rootPID}
-	seen := make(map[int]bool)
-	for len(stack) > 0 {
-		pid := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if seen[pid] {
-			continue
-		}
-		seen[pid] = true
-		if process, ok := byPID[pid]; ok && isCopilotProcess(process) {
-			return true
-		}
-		for _, child := range children[pid] {
-			stack = append(stack, child.PID)
-		}
-	}
-	return false
+	return processTreeContains(rootPID, processes, isCopilotProcess)
 }
 
 func isCopilotProcess(process Process) bool {
-	name := strings.ToLower(filepath.Base(strings.TrimSpace(process.Executable)))
-	return name == "copilot" || name == "copilot.exe"
+	return processHasName(process, "copilot", "copilot.exe")
 }
 
 // DetectCopilotScreen recognizes only high-confidence footer states.

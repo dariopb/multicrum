@@ -4,7 +4,10 @@ import "time"
 
 type Provider string
 
-const ProviderCopilot Provider = "copilot"
+const (
+	ProviderCopilot Provider = "copilot"
+	ProviderCrush   Provider = "crush"
+)
 
 type State string
 
@@ -22,6 +25,7 @@ const (
 	SourceProcess Source = "process"
 	SourceScreen  Source = "screen"
 	SourceHook    Source = "hook"
+	SourceNative  Source = "native"
 )
 
 type Confidence string

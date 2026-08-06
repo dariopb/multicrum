@@ -16,6 +16,7 @@ func TestAgentUIIncludesStatePresentation(t *testing.T) {
 		"circle: ['●','◉','◎','○']",
 		`data-animate="`,
 		`data-spinner="`,
+		`if(provider==='crush') return 'Crush';`,
 	} {
 		if !strings.Contains(html, fragment) {
 			t.Fatalf("agent UI missing %q", fragment)

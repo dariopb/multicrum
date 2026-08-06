@@ -20,6 +20,30 @@ func TestCopilotPresentIncludesRootAndDescendants(t *testing.T) {
 	}
 }
 
+func TestCopilotProcessSurvivesExecutableReplacement(t *testing.T) {
+	tests := []Process{
+		{Executable: "/home/user/.local/bin/copilot (deleted)"},
+		{Executable: "/memfd:runtime (deleted)", Command: "copilot"},
+		{Executable: "/memfd:runtime (deleted)", CommandLine: "copilot --resume"},
+	}
+	for _, process := range tests {
+		if !isCopilotProcess(process) {
+			t.Fatalf("Copilot process was not detected: %#v", process)
+		}
+	}
+}
+
+func TestCopilotProcessDoesNotMatchArgumentText(t *testing.T) {
+	process := Process{
+		Executable:  "bash",
+		Command:     "bash",
+		CommandLine: "bash -c echo copilot",
+	}
+	if isCopilotProcess(process) {
+		t.Fatalf("ordinary command was detected as Copilot: %#v", process)
+	}
+}
+
 func TestDetectCopilotScreen(t *testing.T) {
 	tests := []struct {
 		name  string

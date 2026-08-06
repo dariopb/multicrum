@@ -172,6 +172,7 @@ func (s *state) createConnectionWithDefaultSession(name string, m Model) *connec
 	conn := s.addConnection(name)
 	geom := s.geometry()
 	conn.manager = session.NewManagerWithSSH(geom.Pane.Width, geom.Pane.Height, nil, nil, s.sshClient)
+	conn.manager.SetAgentStateEndpoint(s.agentNativeEndpoint)
 	// Bind before New starts the read loop so callback installation never
 	// races live PTY output.
 	s.bindConnectionCallbacks(conn)
@@ -189,6 +190,7 @@ func (s *state) initManagers(cols, rows int) {
 		if c.manager == nil {
 			c.manager = session.NewManagerWithSSH(cols, rows, nil, nil, s.sshClient)
 		}
+		c.manager.SetAgentStateEndpoint(s.agentNativeEndpoint)
 	}
 	s.rebindConnectionCallbacks()
 	s.syncActiveConnectionFields()

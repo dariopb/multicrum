@@ -750,7 +750,11 @@ setInterval(() => {
     el.textContent = frames[agentSpinnerFrame % frames.length];
   });
 }, 450);
-function agentProviderName(provider){ return provider==='copilot' ? 'Copilot' : provider; }
+function agentProviderName(provider){
+  if(provider==='copilot') return 'Copilot';
+  if(provider==='crush') return 'Crush';
+  return provider;
+}
 let newChoice = 0;
 let newReturnMode = '';
 let exitChoice = 0;

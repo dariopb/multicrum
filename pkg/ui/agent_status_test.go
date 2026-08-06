@@ -66,7 +66,7 @@ func TestCopilotScreenPromotesProcessPresenceToWorking(t *testing.T) {
 		t.Fatal("process presence update was not applied")
 	}
 	sess.Screen().Write([]byte("\r\n◉ Working · 26.1 KiB esc interrupt   GPT-5\r\n"))
-	m.s.evaluateCopilotSession(sess)
+	m.s.evaluateAgentSession(sess)
 
 	detected, ok := m.s.agentStatus(sess)
 	if !ok {
@@ -98,6 +98,20 @@ func TestAgentStateStyles(t *testing.T) {
 	}
 	if !agentProviderStyle(base).GetFaint() {
 		t.Fatal("agent provider style is not faint")
+	}
+}
+
+func TestCrushAgentLabel(t *testing.T) {
+	status := agentdetect.Status{
+		Provider: agentdetect.ProviderCrush,
+		State:    agentdetect.StateUnknown,
+	}
+	if got := agentLabel(status); got != "Crush" {
+		t.Fatalf("agentLabel() = %q, want %q", got, "Crush")
+	}
+	status.State = agentdetect.StateWorking
+	if got := agentLabel(status); got != "working Crush" {
+		t.Fatalf("agentLabel() = %q, want %q", got, "working Crush")
 	}
 }
 
@@ -202,8 +216,8 @@ func TestCopilotReadyScreenBecomesIdleOrDone(t *testing.T) {
 	ready := []byte("\r\n← open sidebar · / commands · ? help · tab next tab   Claude Haiku 4.5\r\n")
 	viewed.Screen().Write(ready)
 	background.Screen().Write(ready)
-	m.s.evaluateCopilotSession(viewed)
-	m.s.evaluateCopilotSession(background)
+	m.s.evaluateAgentSession(viewed)
+	m.s.evaluateAgentSession(background)
 
 	if status, _ := m.s.agentStatus(viewed); status.State != agentdetect.StateIdle {
 		t.Fatalf("viewed ready state = %q, want idle", status.State)
@@ -215,6 +229,90 @@ func TestCopilotReadyScreenBecomesIdleOrDone(t *testing.T) {
 	m.s.focusConnection(1)
 	if status, _ := m.s.agentStatus(background); status.State != agentdetect.StateIdle {
 		t.Fatalf("focused done state = %q, want idle", status.State)
+	}
+}
+
+func TestCrushNativeCompletionBecomesIdleOrDone(t *testing.T) {
+	m := NewModel([]string{"sh"}, 100, 30)
+	firstManager := session.NewManager(80, 24, nil, nil)
+	secondManager := session.NewManager(80, 24, nil, nil)
+	defer firstManager.CloseAll()
+	defer secondManager.CloseAll()
+	viewed, err := firstManager.New([]string{"sh", "-c", "sleep 5"})
+	if err != nil {
+		t.Fatalf("start viewed session: %v", err)
+	}
+	background, err := secondManager.New([]string{"sh", "-c", "sleep 5"})
+	if err != nil {
+		t.Fatalf("start background session: %v", err)
+	}
+	m.s.connections[0].manager = firstManager
+	backgroundConn := m.s.addConnection("background")
+	backgroundConn.manager = secondManager
+	m.s.syncActiveConnectionFields()
+
+	setTestProviderStatus(t, m.s, viewed, agentdetect.ProviderCrush, agentdetect.StateWorking, agentdetect.SourceNative)
+	setTestProviderStatus(t, m.s, background, agentdetect.ProviderCrush, agentdetect.StateWorking, agentdetect.SourceNative)
+	setTestProviderStatus(t, m.s, viewed, agentdetect.ProviderCrush, agentdetect.StateIdle, agentdetect.SourceNative)
+	setTestProviderStatus(t, m.s, background, agentdetect.ProviderCrush, agentdetect.StateIdle, agentdetect.SourceNative)
+
+	if status, _ := m.s.agentStatus(viewed); status.State != agentdetect.StateIdle {
+		t.Fatalf("viewed completion = %q, want idle", status.State)
+	}
+	if status, _ := m.s.agentStatus(background); status.State != agentdetect.StateDone {
+		t.Fatalf("background completion = %q, want done", status.State)
+	}
+}
+
+func TestCrushScreenFallbackRecognizesReadyAndPermission(t *testing.T) {
+	m := NewModel([]string{"sh"}, 120, 36)
+	manager := session.NewManager(120, 36, nil, nil)
+	defer manager.CloseAll()
+	sess, err := manager.New([]string{"sh", "-c", "sleep 5"})
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	m.s.connections[0].manager = manager
+	m.s.syncActiveConnectionFields()
+	setTestProviderStatus(t, m.s, sess, agentdetect.ProviderCrush, agentdetect.StateUnknown, agentdetect.SourceProcess)
+
+	sess.Screen().Write([]byte("\r\n> Ready for instructions\r\n"))
+	m.s.evaluateAgentSession(sess)
+	if status, _ := m.s.agentStatus(sess); status.State != agentdetect.StateIdle ||
+		status.Source != agentdetect.SourceScreen {
+		t.Fatalf("ready status = %#v, want idle/screen", status)
+	}
+
+	sess.Screen().Write([]byte("\r\nPermission Required\r\nTool write\r\nAllow      Allow for Session      Deny\r\n←/→ choose • enter confirm • esc exit\r\n"))
+	m.s.evaluateAgentSession(sess)
+	if status, _ := m.s.agentStatus(sess); status.State != agentdetect.StateBlocked ||
+		status.Source != agentdetect.SourceScreen {
+		t.Fatalf("permission status = %#v, want blocked/screen", status)
+	}
+}
+
+func TestNativeStateIsNotOverwrittenByProcessPresence(t *testing.T) {
+	m := NewModel([]string{"sh"}, 80, 24)
+	manager := session.NewManager(80, 24, nil, nil)
+	defer manager.CloseAll()
+	sess, err := manager.New([]string{"sh", "-c", "sleep 5"})
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	m.s.connections[0].manager = manager
+	m.s.syncActiveConnectionFields()
+	setTestProviderStatus(t, m.s, sess, agentdetect.ProviderCrush, agentdetect.StateBlocked, agentdetect.SourceNative)
+
+	id, generation, _, _ := sess.RuntimeSnapshot()
+	process := agentdetect.Status{
+		Provider: agentdetect.ProviderCrush, State: agentdetect.StateUnknown,
+		Source: agentdetect.SourceProcess, Confidence: agentdetect.ConfidenceHigh,
+	}
+	if m.s.applyAgentUpdate(agentdetect.Update{ID: id, Generation: generation, Status: &process}) {
+		t.Fatal("lower-authority process update replaced native state")
+	}
+	if status, _ := m.s.agentStatus(sess); status.State != agentdetect.StateBlocked {
+		t.Fatalf("status = %q, want blocked", status.State)
 	}
 }
 
@@ -265,10 +363,15 @@ func TestConnectionRailAgentRowsAlignWithoutNumberPrefix(t *testing.T) {
 
 func setTestAgentStatus(t *testing.T, s *state, sess *session.Session, agentState agentdetect.State) {
 	t.Helper()
+	setTestProviderStatus(t, s, sess, agentdetect.ProviderCopilot, agentState, agentdetect.SourceScreen)
+}
+
+func setTestProviderStatus(t *testing.T, s *state, sess *session.Session, provider agentdetect.Provider, agentState agentdetect.State, source agentdetect.Source) {
+	t.Helper()
 	id, generation, _, _ := sess.RuntimeSnapshot()
 	status := agentdetect.Status{
-		Provider: agentdetect.ProviderCopilot,
-		State:    agentState, Source: agentdetect.SourceScreen,
+		Provider: provider,
+		State:    agentState, Source: source,
 		Confidence: agentdetect.ConfidenceHigh, UpdatedAt: time.Now(),
 	}
 	if !s.applyAgentUpdate(agentdetect.Update{ID: id, Generation: generation, Status: &status}) {

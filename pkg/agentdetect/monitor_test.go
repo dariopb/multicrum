@@ -41,6 +41,83 @@ func TestMonitorPublishesCopilotPresenceAndRemoval(t *testing.T) {
 	}
 }
 
+func TestMonitorKeepsAndRedetectsCopilotWithReplacedExecutable(t *testing.T) {
+	inventory := &fakeInventory{processes: []Process{
+		{PID: 100, ParentPID: 1, Executable: "bash", StartTime: 10},
+		{PID: 101, ParentPID: 100, Executable: "copilot", Command: "copilot", StartTime: 11},
+	}}
+	var updates []Update
+	monitor := NewMonitor(inventory, time.Second, func(update Update) {
+		updates = append(updates, update)
+	})
+	monitor.Sync([]Target{{ID: "session", Generation: 1, ProcessID: 100, Local: true}})
+	monitor.poll()
+
+	inventory.processes[1].Executable = "/memfd:runtime (deleted)"
+	monitor.poll()
+	if len(updates) != 1 || updates[0].Status == nil {
+		t.Fatalf("updates after executable replacement = %#v, want presence retained", updates)
+	}
+
+	inventory.processes = inventory.processes[:1]
+	monitor.poll()
+	if len(updates) != 2 || updates[1].Status != nil {
+		t.Fatalf("updates after exit = %#v, want removal", updates)
+	}
+
+	inventory.processes = append(inventory.processes, Process{
+		PID: 102, ParentPID: 100, Executable: "/memfd:runtime (deleted)",
+		Command: "copilot", StartTime: 12,
+	})
+	monitor.poll()
+	if len(updates) != 3 || updates[2].Status == nil ||
+		updates[2].Status.Provider != ProviderCopilot {
+		t.Fatalf("updates after restart = %#v, want Copilot presence", updates)
+	}
+}
+
+func TestMonitorPublishesCrushPresence(t *testing.T) {
+	inventory := &fakeInventory{processes: []Process{
+		{PID: 100, ParentPID: 1, Executable: "bash"},
+		{PID: 101, ParentPID: 100, Executable: "crush"},
+	}}
+	var updates []Update
+	monitor := NewMonitor(inventory, time.Second, func(update Update) {
+		updates = append(updates, update)
+	})
+	monitor.Sync([]Target{{ID: "session", Generation: 3, ProcessID: 100, Local: true}})
+
+	monitor.poll()
+	if len(updates) != 1 || updates[0].Status == nil {
+		t.Fatalf("presence updates = %#v, want one present update", updates)
+	}
+	status := updates[0].Status
+	if status.Provider != ProviderCrush || status.State != StateUnknown ||
+		status.Source != SourceProcess || status.Confidence != ConfidenceHigh {
+		t.Fatalf("status = %#v, want high-confidence Crush process presence", status)
+	}
+}
+
+func TestMonitorPublishesProviderChange(t *testing.T) {
+	inventory := &fakeInventory{processes: []Process{
+		{PID: 100, ParentPID: 1, Executable: "bash"},
+		{PID: 101, ParentPID: 100, Executable: "copilot"},
+	}}
+	var updates []Update
+	monitor := NewMonitor(inventory, time.Second, func(update Update) {
+		updates = append(updates, update)
+	})
+	monitor.Sync([]Target{{ID: "session", Generation: 1, ProcessID: 100, Local: true}})
+	monitor.poll()
+
+	inventory.processes[1].Executable = "crush"
+	monitor.poll()
+	if len(updates) != 2 || updates[1].Status == nil ||
+		updates[1].Status.Provider != ProviderCrush {
+		t.Fatalf("provider change updates = %#v, want Crush presence update", updates)
+	}
+}
+
 func TestMonitorInventoryErrorDoesNotPublishFalseAbsence(t *testing.T) {
 	inventory := &fakeInventory{processes: []Process{
 		{PID: 100, ParentPID: 1, Executable: "copilot"},

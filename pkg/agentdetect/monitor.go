@@ -11,12 +11,17 @@ type Monitor struct {
 	interval   time.Duration
 	publish    func(Update)
 	targets    map[string]Target
-	present    map[string]Target
+	present    map[string]processPresence
 	rootStarts map[string]uint64
 	stop       chan struct{}
 	done       chan struct{}
 	startOnce  sync.Once
 	closeOnce  sync.Once
+}
+
+type processPresence struct {
+	target   Target
+	provider Provider
 }
 
 func NewMonitor(inventory ProcessInventory, interval time.Duration, publish func(Update)) *Monitor {
@@ -28,7 +33,7 @@ func NewMonitor(inventory ProcessInventory, interval time.Duration, publish func
 		interval:   interval,
 		publish:    publish,
 		targets:    make(map[string]Target),
-		present:    make(map[string]Target),
+		present:    make(map[string]processPresence),
 		rootStarts: make(map[string]uint64),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
@@ -106,20 +111,22 @@ func (m *Monitor) poll() {
 		}
 		rootMatches := rootExists && root.StartTime == expectedStart
 		m.mu.Unlock()
-		found := rootMatches && copilotPresent(target.ProcessID, processes)
+		provider, found := detectProcessProvider(target.ProcessID, processes)
+		found = rootMatches && found
 
 		m.mu.Lock()
 		current, wasPresent := m.present[target.ID]
 		switch {
-		case found && (!wasPresent || current.Generation != target.Generation):
-			m.present[target.ID] = target
+		case found && (!wasPresent || current.target.Generation != target.Generation ||
+			current.provider != provider):
+			m.present[target.ID] = processPresence{target: target, provider: provider}
 			m.mu.Unlock()
 			status := Status{
-				Provider: ProviderCopilot, State: StateUnknown,
+				Provider: provider, State: StateUnknown,
 				Source: SourceProcess, Confidence: ConfidenceHigh, UpdatedAt: now,
 			}
 			m.publishUpdate(Update{ID: target.ID, Generation: target.Generation, Status: &status})
-		case !found && wasPresent && current.Generation == target.Generation:
+		case !found && wasPresent && current.target.Generation == target.Generation:
 			delete(m.present, target.ID)
 			m.mu.Unlock()
 			m.publishUpdate(Update{ID: target.ID, Generation: target.Generation})
@@ -127,6 +134,16 @@ func (m *Monitor) poll() {
 			m.mu.Unlock()
 		}
 	}
+}
+
+func detectProcessProvider(rootPID int, processes []Process) (Provider, bool) {
+	if copilotPresent(rootPID, processes) {
+		return ProviderCopilot, true
+	}
+	if crushPresent(rootPID, processes) {
+		return ProviderCrush, true
+	}
+	return "", false
 }
 
 func (m *Monitor) publishUpdate(update Update) {

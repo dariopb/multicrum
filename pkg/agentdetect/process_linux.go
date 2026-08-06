@@ -49,12 +49,18 @@ func (systemProcessInventory) Snapshot() ([]Process, error) {
 			executable = strings.Trim(string(stat[strings.IndexByte(string(stat), '(')+1:closeParen]), " ")
 		}
 		commandLine := ""
+		command := ""
 		if data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline")); err == nil {
+			if separator := strings.IndexByte(string(data), 0); separator >= 0 {
+				command = string(data[:separator])
+			} else {
+				command = string(data)
+			}
 			commandLine = strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
 		}
 		processes = append(processes, Process{
 			PID: pid, ParentPID: ppid, Executable: executable,
-			CommandLine: commandLine, StartTime: startTime,
+			Command: command, CommandLine: commandLine, StartTime: startTime,
 		})
 	}
 	return processes, nil

@@ -20,7 +20,8 @@ type SessionManager struct {
 	// SendExit is called once when a session's child process exits.
 	SendExit func(msg ExitMsg)
 
-	sshClient *ssh_client.Client
+	sshClient     *ssh_client.Client
+	agentEndpoint string
 }
 
 // NewManager creates a SessionManager with initial terminal dimensions.
@@ -66,6 +67,17 @@ func (m *SessionManager) SetSendExit(fn func(ExitMsg)) {
 	}
 }
 
+func (m *SessionManager) SetAgentStateEndpoint(endpoint string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.agentEndpoint = endpoint
+	for _, s := range m.sessions {
+		s.mu.Lock()
+		s.agentEndpoint = endpoint
+		s.mu.Unlock()
+	}
+}
+
 // New creates, starts, and appends a new session.
 func (m *SessionManager) New(cmd []string) (*Session, error) {
 	return m.newWithOptions(cmd, m.sshClient, "")
@@ -92,6 +104,7 @@ func (m *SessionManager) newWithOptions(cmd []string, sshClient *ssh_client.Clie
 		return nil, fmt.Errorf("new session: %w", err)
 	}
 	s.workDir = workDir
+	s.agentEndpoint = m.agentEndpoint
 	s.SendOutput = m.SendOutput
 	s.SendExit = m.SendExit
 	m.sessions = append(m.sessions, s)

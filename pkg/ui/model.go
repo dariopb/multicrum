@@ -173,6 +173,8 @@ type state struct {
 	agentMu                sync.RWMutex
 	agentStatuses          map[string]detectedAgent
 	agentMonitor           *agentdetect.Monitor
+	agentNativeServer      *agentdetect.NativeServer
+	agentNativeEndpoint    string
 	agentSpinnerEnabled    bool
 	agentSpinnerStyle      string
 	agentSpinnerRunning    bool
@@ -366,6 +368,13 @@ func (m *Model) AddInitialSessionLine(title, line string) {
 // event loop. Must be called before p.Run().
 func (m *Model) SetProgram(p *tea.Program) {
 	m.s.program = p
+	nativeServer, err := agentdetect.ListenNativeUpdates(func(update agentdetect.Update) {
+		p.Send(agentStatusMsg(update))
+	})
+	if err == nil {
+		m.s.agentNativeServer = nativeServer
+		m.s.agentNativeEndpoint = nativeServer.Endpoint()
+	}
 	geom := m.s.geometry()
 	m.s.initManagers(geom.Pane.Width, geom.Pane.Height)
 	m.s.agentMonitor = agentdetect.NewMonitor(agentdetect.NewProcessInventory(), 2*time.Second, func(update agentdetect.Update) {
@@ -377,6 +386,9 @@ func (m *Model) SetProgram(p *tea.Program) {
 func (m *Model) CloseAgentDetection() {
 	if m.s.agentMonitor != nil {
 		m.s.agentMonitor.Close()
+	}
+	if m.s.agentNativeServer != nil {
+		m.s.agentNativeServer.Close()
 	}
 }
 
@@ -774,7 +786,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connectionOutputMsg:
-		s.evaluateCopilotScreen(msg.Conn, msg.Msg.Index)
+		s.evaluateAgentScreen(msg.Conn, msg.Msg.Index)
 		spinnerCmd := s.startAgentSpinner()
 		connIndex := connectionIndex(s.connections, msg.Conn)
 		if connIndex < 0 {
@@ -804,7 +816,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case OutputMsg:
-		s.evaluateCopilotScreen(s.activeConnection(), msg.Index)
+		s.evaluateAgentScreen(s.activeConnection(), msg.Index)
 		spinnerCmd := s.startAgentSpinner()
 		if msg.Index != s.manager.FocusedIndex() {
 			return m, spinnerCmd
@@ -865,7 +877,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					anchorViewportToCursor(vp, sess)
 				}
 				s.viewports[idx] = vp
-				s.evaluateCopilotSession(sess)
+				s.evaluateAgentSession(sess)
 				break
 			}
 		}

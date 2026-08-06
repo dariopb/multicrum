@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"multicrum/pkg/agentdetect"
 	"multicrum/pkg/ssh_client"
 )
 
@@ -27,17 +28,18 @@ var nextRuntimeSessionID atomic.Uint64
 
 // Session owns a PTY/ConPTY and the process running inside it.
 type Session struct {
-	mu         sync.Mutex
-	runtimeID  string
-	index      int
-	cmd        []string
-	cmdLine    string
-	workDir    string
-	title      string
-	screen     *VTScreen
-	exited     bool
-	processID  int
-	generation uint64
+	mu            sync.Mutex
+	runtimeID     string
+	index         int
+	cmd           []string
+	cmdLine       string
+	workDir       string
+	title         string
+	screen        *VTScreen
+	exited        bool
+	processID     int
+	generation    uint64
+	agentEndpoint string
 
 	// rw is the bidirectional channel to the child process (unix pty master,
 	// Windows ConPTY pipe pair, or SSH remote PTY). Set by Start().
@@ -150,6 +152,23 @@ func (s *Session) RuntimeSnapshot() (runtimeID string, generation uint64, proces
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.runtimeID, s.generation, s.processID, s.sshClient == nil
+}
+
+func (s *Session) agentEnvironment() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agentEndpoint == "" || s.sshClient != nil {
+		return nil
+	}
+	target := agentdetect.NativeTarget(s.runtimeID, s.generation+1)
+	if target == "" {
+		return nil
+	}
+	return []string{
+		"HERDR_ENV=1",
+		"HERDR_SOCKET_PATH=" + s.agentEndpoint,
+		"HERDR_PANE_ID=" + target,
+	}
 }
 
 func (s *Session) setIndex(index int) {

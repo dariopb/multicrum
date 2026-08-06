@@ -17,13 +17,14 @@ type UnixConsole struct {
 	done    chan struct{}
 }
 
-func NewUnixConsole(args []string, cols, rows int, workDir string) (*UnixConsole, error) {
+func NewUnixConsole(args []string, cols, rows int, workDir string, extraEnv []string) (*UnixConsole, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("empty command")
 	}
 	newCommand := func(dir string) *exec.Cmd {
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+		cmd.Env = append(cmd.Env, extraEnv...)
 		cmd.Dir = dir
 		return cmd
 	}
