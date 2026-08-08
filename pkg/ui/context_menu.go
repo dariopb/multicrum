@@ -25,8 +25,8 @@ type contextMenu struct {
 }
 
 const (
-	appContextMenuDetachOption   = 7
-	appContextMenuSettingsOption = 8
+	appContextMenuDetachOption   = 8
+	appContextMenuSettingsOption = 9
 )
 
 func (s *state) openContextMenu(kind contextMenuKind, target, pointerX, pointerY int) {
@@ -75,6 +75,7 @@ func (m Model) contextMenuOptions() []string {
 			"New Connection",
 			"Connections",
 			fmt.Sprintf("Toggle Mouse (%s)", mouseMode),
+			"Force Resize",
 			"Save Layout",
 			"Detach",
 			"Settings",
@@ -212,6 +213,8 @@ func appContextMenuKey(option int) tea.KeyPressMsg {
 	case 5:
 		return tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter, Mod: tea.ModAlt})
 	case 6:
+		return tea.KeyPressMsg(tea.Key{Code: 'z', Mod: ctrlAlt})
+	case 7:
 		return tea.KeyPressMsg(tea.Key{Code: 'p', Mod: ctrlAlt})
 	default:
 		return tea.KeyPressMsg(tea.Key{Code: 'q', Mod: ctrlAlt})

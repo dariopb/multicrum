@@ -154,8 +154,9 @@ type state struct {
 	hasHelpHitbox          bool
 	hasConnectionsHitbox   bool
 	mouseDrag              mouseDrag
-	mouseCapture           bool               // when true, mouse events are forwarded to the child PTY (app-mode)
-	sel                    selection          // in-progress / completed mouse selection over the focused buffer
+	mouseCapture           bool      // when true, mouse events are forwarded to the child PTY (app-mode)
+	sel                    selection // in-progress / completed mouse selection over the focused buffer
+	copySelectionOnRelease bool
 	search                 scrollSearch       // vi-style scrollback search ('/') and line jump (':')
 	sshClient              *ssh_client.Client // non-nil starts SSH-backed sessions
 	onMetaChange           func()             // called when sessions are added/removed/focused
@@ -245,22 +246,23 @@ func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Cl
 		liveLines:       make(map[int][]session.BufferLine),
 	}
 	st := &state{
-		viewports:           conn.viewports,
-		altScreens:          conn.altScreens,
-		scrollbackMode:      conn.scrollbackMode,
-		scrollbackCache:     conn.scrollbackCache,
-		liveLines:           conn.liveLines,
-		connections:         []*connectionState{conn},
-		serverName:          "default",
-		width:               cols,
-		height:              rows,
-		connectionLayout:    connectionLayoutBottom,
-		connectionRailWidth: connectionRailWidth,
-		sshClient:           sshClient,
-		clipboardWrite:      copyToClipboard,
-		agentStatuses:       make(map[string]detectedAgent),
-		agentSpinnerEnabled: true,
-		agentSpinnerStyle:   config.AgentSpinnerStyleRectangle,
+		viewports:              conn.viewports,
+		altScreens:             conn.altScreens,
+		scrollbackMode:         conn.scrollbackMode,
+		scrollbackCache:        conn.scrollbackCache,
+		liveLines:              conn.liveLines,
+		connections:            []*connectionState{conn},
+		serverName:             "default",
+		width:                  cols,
+		height:                 rows,
+		connectionLayout:       connectionLayoutBottom,
+		connectionRailWidth:    connectionRailWidth,
+		sshClient:              sshClient,
+		clipboardWrite:         copyToClipboard,
+		copySelectionOnRelease: true,
+		agentStatuses:          make(map[string]detectedAgent),
+		agentSpinnerEnabled:    true,
+		agentSpinnerStyle:      config.AgentSpinnerStyleRectangle,
 	}
 	return &Model{agentCmd: agentCmd, s: st}
 }
@@ -298,13 +300,7 @@ func (m *Model) SetClipboardHandler(handler func(string)) {
 	if handler == nil {
 		return
 	}
-	previous := m.s.clipboardWrite
-	m.s.clipboardWrite = func(text string) {
-		if previous != nil {
-			previous(text)
-		}
-		handler(text)
-	}
+	m.s.clipboardWrite = handler
 }
 
 func (m *Model) SetDetachHandler(handler func()) {
@@ -452,6 +448,13 @@ func StartWSTransport(addr, token string, m *Model) (*transport.WSTransport, err
 			out = append(out, info)
 		}
 		return out
+	}
+	wst.Settings = func() transport.SettingsInfo {
+		return transport.SettingsInfo{
+			SpinnerAnimation: m.s.agentSpinnerEnabled,
+			SpinnerStyle:     m.s.agentSpinnerStyle,
+			CopyOnRelease:    m.s.copySelectionOnRelease,
+		}
 	}
 
 	wst.OnResize = func(rm transport.ResizeMsg) {
@@ -683,6 +686,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case wsControlMsg:
+		var cmd tea.Cmd
 		switch msg.Action {
 		case "focus":
 			// Only the client that actually changes the focus is the active
@@ -780,10 +784,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "save":
 			s.saveLayout()
 			s.notifyMeta()
+		case "setting":
+			cmd = s.applyRemoteSetting(msg.Setting, msg.Value)
 		case "exit":
 			s.handleWSExit(transport.ControlMsg(msg))
 		}
-		return m, nil
+		return m, cmd
 
 	case connectionOutputMsg:
 		s.evaluateAgentScreen(msg.Conn, msg.Msg.Index)
@@ -1076,7 +1082,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch ev.Action {
 		case mousePress:
 			if ev.Button == tea.MouseLeft && inPane {
-				s.startSelection(clampX, clampY)
+				block := ev.Mod.Contains(tea.ModCtrl | tea.ModAlt)
+				s.startSelection(clampX, clampY, block)
 			}
 		case mouseMotion:
 			if s.sel.active {
@@ -1490,11 +1497,16 @@ const (
 	shortcutScrollTop    = "ctrl+alt+home"
 	shortcutScrollBottom = "ctrl+alt+end"
 	shortcutMouse        = "alt+enter" // Ctrl+Alt+M; terminals encode Ctrl+M as Enter
+	shortcutForceResize  = "ctrl+alt+z"
 	shortcutQuit         = "ctrl+alt+q"
 )
 
 func (s *state) handleGlobalShortcut(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	k := msg.Key()
+	if isCtrlAlt(msg, 'z') {
+		s.forceResizeFocused()
+		return true, nil
+	}
 	if s.usingLeftRail() && k.Mod.Contains(tea.ModCtrl|tea.ModAlt) {
 		switch k.Code {
 		case tea.KeyUp, tea.KeyKpUp:
@@ -1559,8 +1571,23 @@ func (s *state) dispatchShortcut(key string, defaultCmd []string) (bool, tea.Cmd
 		s.mode = modeQuitConfirm
 		s.exitChoice = 0
 		return true, nil
+	case shortcutForceResize:
+		s.forceResizeFocused()
+		return true, nil
 	}
 	return false, nil
+}
+
+func (s *state) forceResizeFocused() {
+	if s.manager == nil || s.manager.Len() == 0 {
+		return
+	}
+	geom := s.geometry()
+	if geom.Pane.Width <= 0 || geom.Pane.Height <= 0 {
+		return
+	}
+	s.manager.ResizeOne(s.manager.FocusedIndex(), geom.Pane.Width, geom.Pane.Height)
+	s.statusMsg = fmt.Sprintf("forced resize to %dx%d", geom.Pane.Width, geom.Pane.Height)
 }
 
 func (s *state) handleShortcut(m Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
@@ -2672,6 +2699,7 @@ func (m Model) renderHelpModal() string {
 		"/ (in scrollback)    search buffer; n / N next/prev match",
 		": (in scrollback)    jump to line number",
 		"Ctrl+Alt+M           toggle mouse mode (select ↔ app)",
+		"Ctrl+Alt+Z           force active session resize",
 		"Wheel (select mode)  scroll the scrollback buffer",
 		"Right-click pane     copy selection, exit scrollback",
 		"Right-click tab      focus/rename/move/remove menu",

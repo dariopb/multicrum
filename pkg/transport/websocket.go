@@ -44,12 +44,19 @@ type ConnectionInfo struct {
 	Agent        *AgentInfo    `json:"agent,omitempty"`
 }
 
+type SettingsInfo struct {
+	SpinnerAnimation bool   `json:"spinnerAnimation"`
+	SpinnerStyle     string `json:"spinnerStyle"`
+	CopyOnRelease    bool   `json:"copyOnRelease"`
+}
+
 type MetaMsg struct {
 	Server           string           `json:"server,omitempty"`
 	ActiveConnection string           `json:"activeConnection,omitempty"`
 	Connections      []ConnectionInfo `json:"connections,omitempty"`
 	FocusedID        int              `json:"focusedId"`
 	Sessions         []SessionInfo    `json:"sessions"`
+	Settings         SettingsInfo     `json:"settings"`
 }
 
 // ControlMsg is received from the browser for session management.
@@ -66,6 +73,8 @@ type ControlMsg struct {
 	Password   string `json:"password,omitempty"` // new remote SSH password
 	Key        string `json:"key,omitempty"`      // new remote SSH identity file
 	Choice     string `json:"choice,omitempty"`   // exit: "respawn" | "remove"
+	Setting    string `json:"setting,omitempty"`  // setting: setting name
+	Value      string `json:"value,omitempty"`    // setting: serialized value
 }
 
 // ResizeMsg is received from the browser when xterm.js is resized.
@@ -125,6 +134,7 @@ type WSTransport struct {
 	Server           func() string                    // current server name
 	ActiveConnection func() string                    // active connection name
 	Connections      func() []ConnectionInfo          // connection list
+	Settings         func() SettingsInfo              // persisted application settings
 }
 
 // NewWSTransport starts listening on addr.
@@ -178,7 +188,11 @@ func (t *WSTransport) BroadcastMeta() {
 	if t.Connections != nil {
 		connections = t.Connections()
 	}
-	payload, _ := json.Marshal(MetaMsg{Server: server, ActiveConnection: activeConnection, Connections: connections, FocusedID: focusedID, Sessions: sessions})
+	var settings SettingsInfo
+	if t.Settings != nil {
+		settings = t.Settings()
+	}
+	payload, _ := json.Marshal(MetaMsg{Server: server, ActiveConnection: activeConnection, Connections: connections, FocusedID: focusedID, Sessions: sessions, Settings: settings})
 	msg := append([]byte{0x02}, payload...)
 	t.mu.Lock()
 	clients := make([]*wsClient, len(t.clients))
@@ -350,7 +364,7 @@ func indexHTML(wsQuery string) string {
   --text-muted:#f5d0fe99;
   --text-soft:#9ca3af;
   --accent-violet:#7c3aed;
-  --accent-pink:#ec4899;
+  --accent-pink:#ff00af;
   --terminal-bg:#0b0b10;
   --row-hover:#332445;
   --row-selected:#3b1f6b;
@@ -422,7 +436,7 @@ body{height:100vh;height:100dvh;background:var(--bg);font-family:var(--font);fon
 #viewport-root{width:100%;height:100%;transform-origin:top left;overflow:hidden}
 #app-shell{display:flex;width:100%;height:100%;min-width:0;min-height:0;touch-action:pan-x pan-y pinch-zoom}
 #connection-rail{width:220px;min-width:150px;max-width:420px;display:flex;flex-direction:column;flex:0 0 auto;background:var(--terminal-bg);border-right:1px solid var(--border);font-family:var(--topbar-font);font-size:var(--topbar-font-size);overflow:visible;position:relative;z-index:30}
-#rail-header{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height);background:color-mix(in srgb,var(--accent-pink) 42%,var(--panel));border-bottom:1px solid var(--border);flex:0 0 auto}
+#rail-header{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height);background:var(--accent-pink);border-bottom:1px solid var(--border);flex:0 0 auto}
 #rail-header #menu-wrap{display:flex;flex:1 1 auto;min-width:0}
 #btn-menu{display:block;width:100%;border:0;background:transparent;color:#fff;text-align:left;padding:4px 10px;font:inherit;font-weight:700;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #btn-menu:hover{background:color-mix(in srgb,var(--accent-pink) 25%,transparent)}
@@ -450,7 +464,7 @@ body.rail-collapsed #rail-header #menu-wrap,body.rail-collapsed #rail-server,bod
 body.rail-collapsed #rail-header{height:100%;border-bottom:0}
 body.rail-collapsed #rail-collapse{width:34px;border-left:0}
 body.rail-collapsed #rail-resizer{display:none}
-#tabbar{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height);background:linear-gradient(90deg,var(--panel-strong),color-mix(in srgb,var(--accent-violet) 48%,var(--panel)) 45%,color-mix(in srgb,var(--accent-pink) 48%,var(--panel)));border-bottom:1px solid var(--border);box-shadow:0 4px 18px #0008;padding:4px 8px;gap:4px;flex-shrink:0;font-family:var(--topbar-font);font-size:var(--topbar-font-size);position:relative}
+#tabbar{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height);background:linear-gradient(90deg,var(--panel-strong),color-mix(in srgb,var(--accent-violet) 48%,var(--panel)) 45%,var(--accent-pink));border-bottom:1px solid var(--border);box-shadow:0 4px 18px #0008;padding:4px 8px;gap:4px;flex-shrink:0;font-family:var(--topbar-font);font-size:var(--topbar-font-size);position:relative}
 #tabbar .btn{min-height:0;height:100%}
 #menu-wrap{position:relative;flex-shrink:0}
 #menu-pop{display:none;position:absolute;top:100%;left:4px;margin-top:4px;background:var(--panel);border:1px solid var(--border-strong);border-radius:7px;box-shadow:0 8px 24px #000a;z-index:50;min-width:220px;padding:4px;flex-direction:column}
@@ -499,10 +513,10 @@ body.ws-connecting #reconnect-overlay,body.ws-disconnected #reconnect-overlay{di
    above the dimming overlay so their session/connection switch buttons stay
    clickable — switching context is the intended way to leave the modal. */
 body.exit-modal-open #tabbar,body.exit-modal-open #connection-rail{position:relative;z-index:110}
-#modal{background:var(--panel);border:1px solid var(--border-strong);border-radius:10px;padding:16px;min-width:320px;max-width:620px;width:90%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px #000a;color:var(--text);font-family:var(--font)}
+#modal{background:var(--panel);border:1px solid var(--border-strong);border-radius:10px;padding:16px;min-width:320px;max-width:620px;width:90%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px #000a;color:var(--text);font-family:var(--font);font-size:var(--font-size-base)}
 #modal-body{overflow-y:auto;min-height:0;flex:1 1 auto;margin:-4px -4px 0;padding:4px}
-#modal h2{font-size:13px;color:var(--text-muted);margin-bottom:10px;font-weight:normal;text-transform:uppercase;letter-spacing:.08em}
-#session-filter,#rename-input,.new-input,.settings-field select,.settings-field input[type="text"],.settings-field input[type="color"]{width:100%;background:var(--panel-strong);border:1px solid var(--border-strong);border-radius:5px;color:var(--text);padding:7px 9px;margin-bottom:10px;font-family:inherit;font-size:13px}
+#modal h2{font-size:.93em;color:var(--text-muted);margin-bottom:10px;font-weight:normal;text-transform:uppercase;letter-spacing:.08em}
+#session-filter,#rename-input,.new-input,.settings-field select,.settings-field input[type="text"],.settings-field input[type="color"]{width:100%;background:var(--panel-strong);border:1px solid var(--border-strong);border-radius:5px;color:var(--text);padding:7px 9px;margin-bottom:10px;font-family:inherit;font-size:1em}
 .settings-field input[type="range"]{width:100%}
 .choice-row{display:block;padding:7px 9px;margin:4px 0;border:1px solid transparent;border-radius:5px;color:var(--text);cursor:pointer}
 .choice-row.selected{background:var(--row-selected);border-color:color-mix(in srgb,var(--accent-violet) 70%,var(--border));color:var(--text)}
@@ -516,25 +530,29 @@ body.exit-modal-open #tabbar,body.exit-modal-open #connection-rail{position:rela
 .sess-item:hover{background:var(--row-hover);border-color:var(--border)}
 .sess-item.active{background:var(--row-selected);border-color:color-mix(in srgb,var(--accent-violet) 70%,var(--border))}
 .sess-item.exited{opacity:.5}
-.sess-num{font-size:11px;color:var(--text-soft);min-width:18px;text-align:right}
-.sess-title{flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sess-badge{font-size:10px;padding:1px 5px;border-radius:3px;background:var(--pill-gray-bg);color:var(--pill-gray-fg)}
+.sess-num{font-size:.79em;color:var(--text-soft);min-width:18px;text-align:right}
+.sess-title{flex:1;font-size:1em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sess-badge{font-size:.72em;padding:1px 5px;border-radius:3px;background:var(--pill-gray-bg);color:var(--pill-gray-fg)}
 .sess-badge.running{background:var(--pill-green-bg);color:var(--pill-green-fg)}
 .sess-badge.exited{background:var(--pill-red-bg);color:var(--pill-red-fg)}
-#modal-footer{margin-top:12px;font-size:11px;color:var(--text-soft);text-align:center}
+#modal-footer{margin-top:12px;font-size:.79em;color:var(--text-soft);text-align:center}
 .settings-section{padding:12px 0;border-top:1px solid var(--border)}
 .settings-section:first-child{border-top:0;padding-top:0}
-.settings-section-title{font-size:12px;font-weight:600;color:var(--text-muted);margin:0 0 10px;text-transform:uppercase;letter-spacing:.08em}
+.settings-section-title{font-size:.86em;font-weight:600;color:var(--text-muted);margin:0 0 10px;text-transform:uppercase;letter-spacing:.08em}
+.settings-tabs{display:flex;gap:4px;margin-bottom:12px;border-bottom:1px solid var(--border)}
+.settings-tab{padding:7px 12px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--text-muted);font:inherit;cursor:pointer}
+.settings-tab.active{border-bottom-color:var(--accent-violet);color:var(--text)}
 .settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-.settings-field{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--text-muted)}
-.settings-field code,.settings-preview code{font-family:var(--font-mono);font-size:12px;color:var(--text)}
+.settings-field{display:flex;flex-direction:column;gap:6px;font-size:.86em;color:var(--text-muted)}
+.settings-toggle{flex-direction:row;align-items:center;color:var(--text)}
+.settings-field code,.settings-preview code{font-family:var(--font-mono);font-size:1em;color:var(--text)}
 .color-row{display:flex;align-items:center;gap:8px}.color-row input{height:34px;padding:2px;margin:0;max-width:72px}.color-row code{min-width:70px}
 .settings-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
 .key-btn{padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;background:var(--panel-strong);color:var(--text);font-family:var(--font-mono);font-size:12px;cursor:pointer}
 .key-btn:hover{background:color-mix(in srgb,var(--accent-violet) 30%,var(--panel-strong));border-color:var(--accent-violet)}
 .settings-preview{border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--panel-strong)}
 .settings-preview-row{display:flex;gap:8px;align-items:center;margin:6px 0}.settings-preview-row.mono{font-family:var(--font-mono);font-size:var(--terminal-font-size)}
-.pill{font-size:11px;padding:2px 7px;border-radius:999px}.pill.green{background:var(--pill-green-bg);color:var(--pill-green-fg)}.pill.amber{background:var(--pill-amber-bg);color:var(--pill-amber-fg)}.pill.red{background:var(--pill-red-bg);color:var(--pill-red-fg)}.pill.gray{background:var(--pill-gray-bg);color:var(--pill-gray-fg)}
+.pill{font-size:.79em;padding:2px 7px;border-radius:999px}.pill.green{background:var(--pill-green-bg);color:var(--pill-green-fg)}.pill.amber{background:var(--pill-amber-bg);color:var(--pill-amber-fg)}.pill.red{background:var(--pill-red-bg);color:var(--pill-red-fg)}.pill.gray{background:var(--pill-gray-bg);color:var(--pill-gray-fg)}
 @media(max-width:700px){#connection-rail{max-width:45vw}}
 @media(max-width:620px){.settings-grid{grid-template-columns:1fr}}
 </style>
@@ -560,6 +578,7 @@ body.exit-modal-open #tabbar,body.exit-modal-open #connection-rail{position:rela
       <button id="m-rename" class="menu-item">✎ Rename <span class="kbd">Alt-R</span></button>
       <button id="m-save" class="menu-item">💾 Save layout <span class="kbd">Alt-P</span></button>
       <button id="m-mouse" class="menu-item">🖱 Mouse: <span id="m-mouse-mode">app</span> <span class="kbd">Alt-M</span></button>
+      <button id="m-force-resize" class="menu-item">↔ Force resize <span class="kbd">Ctrl-Alt-Z</span></button>
       <button id="m-settings" class="menu-item">⚙ Settings <span class="kbd">Alt-,</span></button>
       </div>
     </div>
@@ -609,6 +628,11 @@ body.exit-modal-open #tabbar,body.exit-modal-open #connection-rail{position:rela
       <button id="exit-remove" class="btn btn-red">Remove</button>
     </div>
     <div id="settings-form" style="display:none">
+      <div class="settings-tabs" role="tablist">
+        <button id="settings-tab-browser" class="settings-tab active" type="button" role="tab">Browser</button>
+        <button id="settings-tab-app" class="settings-tab" type="button" role="tab">Settings</button>
+      </div>
+      <div id="settings-browser-panel">
       <section class="settings-section">
         <h3 class="settings-section-title">Appearance</h3>
         <div class="settings-grid">
@@ -640,6 +664,21 @@ body.exit-modal-open #tabbar,body.exit-modal-open #connection-rail{position:rela
         </div>
         <div class="settings-actions"><button id="settings-reset" class="btn" type="button">Reset to defaults</button><button id="settings-close" class="btn btn-blue" type="button">Close</button></div>
       </section>
+      </div>
+      <div id="settings-app-panel" style="display:none">
+        <section class="settings-section">
+          <h3 class="settings-section-title">Agent detection</h3>
+          <div class="settings-grid">
+            <label class="settings-field"><span>Spinner style</span><select id="set-app-spinner-style"><option value="rectangle">Rectangle</option><option value="circle">Circle</option></select></label>
+            <label class="settings-field settings-toggle"><input type="checkbox" id="set-app-spinner-animation"/><span>Spinner animation</span></label>
+          </div>
+        </section>
+        <section class="settings-section">
+          <h3 class="settings-section-title">Selection</h3>
+          <label class="settings-field settings-toggle"><input type="checkbox" id="set-app-copy-on-release"/><span>Copy when selection finishes</span></label>
+          <div class="settings-actions"><button id="settings-app-close" class="btn btn-blue" type="button">Close</button></div>
+        </section>
+      </div>
     </div>
     <div id="session-list"></div>
     </div>
@@ -701,6 +740,7 @@ let sessions = [];
 let connections = [];
 let activeConnection = '';
 let serverName = '';
+let serverSettings = {spinnerAnimation:true,spinnerStyle:'rectangle',copyOnRelease:true};
 const RAIL_WIDTH_KEY = 'multicrum-connection-rail-width';
 const RAIL_COLLAPSED_KEY = 'multicrum-connection-rail-collapsed';
 let connectionRailWidth = Math.max(150, Math.min(420, parseInt(localStorage.getItem(RAIL_WIDTH_KEY)||'220', 10)||220));
@@ -818,6 +858,22 @@ function syncSettingsForm(s){
   const sb = document.getElementById('set-scrollback-val'); if(sb) sb.textContent = s.scrollback;
   const vw = document.getElementById('set-viewportwidth-val'); if(vw) vw.textContent = s.viewportWidth;
   const vwRow = document.getElementById('set-viewportwidth'); if(vwRow) vwRow.closest('.settings-field').style.display = (s.viewportMode === 'fixed') ? '' : 'none';
+}
+function syncAppSettingsForm(){
+  document.getElementById('set-app-spinner-style').value = serverSettings.spinnerStyle === 'circle' ? 'circle' : 'rectangle';
+  document.getElementById('set-app-spinner-animation').checked = serverSettings.spinnerAnimation !== false;
+  document.getElementById('set-app-copy-on-release').checked = serverSettings.copyOnRelease !== false;
+}
+function showSettingsTab(tab){
+  const browser = tab !== 'settings';
+  document.getElementById('settings-browser-panel').style.display = browser ? '' : 'none';
+  document.getElementById('settings-app-panel').style.display = browser ? 'none' : '';
+  document.getElementById('settings-tab-browser').classList.toggle('active', browser);
+  document.getElementById('settings-tab-app').classList.toggle('active', !browser);
+  (browser ? document.getElementById('set-theme') : document.getElementById('set-app-spinner-style')).focus();
+}
+function applyAppSetting(setting, value){
+  control({action:'setting',setting,value:String(value)});
 }
 function applySetting(key, value){
   const s = loadSettings();
@@ -945,6 +1001,10 @@ function startWebSocket(){
       const prevConnection = activeConnection;
       activeConnection = meta.activeConnection || '';
       serverName = meta.server || '';
+      if(meta.settings){
+        serverSettings = Object.assign({}, serverSettings, meta.settings);
+        syncAppSettingsForm();
+      }
       if(typeof meta.focusedId === 'number' && (focusedID !== meta.focusedId || prevConnection !== activeConnection)){
         const connChanged = (prevConnection !== activeConnection);
         const initiated = weInitiatedSwitch;
@@ -1299,8 +1359,9 @@ function openSettings(){
   document.getElementById('settings-form').style.display = '';
   document.getElementById('modal-footer').textContent = 'Changes save automatically   Esc close';
   syncSettingsForm(loadSettings());
+  syncAppSettingsForm();
   document.getElementById('modal-overlay').classList.add('open');
-  document.getElementById('set-theme').focus();
+  showSettingsTab('browser');
 }
 
 const KEY_ROWS = [
@@ -1594,6 +1655,12 @@ document.getElementById('set-viewportmode').onchange = e => { applySetting('view
 document.getElementById('set-viewportwidth').oninput = e => { applySetting('viewportWidth', e.target.value); fitAndResize(); };
 document.getElementById('settings-reset').onclick = resetSettings;
 document.getElementById('settings-close').onclick = closeModal;
+document.getElementById('settings-app-close').onclick = closeModal;
+document.getElementById('settings-tab-browser').onclick = () => showSettingsTab('browser');
+document.getElementById('settings-tab-app').onclick = () => showSettingsTab('settings');
+document.getElementById('set-app-spinner-style').onchange = e => applyAppSetting('spinnerStyle', e.target.value);
+document.getElementById('set-app-spinner-animation').onchange = e => applyAppSetting('spinnerAnimation', e.target.checked);
+document.getElementById('set-app-copy-on-release').onchange = e => applyAppSetting('copyOnRelease', e.target.checked);
 function applyConnectionRailLayout(){
   const rail = document.getElementById('connection-rail');
   const toggle = document.getElementById('rail-collapse');
@@ -1661,6 +1728,7 @@ document.getElementById('m-kill').onclick = () => { openMenu(false); if(connecte
 document.getElementById('m-rename').onclick = () => { openMenu(false); openRename(); };
 document.getElementById('m-save').onclick = () => { openMenu(false); if(connected){ control({action:'save',id:0}); } term.focus(); };
 document.getElementById('m-mouse').onclick = () => { openMenu(false); toggleMouseMode(); term.focus(); };
+document.getElementById('m-force-resize').onclick = () => { openMenu(false); fitAndResize(); term.focus(); };
 document.getElementById('m-settings').onclick = () => { openMenu(false); openSettings(); };
 buildKeysPanel();
 document.getElementById('btn-keys').onclick = (e) => { e.stopPropagation(); openKeysPanel(); };
@@ -1685,6 +1753,7 @@ function handleAppShortcut(e){
   if(onlyCtrlAlt && (e.code==='KeyO' || (e.key||'').toLowerCase()==='o')){ e.preventDefault(); e.stopPropagation(); openConnections(); return true; }
   if(onlyCtrlAlt && (e.code==='KeyE' || (e.key||'').toLowerCase()==='e')){ e.preventDefault(); e.stopPropagation(); openRenameConnection(currentConnectionName()); return true; }
   if(onlyCtrlAlt && (e.code==='KeyC' || (e.key||'').toLowerCase()==='c')){ e.preventDefault(); e.stopPropagation(); newConnection(); return true; }
+  if(onlyCtrlAlt && (e.code==='KeyZ' || (e.key||'').toLowerCase()==='z')){ e.preventDefault(); e.stopPropagation(); fitAndResize(); term.focus(); return true; }
   if(e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey){
     // Prefer e.code over e.key because some keyboard layouts (US-Intl,
     // macOS Option, AltGr layouts) compose Alt+letter into special chars,
@@ -1785,6 +1854,31 @@ function forceSelectMouse(e){
   e.target.dispatchEvent(clone);
 }
 document.getElementById('terminal').addEventListener('mousedown', forceSelectMouse, {capture:true});
+
+function fallbackCopyText(text){
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand('copy');
+  input.remove();
+}
+function copyTerminalSelectionOnRelease(e){
+  if(e.button !== 0 || serverSettings.copyOnRelease === false || modalOpen) return;
+  queueMicrotask(() => {
+    const text = term.getSelection();
+    if(!text) return;
+    term.clearSelection();
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).catch(() => fallbackCopyText(text));
+    } else {
+      fallbackCopyText(text);
+    }
+  });
+}
+window.addEventListener('mouseup', copyTerminalSelectionOnRelease, {capture:true});
 
 function updateMouseModeUI(){
   const label = document.getElementById('m-mouse-mode');

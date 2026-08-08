@@ -119,3 +119,14 @@ func TestAgentSpinnerStyleDefaultsToRectangleAndSupportsCircle(t *testing.T) {
 		t.Fatalf("invalid spinner style = %q, want fallback %q", got, AgentSpinnerStyleRectangle)
 	}
 }
+
+func TestCopySelectionOnReleaseDefaultsOnAndCanBeDisabled(t *testing.T) {
+	if !(&Config{}).CopySelectionOnReleaseEnabled() {
+		t.Fatal("copy on release should default to enabled")
+	}
+	disabled := false
+	cfg := &Config{Selection: &SelectionConfig{CopyOnRelease: &disabled}}
+	if cfg.CopySelectionOnReleaseEnabled() {
+		t.Fatal("explicitly disabled copy on release reported enabled")
+	}
+}

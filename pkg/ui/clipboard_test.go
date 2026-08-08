@@ -34,3 +34,20 @@ func TestClipboardOutputDoesNotDependOnOwnerTmuxEnvironment(t *testing.T) {
 		t.Fatalf("clipboard output lacks tmux passthrough terminator: %q", sequences[0])
 	}
 }
+
+func TestClipboardHandlerReplacesOutputDelivery(t *testing.T) {
+	m := NewModel([]string{"bash"}, 80, 24)
+	var output bytes.Buffer
+	var handled string
+	m.SetClipboardOutput(&output)
+	m.SetClipboardHandler(func(text string) { handled = text })
+
+	m.s.writeClipboard("selected")
+
+	if handled != "selected" {
+		t.Fatalf("handler text = %q, want selected", handled)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("clipboard was delivered twice: %q", output.String())
+	}
+}

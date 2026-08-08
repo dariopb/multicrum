@@ -2,14 +2,59 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 
 	tea "charm.land/bubbletea/v2"
 	"multicrum/pkg/config"
 )
 
+func (s *state) applyRemoteSetting(name, value string) tea.Cmd {
+	changed := false
+	switch name {
+	case "spinnerStyle":
+		if value != config.AgentSpinnerStyleRectangle && value != config.AgentSpinnerStyleCircle {
+			return nil
+		}
+		changed = s.agentSpinnerStyle != value
+		s.agentSpinnerStyle = value
+		s.agentSpinnerFrame = 0
+	case "spinnerAnimation":
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil
+		}
+		changed = s.agentSpinnerEnabled != enabled
+		s.agentSpinnerEnabled = enabled
+		s.agentSpinnerFrame = 0
+		if !enabled {
+			s.agentSpinnerRunning = false
+		}
+	case "copyOnRelease":
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil
+		}
+		changed = s.copySelectionOnRelease != enabled
+		s.copySelectionOnRelease = enabled
+	default:
+		return nil
+	}
+	if !changed {
+		return nil
+	}
+	s.settingsDirty = true
+	s.notifyMeta()
+	if s.configPath != "" {
+		s.saveLayout()
+		s.settingsDirty = false
+	}
+	return s.startAgentSpinner()
+}
+
 const (
 	settingsSpinnerStyle = iota
 	settingsSpinnerAnimation
+	settingsCopyOnRelease
 	settingsCount
 )
 
@@ -70,6 +115,15 @@ func (s *state) changeSetting(direction int) tea.Cmd {
 		if !s.agentSpinnerEnabled {
 			s.agentSpinnerRunning = false
 		}
+	case settingsCopyOnRelease:
+		switch direction {
+		case -1:
+			s.copySelectionOnRelease = false
+		case 1:
+			s.copySelectionOnRelease = true
+		default:
+			s.copySelectionOnRelease = !s.copySelectionOnRelease
+		}
 	}
 	s.settingsDirty = true
 	s.notifyMeta()
@@ -86,11 +140,16 @@ func (m Model) renderSettingsModal() string {
 	if s.agentSpinnerEnabled {
 		animation = "on"
 	}
+	copyOnRelease := "off"
+	if s.copySelectionOnRelease {
+		copyOnRelease = "on"
+	}
 	rows := []string{
 		"Settings",
 		"",
 		fmt.Sprintf("  Spinner style       < %s >", s.agentSpinnerStyle),
 		fmt.Sprintf("  Spinner animation   < %s >", animation),
+		fmt.Sprintf("  Copy on selection   < %s >", copyOnRelease),
 		"",
 		"↑/↓ select   ←/→ change   Esc close",
 	}
@@ -105,10 +164,10 @@ func (m Model) renderSettingsModal() string {
 
 func (s *state) handleSettingsModalMouse(x, y int) tea.Cmd {
 	switch y {
-	case 2, 3:
+	case 2, 3, 4:
 		s.settingsCursor = y - 2
 		return s.changeSetting(0)
-	case 5:
+	case 6:
 		if _, ok := modalActionAt(x, "↑/↓ select   ←/→ change   Esc close", []modalAction{
 			{label: "Esc close", key: escapeKey()},
 		}); ok {

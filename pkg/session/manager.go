@@ -177,11 +177,11 @@ func (m *SessionManager) FocusedIndex() int {
 // Kill stops the session at index and removes it.
 func (m *SessionManager) Kill(index int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if len(m.sessions) <= 1 || index < 0 || index >= len(m.sessions) {
+		m.mu.Unlock()
 		return
 	}
-	_ = m.sessions[index].Close()
+	killed := m.sessions[index]
 	m.sessions = append(m.sessions[:index], m.sessions[index+1:]...)
 	// Re-index remaining sessions.
 	for i, s := range m.sessions {
@@ -191,6 +191,8 @@ func (m *SessionManager) Kill(index int) {
 		m.focused = len(m.sessions) - 1
 	}
 	m.updateTerminalRepliesLocked()
+	m.mu.Unlock()
+	_ = killed.Close()
 }
 
 // Sessions returns a snapshot of all sessions.

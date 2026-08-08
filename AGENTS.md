@@ -111,11 +111,13 @@ ui.Model Update loop
 - `Ctrl+Up` / `Ctrl+Down`: scroll local TUI scrollback one line.
 - `Ctrl+Home` / `Ctrl+End`: jump to top/bottom of local TUI scrollback.
 - `Ctrl+Alt+Q`: owner TUI opens server quit confirmation; attached clients use `Ctrl+Alt+Q` to detach without killing sessions. Plain `Ctrl+Q` is forwarded.
+- `Ctrl+Alt+Z`: force the focused session PTY to the active TUI pane dimensions.
 - Clicking the left-rail `Multicrum` title opens global actions. `Detach`
   disconnects only the attach client that generated the click; `Quit` remains
   the owner/server-wide confirmation.
 - Right-click a session tab or connection tab to open a modal-styled context menu in full-screen coordinates at the pointer. Its focus, rename, move, and remove items must route through `handleSelectKey` / `handleConnectionsKey` with synthetic `Enter`, `R`, `M`, or `Delete` keys after selecting the clicked target; do not add a duplicate action implementation. `View()` uses `AllMotion` while `modeContextMenu` is open so the item beneath the pointer is highlighted with `selectorActiveStyle`; restore select mode by closing the menu. Right-clicking a second tab while a menu is open must replace it with the new tab's menu, not merely dismiss it.
 - Left-click `[+] Ctrl+Alt+T` in the tab bar or the Help label in the status bar to dispatch the existing new-session or help shortcut. Their bounds are recorded as `newSessionHitbox` and `helpHitbox` while rendering; do not create duplicate action paths.
+- In select mouse mode, left-drag performs normal linear selection. The persisted `selection.copyOnRelease` setting defaults to true; when enabled, releasing the left button copies asynchronously, clears the highlight, and returns to the live tail. When disabled, release retains the selection for right-click copying. Holding `Ctrl+Alt` when the left-button press is received starts rectangular/block selection: every selected display row contributes the same inclusive column range, short rows are padded with blank cells, and rows remain newline-separated even across soft wraps.
 
 Global shortcuts (`Ctrl+Alt+T`, `Ctrl+Alt+Left/Right`, `Ctrl+Alt+[`/`]`, `Ctrl+Alt+Q`) are centralized in `state.handleGlobalShortcut` and run before modal-specific handlers. Do not duplicate these bindings inside individual modal handlers; that caused regressions where exited-session dialogs blocked connection/session switching or quit.
 
@@ -131,6 +133,8 @@ Shortcut keys are consumed before the default key forwarding path. Do not add a 
 - `Alt+P`: save layout.
 - `Alt+M`: toggle web mouse mode.
 - `Alt+,`: settings.
+- `Ctrl+Alt+Z`: refit the browser terminal and force-send its current dimensions for the focused session.
+- Web settings are split into `Browser` (per-browser appearance stored in local storage) and `Settings` (persisted server settings shared with the TUI). The latter exposes agent spinner style/animation and copy-on-selection-release.
 - `Ctrl+Alt+Left` / `Ctrl+Alt+Right`: previous/next session.
 - `Ctrl+Alt+[` / `Ctrl+Alt+]`: previous/next connection.
 - `Ctrl+Alt+O`: open connections dialog.

@@ -42,12 +42,17 @@ type AgentDetectionConfig struct {
 	SpinnerStyle     string `yaml:"spinnerStyle,omitempty" json:"spinnerStyle,omitempty"`
 }
 
+type SelectionConfig struct {
+	CopyOnRelease *bool `yaml:"copyOnRelease,omitempty" json:"copyOnRelease,omitempty"`
+}
+
 type Config struct {
 	Server              string                `yaml:"server,omitempty"`
 	ActiveConnection    string                `yaml:"activeConnection,omitempty"`
 	ConnectionLayout    string                `yaml:"connectionLayout,omitempty" json:"connectionLayout,omitempty"`
 	ConnectionRailWidth int                   `yaml:"connectionRailWidth,omitempty" json:"connectionRailWidth,omitempty"`
 	AgentDetection      *AgentDetectionConfig `yaml:"agentDetection,omitempty" json:"agentDetection,omitempty"`
+	Selection           *SelectionConfig      `yaml:"selection,omitempty" json:"selection,omitempty"`
 	Connections         []ConnectionEntry     `yaml:"connections,omitempty"`
 	Sessions            []SessionEntry        `yaml:"sessions,omitempty"`
 }
@@ -68,6 +73,12 @@ func (c *Config) AgentSpinnerStyle() string {
 		}
 	}
 	return AgentSpinnerStyleRectangle
+}
+
+func (c *Config) CopySelectionOnReleaseEnabled() bool {
+	return c == nil || c.Selection == nil ||
+		c.Selection.CopyOnRelease == nil ||
+		*c.Selection.CopyOnRelease
 }
 
 func (c *Config) Normalize() *Config {

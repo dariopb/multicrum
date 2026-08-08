@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -186,7 +187,7 @@ func TestVerticalBrandOpensGlobalActionsMenu(t *testing.T) {
 			}
 			want := []string{
 				"Help", "New Session", "Sessions", "New Connection",
-				"Connections", "Toggle Mouse (select)", "Save Layout", "Detach", "Settings", "Quit",
+				"Connections", "Toggle Mouse (select)", "Force Resize", "Save Layout", "Detach", "Settings", "Quit",
 			}
 			if got := m.contextMenuOptions(); !reflect.DeepEqual(got, want) {
 				t.Fatalf("global menu options = %#v, want %#v", got, want)
@@ -258,7 +259,7 @@ func TestGlobalActionsMenuDispatchesExistingShortcuts(t *testing.T) {
 	m.s.openContextMenu(appContextMenu, -1, 1, 0)
 	left, top, _, _ = m.contextMenuBounds()
 	quit := mouseEvent{
-		X: left, Y: top + 1 + 9, Button: tea.MouseLeft, Action: mousePress,
+		X: left, Y: top + 1 + 10, Button: tea.MouseLeft, Action: mousePress,
 	}
 	_ = m.s.handleContextMenuMouse(*m, quit)
 	if m.s.mode != modeQuitConfirm {
@@ -268,18 +269,40 @@ func TestGlobalActionsMenuDispatchesExistingShortcuts(t *testing.T) {
 
 func TestGlobalActionsMenuUsesShortcutBindings(t *testing.T) {
 	want := map[int]string{
-		0: shortcutHelp,
-		1: shortcutNew,
-		2: shortcutSessions,
-		3: shortcutNewConn,
-		4: shortcutConnections,
-		5: shortcutMouse,
-		6: shortcutSaveLayout,
-		9: shortcutQuit,
+		0:  shortcutHelp,
+		1:  shortcutNew,
+		2:  shortcutSessions,
+		3:  shortcutNewConn,
+		4:  shortcutConnections,
+		5:  shortcutMouse,
+		6:  shortcutForceResize,
+		7:  shortcutSaveLayout,
+		10: shortcutQuit,
 	}
 	for option, shortcut := range want {
 		if got := appContextMenuKey(option).Keystroke(); got != shortcut {
 			t.Errorf("option %d keystroke = %q, want %q", option, got, shortcut)
 		}
+	}
+}
+
+func TestForceResizeShortcutUsesCurrentPaneGeometry(t *testing.T) {
+	m := NewModel([]string{"bash"}, 80, 24)
+	manager := contextMenuTestManager(t, 40, 10, 1)
+	defer manager.CloseAll()
+	m.s.manager = manager
+	m.s.connections[0].manager = manager
+
+	handled, cmd := m.s.handleGlobalShortcut(tea.KeyPressMsg(tea.Key{
+		Code: 'z',
+		Mod:  tea.ModCtrl | tea.ModAlt,
+	}))
+	if !handled || cmd != nil {
+		t.Fatalf("force resize handled=%v cmd=%v, want true/nil", handled, cmd)
+	}
+	geom := m.s.geometry()
+	want := fmt.Sprintf("forced resize to %dx%d", geom.Pane.Width, geom.Pane.Height)
+	if m.s.statusMsg != want {
+		t.Fatalf("status = %q, want %q", m.s.statusMsg, want)
 	}
 }

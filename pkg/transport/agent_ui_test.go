@@ -58,6 +58,12 @@ func TestWebUIAppearanceDefaultsAndMobilePinch(t *testing.T) {
 		`--topbar-height:calc(var(--topbar-font-size) + 23px)`,
 		`#rail-header{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height)`,
 		`#tabbar{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height)`,
+		`--accent-pink:#ff00af`,
+		`background:var(--accent-pink);border-bottom`,
+		`45%,var(--accent-pink))`,
+		`font-family:var(--font);font-size:var(--font-size-base)`,
+		`.sess-title{flex:1;font-size:1em`,
+		`#modal-footer{margin-top:12px;font-size:.79em`,
 		`user-scalable=yes`,
 		`touch-action:pan-x pan-y pinch-zoom`,
 		`id="viewport-root"`,
@@ -71,6 +77,55 @@ func TestWebUIAppearanceDefaultsAndMobilePinch(t *testing.T) {
 	} {
 		if !strings.Contains(html, fragment) {
 			t.Fatalf("web appearance or pinch support missing %q", fragment)
+		}
+	}
+}
+
+func TestWebUIIncludesBrowserAndApplicationSettingsTabs(t *testing.T) {
+	html := indexHTML("")
+	for _, fragment := range []string{
+		`id="settings-tab-browser"`,
+		`id="settings-tab-app"`,
+		`id="settings-browser-panel"`,
+		`id="settings-app-panel"`,
+		`id="set-app-spinner-style"`,
+		`id="set-app-spinner-animation"`,
+		`id="set-app-copy-on-release"`,
+		`control({action:'setting',setting,value:String(value)})`,
+	} {
+		if !strings.Contains(html, fragment) {
+			t.Fatalf("web settings missing %q", fragment)
+		}
+	}
+}
+
+func TestWebUICopiesSelectionOnRelease(t *testing.T) {
+	html := indexHTML("")
+	for _, fragment := range []string{
+		`function copyTerminalSelectionOnRelease(e)`,
+		`serverSettings.copyOnRelease === false`,
+		`const text = term.getSelection()`,
+		`term.clearSelection()`,
+		`navigator.clipboard.writeText(text)`,
+		`window.addEventListener('mouseup', copyTerminalSelectionOnRelease, {capture:true})`,
+	} {
+		if !strings.Contains(html, fragment) {
+			t.Fatalf("web copy-on-release missing %q", fragment)
+		}
+	}
+}
+
+func TestWebUIIncludesForceResizeAction(t *testing.T) {
+	html := indexHTML("")
+	for _, fragment := range []string{
+		`id="m-force-resize"`,
+		`Ctrl-Alt-Z`,
+		`document.getElementById('m-force-resize').onclick`,
+		`onlyCtrlAlt && (e.code==='KeyZ'`,
+		`fitAndResize(); term.focus()`,
+	} {
+		if !strings.Contains(html, fragment) {
+			t.Fatalf("web force resize missing %q", fragment)
 		}
 	}
 }

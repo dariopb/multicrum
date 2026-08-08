@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"multicrum/pkg/session"
@@ -372,7 +373,7 @@ func TestScrollbackSelectionUsesDisplayedWrappedRows(t *testing.T) {
 				t.Fatalf("selection rows = %#v, want wrapped display rows", lines)
 			}
 
-			m.s.startSelection(paneWidth-2, 0)
+			m.s.startSelection(paneWidth-2, 0, false)
 			m.s.updateSelection(2, 1)
 			want := lines[0].Text[paneWidth-2:] + lines[1].Text[:3]
 			if got := m.s.selectionText(); got != want {
@@ -384,6 +385,93 @@ func TestScrollbackSelectionUsesDisplayedWrappedRows(t *testing.T) {
 				t.Fatal("selection overlay did not highlight the displayed wrapped rows")
 			}
 		})
+	}
+}
+
+func TestRectangularSelectionCopiesFixedBlock(t *testing.T) {
+	m := NewModel([]string{"bash"}, 20, 8)
+	m.s.manager = session.NewManager(20, 6, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	if _, err := m.s.manager.New([]string{"sh"}); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+	m.s.ensureViewport(0, 20, 8)
+	vp := m.s.viewports[0]
+	vp.SetContent("0123456789\nabcdefghij\nXYZ")
+	m.s.viewports[0] = vp
+
+	m.s.sel = selection{
+		rectangular: true,
+		startL:      0, startC: 6,
+		endL: 2, endC: 2,
+		hasRange: true,
+	}
+	if got := m.s.selectionText(); got != "23456\ncdefg\nZ    " {
+		t.Fatalf("selectionText() = %q, want rectangular block", got)
+	}
+}
+
+func TestRectangularSelectionKeepsNewlinesAcrossSoftWraps(t *testing.T) {
+	lines := []session.BufferLine{
+		{Text: "abcdef", SoftWrap: true},
+		{Text: "ghijkl"},
+	}
+	sel := selection{
+		rectangular: true,
+		startL:      0, startC: 1,
+		endL: 1, endC: 3,
+		hasRange: true,
+	}
+	if got := rectangularSelectionText(lines, sel); got != "bcd\nhij" {
+		t.Fatalf("rectangularSelectionText() = %q, want fixed rows", got)
+	}
+}
+
+func TestCtrlAltMouseDragStartsRectangularSelection(t *testing.T) {
+	m := NewModel([]string{"bash"}, 40, 10)
+	m.s.manager = session.NewManager(40, 8, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	if _, err := m.s.manager.New([]string{"sh"}); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+	m.s.ensureViewport(0, 40, 10)
+	geom := m.s.geometry()
+
+	_, _ = m.Update(tea.MouseClickMsg{
+		X: geom.Pane.X + 2, Y: geom.Pane.Y + 1,
+		Button: tea.MouseLeft, Mod: tea.ModCtrl | tea.ModAlt,
+	})
+	if !m.s.sel.active || !m.s.sel.rectangular {
+		t.Fatalf("selection = %#v, want active rectangular selection", m.s.sel)
+	}
+}
+
+func TestRectangularSelectionOverlayUsesSameColumnsOnEveryRow(t *testing.T) {
+	m := NewModel([]string{"bash"}, 10, 6)
+	m.s.manager = session.NewManager(10, 4, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	if _, err := m.s.manager.New([]string{"sh"}); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+	m.s.ensureViewport(0, 10, 6)
+	vp := m.s.viewports[0]
+	vp.SetContent("abcdefghij\n0123456789")
+	m.s.viewports[0] = vp
+	m.s.sel = selection{
+		rectangular: true,
+		startL:      0, startC: 2,
+		endL: 1, endC: 4,
+		hasRange: true,
+	}
+
+	got := m.s.overlaySelection("abcdefghij\n0123456789", 10, 2)
+	if !strings.Contains(got, "ab\x1b[7mcde\x1b[0mfghij") ||
+		!strings.Contains(got, "01\x1b[7m234\x1b[0m56789") {
+		t.Fatalf("overlaySelection() = %q, want columns 2..4 highlighted on both rows", got)
 	}
 }
 
@@ -500,15 +588,112 @@ func TestRightClickCopiesSelectionOnPressOrRelease(t *testing.T) {
 			var copied string
 			m.s.clipboardWrite = func(text string) { copied = text }
 			_, cmd := m.Update(tc.msg)
-			if copied != "selected" {
-				t.Fatalf("copied text = %q, want %q", copied, "selected")
-			}
 			if cmd == nil {
 				t.Fatal("right-click did not return the terminal clipboard command")
+			}
+			if copied != "" {
+				t.Fatalf("clipboard write ran synchronously: %q", copied)
+			}
+			_ = cmd()
+			if copied != "selected" {
+				t.Fatalf("copied text = %q, want %q", copied, "selected")
 			}
 			if m.s.sel.hasRange || m.s.scrollbackMode[0] {
 				t.Fatal("successful copy did not clear selection and return to live mode")
 			}
 		})
+	}
+}
+
+func TestCopySelectionDoesNotBlockUpdateOnSlowClipboard(t *testing.T) {
+	m := NewModel([]string{"bash"}, 20, 8)
+	m.s.manager = session.NewManager(20, 6, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	if _, err := m.s.manager.New([]string{"sh"}); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+	m.s.ensureViewport(0, 20, 8)
+	vp := m.s.viewports[0]
+	vp.SetContent("selected")
+	m.s.viewports[0] = vp
+	m.s.sel = selection{startL: 0, startC: 0, endL: 0, endC: 7, hasRange: true}
+
+	block := make(chan struct{})
+	m.s.clipboardWrite = func(string) { <-block }
+	done := make(chan tea.Cmd, 1)
+	go func() {
+		_, cmd := m.Update(tea.MouseClickMsg{X: 1, Y: 1, Button: tea.MouseRight})
+		done <- cmd
+	}()
+
+	var cmd tea.Cmd
+	select {
+	case cmd = <-done:
+	case <-time.After(100 * time.Millisecond):
+		close(block)
+		t.Fatal("mouse Update blocked on clipboard delivery")
+	}
+	close(block)
+	if cmd == nil {
+		t.Fatal("right-click did not return clipboard command")
+	}
+}
+
+func TestFinishSelectionCopiesAndClearsByDefault(t *testing.T) {
+	m := NewModel([]string{"bash"}, 20, 8)
+	m.s.manager = session.NewManager(20, 6, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	if _, err := m.s.manager.New([]string{"sh"}); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+	m.s.ensureViewport(0, 20, 8)
+	vp := m.s.viewports[0]
+	vp.SetContent("selected")
+	m.s.viewports[0] = vp
+	m.s.sel = selection{
+		active: true, startL: 0, startC: 0,
+		endL: 0, endC: 7, hasRange: true,
+	}
+	var copied string
+	m.s.clipboardWrite = func(text string) { copied = text }
+
+	cmd := m.s.finishSelection()
+	if cmd == nil {
+		t.Fatal("finishSelection did not return clipboard command")
+	}
+	if m.s.sel.hasRange {
+		t.Fatal("default copy on release did not clear selection")
+	}
+	_ = cmd()
+	if copied != "selected" {
+		t.Fatalf("copied text = %q, want selected", copied)
+	}
+}
+
+func TestFinishSelectionRetainsSelectionWhenCopyDisabled(t *testing.T) {
+	m := NewModel([]string{"bash"}, 20, 8)
+	m.s.manager = session.NewManager(20, 6, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	if _, err := m.s.manager.New([]string{"sh"}); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+	m.s.ensureViewport(0, 20, 8)
+	vp := m.s.viewports[0]
+	vp.SetContent("selected")
+	m.s.viewports[0] = vp
+	m.s.copySelectionOnRelease = false
+	m.s.sel = selection{
+		active: true, startL: 0, startC: 0,
+		endL: 0, endC: 7, hasRange: true,
+	}
+
+	if cmd := m.s.finishSelection(); cmd != nil {
+		t.Fatal("disabled copy on release returned clipboard command")
+	}
+	if m.s.sel.active || !m.s.sel.hasRange {
+		t.Fatalf("selection = %#v, want completed retained selection", m.s.sel)
 	}
 }

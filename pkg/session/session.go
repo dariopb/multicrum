@@ -70,14 +70,14 @@ func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation uint64) {
 	for {
 		n, err := rw.Read(buf)
 		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			screen.Write(chunk)
 			s.mu.Lock()
 			if s.generation != generation {
 				s.mu.Unlock()
 				return
 			}
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			screen.Write(chunk)
 			sendOutput := s.SendOutput
 			index := s.index
 			s.mu.Unlock()
@@ -108,20 +108,23 @@ func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation uint64) {
 // Write sends bytes into the child process (keyboard input).
 func (s *Session) Write(p []byte) (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.rw == nil {
+	rw := s.rw
+	s.mu.Unlock()
+	if rw == nil {
 		return 0, fmt.Errorf("session not started")
 	}
-	return s.rw.Write(p)
+	return rw.Write(p)
 }
 
 // Resize notifies the child process of a new terminal size.
 func (s *Session) Resize(cols, rows int) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.screen.Resize(cols, rows)
-	if s.resizeFn != nil {
-		return s.resizeFn(cols, rows)
+	screen := s.screen
+	resizeFn := s.resizeFn
+	s.mu.Unlock()
+	screen.Resize(cols, rows)
+	if resizeFn != nil {
+		return resizeFn(cols, rows)
 	}
 	return nil
 }
@@ -129,12 +132,15 @@ func (s *Session) Resize(cols, rows int) error {
 // Close kills the child process.
 func (s *Session) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.exited = true
 	s.generation++
 	s.processID = 0
-	if s.rw != nil {
-		return s.rw.Close()
+	rw := s.rw
+	s.rw = nil
+	s.resizeFn = nil
+	s.mu.Unlock()
+	if rw != nil {
+		return rw.Close()
 	}
 	return nil
 }
@@ -295,9 +301,7 @@ func (s *Session) SetCmdLine(line string) {
 // existing index, title, and screen size. The old VT screen is cleared.
 func (s *Session) Respawn(cols, rows int) error {
 	s.mu.Lock()
-	if s.rw != nil {
-		_ = s.rw.Close()
-	}
+	rw := s.rw
 	s.generation++
 	s.processID = 0
 	s.rw = nil
@@ -305,6 +309,9 @@ func (s *Session) Respawn(cols, rows int) error {
 	s.exited = false
 	s.screen = NewVTScreen(cols, rows)
 	s.mu.Unlock()
+	if rw != nil {
+		_ = rw.Close()
+	}
 	return s.Start(cols, rows)
 }
 

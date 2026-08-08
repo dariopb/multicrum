@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,39 @@ type fakeRW struct{}
 func (fakeRW) Read(p []byte) (int, error)  { return 0, io.EOF }
 func (fakeRW) Write(p []byte) (int, error) { return len(p), nil }
 func (fakeRW) Close() error                { return nil }
+
+type blockingWriteRW struct {
+	writeStarted chan struct{}
+	closed       chan struct{}
+	closeOnce    sync.Once
+}
+
+func newBlockingWriteRW() *blockingWriteRW {
+	return &blockingWriteRW{
+		writeStarted: make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (rw *blockingWriteRW) Read([]byte) (int, error) {
+	<-rw.closed
+	return 0, io.EOF
+}
+
+func (rw *blockingWriteRW) Write(p []byte) (int, error) {
+	select {
+	case <-rw.writeStarted:
+	default:
+		close(rw.writeStarted)
+	}
+	<-rw.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (rw *blockingWriteRW) Close() error {
+	rw.closeOnce.Do(func() { close(rw.closed) })
+	return nil
+}
 
 func newTestSession(index int) *Session {
 	return &Session{
@@ -193,5 +227,51 @@ func TestSessionManagerCloseAllClearsSessions(t *testing.T) {
 	}
 	if got := m.focused; got != 0 {
 		t.Fatalf("focused = %d, want 0", got)
+	}
+}
+
+func TestBlockedWriteDoesNotBlockExitDetectionOrClose(t *testing.T) {
+	rw := newBlockingWriteRW()
+	exit := make(chan ExitMsg, 1)
+	sess := &Session{
+		index:      0,
+		screen:     NewVTScreen(80, 24),
+		rw:         rw,
+		generation: 1,
+		SendExit:   func(msg ExitMsg) { exit <- msg },
+	}
+	go sess.readLoop(rw, sess.screen, 1)
+	go func() {
+		_, _ = sess.Write([]byte("blocked"))
+	}()
+	select {
+	case <-rw.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("write did not start")
+	}
+
+	metadataDone := make(chan struct{})
+	go func() {
+		_ = sess.Exited()
+		close(metadataDone)
+	}()
+	select {
+	case <-metadataDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked write held the session state lock")
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case <-rw.closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not reach the blocked backend")
+	}
+	select {
+	case msg := <-exit:
+		t.Fatalf("explicit close emitted stale exit message: %+v", msg)
+	case <-time.After(20 * time.Millisecond):
 	}
 }

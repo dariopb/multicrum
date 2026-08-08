@@ -16,18 +16,31 @@ import (
 // Coordinates are display-row-relative: lineIdx is the index into the exact
 // wrapped row source painted by the pane, col is the rune column.
 type selection struct {
-	active   bool // mouse button is currently down
-	startL   int
-	startC   int
-	endL     int
-	endC     int
-	hasRange bool // true once we've moved beyond the press point
+	active      bool // mouse button is currently down
+	rectangular bool // copy the fixed column range from every selected row
+	startL      int
+	startC      int
+	endL        int
+	endC        int
+	hasRange    bool // true once we've moved beyond the press point
 }
 
 func (sel selection) normalized() (sl, sc, el, ec int) {
 	sl, sc, el, ec = sel.startL, sel.startC, sel.endL, sel.endC
 	if sl > el || (sl == el && sc > ec) {
 		sl, sc, el, ec = el, ec, sl, sc
+	}
+	return
+}
+
+func (sel selection) rectangle() (sl, sc, el, ec int) {
+	sl, el = sel.startL, sel.endL
+	if sl > el {
+		sl, el = el, sl
+	}
+	sc, ec = sel.startC, sel.endC
+	if sc > ec {
+		sc, ec = ec, sc
 	}
 	return
 }
@@ -115,17 +128,18 @@ func (s *state) bufferRowFromMouse(yInPane int) int {
 
 // startSelection begins a fresh selection at the given mouse coordinates
 // (pane-relative). Returns true if the click was inside the pane.
-func (s *state) startSelection(xInPane, yInPane int) {
+func (s *state) startSelection(xInPane, yInPane int, rectangular bool) {
 	line := s.bufferRowFromMouse(yInPane)
 	s.sel = selection{
-		active:   true,
-		startL:   line,
-		startC:   xInPane,
-		endL:     line,
-		endC:     xInPane,
-		hasRange: false,
+		active:      true,
+		rectangular: rectangular,
+		startL:      line,
+		startC:      xInPane,
+		endL:        line,
+		endC:        xInPane,
+		hasRange:    false,
 	}
-	debugLog("startSelection: line=%d col=%d", line, xInPane)
+	debugLog("startSelection: line=%d col=%d rectangular=%v", line, xInPane, rectangular)
 }
 
 // updateSelection extends the current selection to the given mouse coords.
@@ -142,8 +156,9 @@ func (s *state) updateSelection(xInPane, yInPane int) {
 	debugLog("updateSelection: line=%d col=%d hasRange=%v", line, xInPane, s.sel.hasRange)
 }
 
-// finishSelection ends the drag, copies the selected text to the system
-// clipboard via OSC 52, and returns a status message.
+// finishSelection ends the drag and returns an asynchronous clipboard command.
+// Clipboard helpers and attached-client writes must not run in Update because
+// either can block behind a slow terminal connection.
 func (s *state) finishSelection() tea.Cmd {
 	wasActive := s.sel.active
 	hadRange := s.sel.hasRange
@@ -159,9 +174,12 @@ func (s *state) finishSelection() tea.Cmd {
 		s.sel = selection{}
 		return nil
 	}
-	s.writeClipboard(text)
-	debugLog("copyToClipboard: done")
-	return tea.SetClipboard(text)
+	if !s.copySelectionOnRelease {
+		return nil
+	}
+	s.clearSelection()
+	s.bottomFocused()
+	return s.clipboardCmd(text)
 }
 
 // clampRange bounds startX and endX into [0, n] and guarantees endX >= startX,
@@ -196,14 +214,24 @@ func (s *state) copySelection() tea.Cmd {
 	if text == "" {
 		return nil
 	}
-	s.writeClipboard(text)
-	debugLog("copySelection: copied %d bytes", len(text))
-	return tea.SetClipboard(text)
+	debugLog("copySelection: queued %d bytes", len(text))
+	return s.clipboardCmd(text)
 }
 
 func (s *state) writeClipboard(text string) {
 	if s.clipboardWrite != nil {
 		s.clipboardWrite(text)
+	}
+}
+
+func (s *state) clipboardCmd(text string) tea.Cmd {
+	write := s.clipboardWrite
+	if write == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		write(text)
+		return nil
 	}
 }
 
@@ -227,6 +255,9 @@ func (s *state) selectionText() string {
 	lines := s.selectionLines(idx, vp)
 	if len(lines) == 0 {
 		return ""
+	}
+	if s.sel.rectangular {
+		return rectangularSelectionText(lines, s.sel)
 	}
 	sl, sc, el, ec := s.sel.normalized()
 	if sl < 0 {
@@ -258,6 +289,33 @@ func (s *state) selectionText() string {
 	return b.String()
 }
 
+func rectangularSelectionText(lines []session.BufferLine, sel selection) string {
+	sl, sc, el, ec := sel.rectangle()
+	if sl < 0 {
+		sl = 0
+	}
+	if el >= len(lines) {
+		el = len(lines) - 1
+	}
+	if sl > el {
+		return ""
+	}
+	width := ec - sc + 1
+	var b strings.Builder
+	for row := sl; row <= el; row++ {
+		runes := []rune(lines[row].Text)
+		if len(runes) < ec+1 {
+			runes = append(runes, []rune(strings.Repeat(" ", ec+1-len(runes)))...)
+		}
+		startX, endX := clampRange(sc, sc+width, len(runes))
+		b.WriteString(string(runes[startX:endX]))
+		if row < el {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
 // overlaySelection takes the rendered viewport content (ANSI-colored lines
 // joined by \n) and replaces visible lines that intersect the selection with
 // a plain-text version where the selected range is rendered inverse-video.
@@ -276,6 +334,9 @@ func (s *state) overlaySelection(pane string, paneCols, paneRows int) string {
 	}
 	idx := s.manager.FocusedIndex()
 	sl, sc, el, ec := s.sel.normalized()
+	if s.sel.rectangular {
+		sl, sc, el, ec = s.sel.rectangle()
+	}
 	vp, ok := s.viewports[idx]
 	if !ok {
 		return pane
@@ -297,13 +358,16 @@ func (s *state) overlaySelection(pane string, paneCols, paneRows int) string {
 		if len(runes) < paneCols {
 			runes = append(runes, []rune(strings.Repeat(" ", paneCols-len(runes)))...)
 		}
-		selStart := 0
-		selEnd := len(runes)
-		if row == sl {
-			selStart = sc
-		}
-		if row == el {
-			selEnd = ec + 1
+		selStart, selEnd := 0, len(runes)
+		if s.sel.rectangular {
+			selStart, selEnd = sc, ec+1
+		} else {
+			if row == sl {
+				selStart = sc
+			}
+			if row == el {
+				selEnd = ec + 1
+			}
 		}
 		selStart, selEnd = clampRange(selStart, selEnd, len(runes))
 		var b strings.Builder
