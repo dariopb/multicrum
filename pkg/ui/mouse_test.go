@@ -85,6 +85,7 @@ func TestLocalAttachSnapshotIncludesCurrentFrameAndTerminalModes(t *testing.T) {
 		ansi.EraseEntireScreen,
 		ansi.CursorHomePosition,
 		"attached frame",
+		ansi.SetModeBracketedPaste,
 		ansi.SetModeMouseButtonEvent,
 		ansi.SetModeMouseExtSgr,
 		ansi.SetCursorStyle(2),

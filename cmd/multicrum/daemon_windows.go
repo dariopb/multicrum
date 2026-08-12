@@ -12,6 +12,14 @@ import (
 )
 
 func startDetachedOwner(args []string, serverName string) error {
+	return startDetachedProcess(ownerArgs(args), serverName)
+}
+
+func finishDetachedOwner(args []string, serverName string) error {
+	return startDetachedProcess(ownerArgs(args), serverName)
+}
+
+func startDetachedProcess(args []string, serverName string) error {
 	logPath, err := localserver.LogPath(serverName)
 	if err != nil {
 		return err
@@ -25,7 +33,7 @@ func startDetachedOwner(args []string, serverName string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(executable, ownerArgs(args)[1:]...)
+	cmd := exec.Command(executable, args[1:]...)
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

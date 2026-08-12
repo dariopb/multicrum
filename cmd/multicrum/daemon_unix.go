@@ -6,12 +6,24 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"syscall"
 
 	"multicrum/pkg/localserver"
 )
 
 func startDetachedOwner(args []string, serverName string) error {
+	return startDetachedProcess(daemonBootstrapArgs(args), serverName, true)
+}
+
+func finishDetachedOwner(args []string, serverName string) error {
+	// Preserve an ignored SIGHUP across exec so there is no window where a
+	// closing shell can terminate the final owner before main starts.
+	signal.Ignore(syscall.SIGHUP)
+	return startDetachedProcess(ownerArgs(args), serverName, false)
+}
+
+func startDetachedProcess(args []string, serverName string, wait bool) error {
 	logPath, err := localserver.LogPath(serverName)
 	if err != nil {
 		return err
@@ -25,12 +37,18 @@ func startDetachedOwner(args []string, serverName string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(executable, ownerArgs(args)[1:]...)
+	cmd := exec.Command(executable, args[1:]...)
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Env = os.Environ()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if wait {
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("daemon bootstrap: %w", err)
+		}
+		return nil
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}

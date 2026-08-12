@@ -42,13 +42,15 @@ func TestKeyboardStripDropsKnownSequences(t *testing.T) {
 func TestKeyboardStripPreservesOtherSequences(t *testing.T) {
 	cases := [][]byte{
 		[]byte("hello"),
-		[]byte("\x1b[31mred\x1b[0m"),         // SGR
-		[]byte("\x1b[2J\x1b[H"),              // clear + home
-		[]byte("\x1b[?1049h"),                // alt screen
-		[]byte("\x1b[?2004h"),                // bracketed paste enable
-		[]byte("\x1b[1;5u"),                  // CSI u with kitty-keyboard-style report from child (no = > < ?)
-		[]byte("\x1b]0;title\x07"),           // OSC
-		[]byte("plain \x1b[1m bold \x1b[0m"), // mixed
+		[]byte("\x1b[31mred\x1b[0m"),             // SGR
+		[]byte("\x1b[2J\x1b[H"),                  // clear + home
+		[]byte("\x1b[?1049h"),                    // alt screen
+		[]byte("\x1b[?2004h"),                    // bracketed paste enable
+		[]byte("\x1b[?2004l"),                    // bracketed paste disable
+		[]byte("\x1b[200~pasted\ntext\x1b[201~"), // bracketed paste payload
+		[]byte("\x1b[1;5u"),                      // CSI u with kitty-keyboard-style report from child (no = > < ?)
+		[]byte("\x1b]0;title\x07"),               // OSC
+		[]byte("plain \x1b[1m bold \x1b[0m"),     // mixed
 	}
 	for _, in := range cases {
 		got := strip(t, in)

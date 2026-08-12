@@ -75,6 +75,7 @@ func (m Model) localAttachSnapshot() string {
 		ansi.EraseEntireScreen +
 		ansi.CursorHomePosition +
 		frame +
+		ansi.SetModeBracketedPaste +
 		m.s.mouseEnableSequence()
 	cursor := m.cursor()
 	if cursor == nil {
@@ -658,8 +659,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if attached {
 			// The detached owner's renderer already believes the current frame
 			// is painted, but a newly attached terminal has never received it.
-			// Send the complete frame and cursor state explicitly so the new
-			// terminal matches the renderer's existing screen bookkeeping.
+			// Send the complete frame, input modes, and cursor state explicitly
+			// so the new terminal matches the renderer's existing bookkeeping.
 			snapshot := m.localAttachSnapshot()
 			return m, func() tea.Msg {
 				return tea.RawMsg{Msg: snapshot}

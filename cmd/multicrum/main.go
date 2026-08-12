@@ -80,6 +80,10 @@ func main() {
 				Name:   "owner",
 				Hidden: true,
 			},
+			&cli.BoolFlag{
+				Name:   "daemon-bootstrap",
+				Hidden: true,
+			},
 		},
 		Commands: []*cli.Command{
 			{
@@ -113,6 +117,9 @@ func run(ctx context.Context, c *cli.Command) error {
 	socketPath, err := localserver.SocketPath(serverName)
 	if err != nil {
 		return err
+	}
+	if c.Bool("daemon-bootstrap") {
+		return finishDetachedOwner(os.Args, serverName)
 	}
 	if c.Bool("owner") {
 		return runOwner(ctx, c, serverName, socketPath, true)
@@ -387,11 +394,26 @@ func normalizedServerName(c *cli.Command) string {
 }
 
 func ownerArgs(args []string) []string {
-	out := append([]string(nil), args...)
+	out := make([]string, 0, len(args)+1)
+	for _, arg := range args {
+		if arg != "--daemon-bootstrap" {
+			out = append(out, arg)
+		}
+	}
 	for _, arg := range out[1:] {
 		if arg == "--owner" {
 			return out
 		}
 	}
 	return append(out, "--owner")
+}
+
+func daemonBootstrapArgs(args []string) []string {
+	out := make([]string, 0, len(args)+1)
+	for _, arg := range args {
+		if arg != "--owner" && arg != "--daemon-bootstrap" {
+			out = append(out, arg)
+		}
+	}
+	return append(out, "--daemon-bootstrap")
 }
