@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -243,11 +244,10 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestVisibleLinesMatchScreenAfterClear guards the mouse-selection alignment
-// fix: after a `clear`, the visible emulator screen is a fresh top-aligned
-// frame, which diverges from the logical scrollback tail. VisibleLines() must
-// track what Render() actually shows (so live-mode selection maps correctly),
-// while BufferLines()' tail still reflects the logical history.
+// TestVisibleLinesMatchScreenAfterClear guards both sides of clear handling:
+// the visible emulator must show the fresh top-aligned frame, and multicrum's
+// separate semantic scrollback must honor ED 3 instead of retaining history
+// that the terminal itself erased.
 func TestVisibleLinesMatchScreenAfterClear(t *testing.T) {
 	s := NewVTScreen(40, 8)
 	// Build up plenty of scrollback history.
@@ -274,12 +274,94 @@ func TestVisibleLinesMatchScreenAfterClear(t *testing.T) {
 	if vis[7].Text != "" {
 		t.Fatalf("VisibleLines[7] = %q, want empty padding row", vis[7].Text)
 	}
-	// The bug this fixes: BufferLines()' last-8 tail is the logical history,
-	// which does NOT start with the on-screen "AAAA" row — confirming the two
-	// sources genuinely diverge and that selection must use VisibleLines live.
 	buf := s.BufferLines()
-	if len(buf) >= 8 && buf[len(buf)-8].Text == "AAAA" {
-		t.Fatalf("expected BufferLines tail to diverge from the visible screen")
+	for _, line := range buf {
+		if strings.Contains(line.Text, "old line") {
+			t.Fatalf("ED 3 left erased history in BufferLines: %#v", buf)
+		}
+	}
+	for i, want := range []string{"AAAA", "BBBB", "CCCC"} {
+		if buf[i].Text != want {
+			t.Fatalf("BufferLines[%d] = %q, want %q", i, buf[i].Text, want)
+		}
+	}
+}
+
+func TestEraseDisplayTwoPreservesSavedScrollback(t *testing.T) {
+	s := NewVTScreen(40, 3)
+	for _, line := range []string{"saved one", "saved two", "screen one", "screen two", "screen three"} {
+		s.Write([]byte(line + "\r\n"))
+	}
+
+	s.Write([]byte("\x1b[2J\x1b[Hfresh"))
+	rendered := s.RenderWithScrollback()
+	for _, want := range []string{"saved one", "saved two", "fresh"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("ED 2 removed %q or fresh output:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "screen three") {
+		t.Fatalf("ED 2 retained erased screen content:\n%s", rendered)
+	}
+}
+
+func TestEraseScrollbackSplitAcrossWrites(t *testing.T) {
+	s := NewVTScreen(40, 3)
+	for i := 0; i < 10; i++ {
+		s.Write([]byte("old\r\n"))
+	}
+
+	s.Write([]byte("\x1b[3"))
+	s.Write([]byte("J\x1b[2J\x1b[Hfresh"))
+	if rendered := s.RenderWithScrollback(); strings.Contains(rendered, "old") {
+		t.Fatalf("split ED 3 left erased history:\n%s", rendered)
+	}
+}
+
+func TestEraseScrollbackPreservesVisibleScreen(t *testing.T) {
+	s := NewVTScreen(40, 3)
+	for i := 0; i < 10; i++ {
+		s.Write([]byte("saved\r\n"))
+	}
+	s.Write([]byte("\x1b[2J\x1b[Hvisible one\r\nvisible two\r\nvisible three"))
+
+	s.Write([]byte("\x1b[3J"))
+	rendered := s.RenderWithScrollback()
+	for _, want := range []string{"visible one", "visible two", "visible three"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("ED 3 removed visible content %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "saved") {
+		t.Fatalf("ED 3 retained saved history:\n%s", rendered)
+	}
+}
+
+func TestOtherEraseDisplayModesPreserveSemanticHistory(t *testing.T) {
+	for _, seq := range []string{"\x1b[J", "\x1b[0J", "\x1b[1J"} {
+		t.Run(fmt.Sprintf("%q", seq), func(t *testing.T) {
+			s := NewVTScreen(40, 3)
+			for i := 0; i < 10; i++ {
+				s.Write([]byte("old\r\n"))
+			}
+
+			s.Write([]byte(seq))
+			if rendered := s.RenderWithScrollback(); !strings.Contains(rendered, "old") {
+				t.Fatalf("%q incorrectly cleared semantic history:\n%s", seq, rendered)
+			}
+		})
+	}
+}
+
+func TestRISClearsSemanticScrollback(t *testing.T) {
+	s := NewVTScreen(40, 3)
+	for i := 0; i < 10; i++ {
+		s.Write([]byte("old\r\n"))
+	}
+
+	s.Write([]byte("\x1bcfresh"))
+	if rendered := s.RenderWithScrollback(); strings.Contains(rendered, "old") {
+		t.Fatalf("RIS left erased history:\n%s", rendered)
 	}
 }
 

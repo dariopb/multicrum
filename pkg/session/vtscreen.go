@@ -407,13 +407,46 @@ func ansiSequenceComplete(seq []byte) bool {
 }
 
 func (s *VTScreen) captureControlSequence(seq []byte) {
-	if isSGR(seq) {
+	switch {
+	case isSGR(seq):
 		s.lineANSI.Write(seq)
+	case isEraseDisplay(seq, '2'):
+		s.clearLogicalScreen()
+	case isEraseDisplay(seq, '3'):
+		s.logicalScrollback = nil
+		s.observedLines = nil
+	case isRIS(seq):
+		s.logicalScrollback = nil
+		s.clearLogicalScreen()
 	}
 }
 
 func isSGR(seq []byte) bool {
 	return len(seq) >= 3 && seq[0] == 0x1b && seq[1] == '[' && seq[len(seq)-1] == 'm'
+}
+
+func isEraseDisplay(seq []byte, mode byte) bool {
+	return len(seq) == 4 &&
+		seq[0] == 0x1b &&
+		seq[1] == '[' &&
+		seq[2] == mode &&
+		seq[3] == 'J'
+}
+
+func isRIS(seq []byte) bool {
+	return len(seq) == 2 && seq[0] == 0x1b && seq[1] == 'c'
+}
+
+func (s *VTScreen) clearLogicalScreen() {
+	s.pendingLines = nil
+	s.pendingRows = 0
+	s.linePlain.Reset()
+	s.lineANSI.Reset()
+	s.pendingCR = false
+	s.pendingCRANSI = nil
+	s.observedLines = nil
+	s.observedPlain.Reset()
+	s.observedCR = false
 }
 
 func (s *VTScreen) finishLogicalLine() {
@@ -492,8 +525,14 @@ func (s *VTScreen) writeLogicalRender(b *strings.Builder, includeScrollback bool
 		b.WriteString(line.ANSI)
 		b.WriteByte('\n')
 	}
+	currentRows := s.pendingRows + 1
 	if current := s.lineANSI.String(); current != "" {
 		b.WriteString(current)
+		currentRows = s.pendingRows + wrappedLineCount(s.linePlain.String(), s.cols)
+	}
+	for currentRows < s.rows {
+		b.WriteByte('\n')
+		currentRows++
 	}
 }
 

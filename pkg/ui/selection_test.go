@@ -563,6 +563,86 @@ func TestScrollbackSelectionCopiesCloudHypervisorCommandAsOneLine(t *testing.T) 
 	}
 }
 
+func TestRectangularSelectionAfterScrollbackPadding(t *testing.T) {
+	m := NewModel([]string{"bash"}, 12, 8)
+	geom := m.s.geometry()
+	m.s.manager = session.NewManager(geom.Pane.Width, geom.Pane.Height, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	for i := 0; i < 20; i++ {
+		sess.Screen().Write([]byte("history-row\r\n"))
+	}
+	sess.Screen().Write([]byte("\x1b[2J\x1b[HABCDE\r\n12\r\nxyz"))
+	m.s.ensureViewport(0, 12, 8)
+	vp := m.s.viewports[0]
+	m.s.setLiveContent(0, vp, sess)
+	anchorViewportToCursor(vp, sess)
+	m.s.scrollFocused(-1)
+
+	m.s.startSelection(1, 1, true)
+	m.s.updateSelection(3, 2)
+	if got := m.s.selectionText(); got != "BCD\n2  " {
+		t.Fatalf("rectangular selection after scroll = %q, want %q", got, "BCD\n2  ")
+	}
+}
+
+func TestWrappedLineCopyAfterScrollbackPadding(t *testing.T) {
+	m := NewModel([]string{"bash"}, 12, 8)
+	geom := m.s.geometry()
+	m.s.manager = session.NewManager(geom.Pane.Width, geom.Pane.Height, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	sess, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer m.s.manager.CloseAll()
+
+	for i := 0; i < 20; i++ {
+		sess.Screen().Write([]byte("history-row\r\n"))
+	}
+	const line = "this logical line spans several physical rows"
+	sess.Screen().Write([]byte("\x1b[2J\x1b[H" + line))
+	m.s.ensureViewport(0, 12, 8)
+	vp := m.s.viewports[0]
+	m.s.setLiveContent(0, vp, sess)
+	anchorViewportToCursor(vp, sess)
+	m.s.scrollFocused(-1)
+
+	vp = m.s.viewports[0]
+	lines := m.s.selectionLines(0, vp)
+	start := -1
+	for i := range lines {
+		if strings.HasPrefix(lines[i].Text, "this logical") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("wrapped logical line not found in %#v", lines)
+	}
+	end := start
+	for end+1 < len(lines) && lines[end].SoftWrap {
+		end++
+	}
+	m.s.sel = selection{
+		startL:   start,
+		startC:   0,
+		endL:     end,
+		endC:     len([]rune(lines[end].Text)) - 1,
+		hasRange: true,
+	}
+	if got := m.s.selectionText(); got != line {
+		t.Fatalf("wrapped selection = %q, want %q; rows=%#v", got, line, lines[start:end+1])
+	}
+}
+
 func TestRightClickCopiesSelectionOnPressOrRelease(t *testing.T) {
 	for _, tc := range []struct {
 		name string
