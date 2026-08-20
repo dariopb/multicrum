@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"regexp"
+	"os"
 	"strings"
 	"testing"
 
@@ -9,6 +9,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"multicrum/pkg/session"
 )
+
+func TestInputMuxWithoutBaseDoesNotClaimStdin(t *testing.T) {
+	mux := NewInputMux(nil)
+	if mux.Fd() == os.Stdin.Fd() {
+		t.Fatal("input mux without a base reader claimed stdin")
+	}
+}
 
 // The startup input-mode reset must not disable the button-event (1002),
 // any-event (1003) or SGR-extended (1006) mouse modes, because bubbletea's
@@ -73,44 +80,47 @@ func TestMouseEnableSequenceMatchesMode(t *testing.T) {
 	}
 }
 
-func TestLocalAttachSnapshotIncludesCurrentFrameAndTerminalModes(t *testing.T) {
+func TestLocalAttachTerminalStateIncludesModesWithoutFrame(t *testing.T) {
 	m, _ := mouseTestModel(t, 1)
 	m.s.ensureViewport(0, 80, 24)
 	vp := m.s.viewports[0]
 	vp.SetContent("attached frame")
 
-	snapshot := m.localAttachSnapshot()
+	state := m.localAttachTerminalState()
 	for _, want := range []string{
 		ansi.SetModeAltScreenSaveCursor,
-		ansi.EraseEntireScreen,
-		ansi.CursorHomePosition,
-		"attached frame",
 		ansi.SetModeBracketedPaste,
 		ansi.SetModeMouseButtonEvent,
 		ansi.SetModeMouseExtSgr,
 		ansi.SetCursorStyle(2),
 		ansi.ShowCursor,
 	} {
-		if !strings.Contains(snapshot, want) {
-			t.Fatalf("attach snapshot missing %q: %q", want, snapshot)
+		if !strings.Contains(state, want) {
+			t.Fatalf("attach terminal state missing %q: %q", want, state)
 		}
 	}
-	if strings.Contains(strings.ReplaceAll(snapshot, "\r\n", ""), "\n") {
-		t.Fatalf("attach snapshot contains bare newlines: %q", snapshot)
-	}
-	cursorAtEnd := regexp.MustCompile(
-		`\x1b\[[1-9][0-9]*;[1-9][0-9]*H` + regexp.QuoteMeta(ansi.ShowCursor) + `$`,
-	)
-	if !cursorAtEnd.MatchString(snapshot) {
-		t.Fatalf("attach snapshot does not end at the active cursor: %q", snapshot)
-	}
-	if strings.HasSuffix(snapshot, ansi.CursorPosition(m.s.width, m.s.height)+ansi.ShowCursor) {
-		t.Fatalf("attach snapshot leaves cursor in bottom-right cell: %q", snapshot)
+	for _, unwanted := range []string{ansi.EraseEntireScreen, "attached frame"} {
+		if strings.Contains(state, unwanted) {
+			t.Fatalf("attach terminal state manually paints %q: %q", unwanted, state)
+		}
 	}
 
 	m.s.mode = modeHelp
-	if snapshot := m.localAttachSnapshot(); !strings.HasSuffix(snapshot, ansi.HideCursor) {
-		t.Fatalf("modal attach snapshot must hide cursor: %q", snapshot)
+	if state := m.localAttachTerminalState(); !strings.HasSuffix(state, ansi.HideCursor) {
+		t.Fatalf("modal attach terminal state must hide cursor: %q", state)
+	}
+}
+
+func TestLocalRepaintChangesViewWithoutChangingCells(t *testing.T) {
+	m, _ := mouseTestModel(t, 1)
+	before := m.viewString()
+	updated, _ := m.Update(localRepaintMsg{})
+	after := updated.(Model).viewString()
+	if before == after {
+		t.Fatal("local repaint must change the View string")
+	}
+	if ansi.Strip(before) != ansi.Strip(after) {
+		t.Fatal("local repaint must not change visible cells")
 	}
 }
 

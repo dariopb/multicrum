@@ -53,6 +53,44 @@ func TestVerticalExitUsesRendererAwareClear(t *testing.T) {
 	}
 }
 
+func TestControlledExitDoesNotOpenPrompt(t *testing.T) {
+	m, _ := mouseTestModel(t, 1)
+	m.SetConnectionLayout("left")
+	sess := m.s.manager.Focused()
+	sessionID, generation, _, _ := sess.RuntimeSnapshot()
+	m.s.suppressExit(sessionID, generation)
+
+	_, cmd := m.Update(connectionExitMsg{
+		Conn: m.s.connections[0],
+		Msg: session.ExitMsg{
+			Index: 0, SessionID: sessionID, Generation: generation,
+		},
+	})
+	if cmd != nil {
+		t.Fatalf("controlled exit command = %v, want nil", cmd)
+	}
+	if m.s.mode != modeNormal {
+		t.Fatalf("mode = %v, want normal", m.s.mode)
+	}
+}
+
+func TestRemovedSessionExitIsIgnoredAfterReindex(t *testing.T) {
+	m, _ := mouseTestModel(t, 2)
+	removed := m.s.manager.Sessions()[0]
+	sessionID, generation, _, _ := removed.RuntimeSnapshot()
+	m.s.manager.Remove(0)
+
+	_, _ = m.Update(connectionExitMsg{
+		Conn: m.s.connections[0],
+		Msg: session.ExitMsg{
+			Index: 0, SessionID: sessionID, Generation: generation,
+		},
+	})
+	if m.s.mode != modeNormal {
+		t.Fatalf("stale exit opened mode %v", m.s.mode)
+	}
+}
+
 func TestEscapeDoesNotDismissExitPrompt(t *testing.T) {
 	m, _ := mouseTestModel(t, 1)
 	m.s.mode = modeExitPrompt

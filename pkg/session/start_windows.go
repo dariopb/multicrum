@@ -26,6 +26,8 @@ func (s *Session) Start(cols, rows int) error {
 	s.processID = wc.PID()
 	s.generation++
 	generation := s.generation
+	s.runToken++
+	runToken := s.runToken
 	screen := s.screen
 	s.resizeFn = func(cols, rows int) error {
 		return wc.Resize(cols, rows)
@@ -34,6 +36,6 @@ func (s *Session) Start(cols, rows int) error {
 	s.screen.SetReplyWriter(wc)
 	s.screen.SetTerminalReplies(true)
 
-	go s.readLoop(wc, screen, generation)
+	go s.readLoop(wc, screen, generation, runToken)
 	return nil
 }

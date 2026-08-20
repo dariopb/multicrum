@@ -106,5 +106,9 @@ func (m *InputMux) Fd() uintptr {
 	if f, ok := m.base.(interface{ Fd() uintptr }); ok {
 		return f.Fd()
 	}
-	return 0
+	// Never fall back to descriptor 0. An embedded detached owner has no base
+	// reader, but fd 0 may still be the host application's terminal. Claiming
+	// it makes Bubble Tea enable cursor optimizations for a different I/O
+	// path, producing backspace/tab deltas that corrupt attached clients.
+	return ^uintptr(0)
 }

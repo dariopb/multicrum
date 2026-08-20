@@ -5,6 +5,7 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	"multicrum/pkg/config"
+	"multicrum/pkg/control"
 	"multicrum/pkg/session"
 )
 
@@ -42,6 +43,7 @@ func (s *state) addConnection(name string) *connectionState {
 		name = fmt.Sprintf("connection-%d", len(s.connections)+1)
 	}
 	c := &connectionState{
+		id:              control.NewID("con"),
 		name:            name,
 		viewports:       make(map[int]*viewport.Model),
 		altScreens:      make(map[int]bool),
@@ -122,6 +124,9 @@ func (s *state) bindConnectionCallbacks(conn *connectionState) {
 	}
 	conn.callbacksBound = true
 	conn.manager.SetSendOutput(func(msg session.OutputMsg) {
+		if s.controlService != nil {
+			s.controlService.PublishOutput(msg.SessionID, msg.Generation, msg.Sequence, msg.Data)
+		}
 		// Browsers need every chunk of raw PTY bytes for a faithful replay,
 		// so forward those unconditionally (cheap byte copy to the socket).
 		if s.wsTransport != nil && conn.webActive.Load() {
@@ -138,6 +143,12 @@ func (s *state) bindConnectionCallbacks(conn *connectionState) {
 		}
 	})
 	conn.manager.SetSendExit(func(msg session.ExitMsg) {
+		if s.controlService != nil {
+			s.controlService.PublishEvent("session.lifecycle", control.Event{
+				Event: "session.exited", SessionID: msg.SessionID,
+				Generation: msg.Generation,
+			})
+		}
 		if s.program != nil {
 			s.program.Send(connectionExitMsg{Conn: conn, Msg: msg})
 		}

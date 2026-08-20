@@ -103,12 +103,34 @@ func ListServers() ([]string, error) {
 	var names []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.Type()&os.ModeSocket == 0 || !strings.HasSuffix(name, ".sock") {
+		if entry.Type()&os.ModeSocket == 0 || !isAttachSocketName(name) {
 			continue
 		}
 		names = append(names, strings.TrimSuffix(name, ".sock"))
 	}
 	return names, nil
+}
+
+func isAttachSocketName(name string) bool {
+	if !strings.HasSuffix(name, ".sock") || strings.HasSuffix(name, ".control.sock") {
+		return false
+	}
+	trimmed := strings.TrimSuffix(name, ".sock")
+	for _, prefix := range []string{"agent-", "native-agent-"} {
+		remainder, found := strings.CutPrefix(trimmed, prefix)
+		if !found {
+			continue
+		}
+		parts := strings.Split(remainder, "-")
+		if len(parts) == 2 {
+			if _, err := strconv.Atoi(parts[0]); err == nil {
+				if _, err := strconv.Atoi(parts[1]); err == nil {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func TryAttach(path, server string, stdin *os.File, stdout io.Writer) (bool, error) {
@@ -505,6 +527,19 @@ func (o *Owner) Close() error {
 		return nil
 	}
 	_ = o.ln.Close()
+	o.mu.Lock()
+	clients := make([]*client, 0, len(o.clients))
+	for c := range o.clients {
+		clients = append(clients, c)
+	}
+	o.clients = make(map[*client]struct{})
+	o.activeClient = nil
+	o.mu.Unlock()
+	for _, c := range clients {
+		c.mu.Lock()
+		_ = c.conn.Close()
+		c.mu.Unlock()
+	}
 	_ = os.Remove(o.path)
 	return nil
 }

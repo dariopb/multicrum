@@ -26,8 +26,8 @@ func TestRuntimeIDSurvivesIndexChangesAndGenerationAdvances(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	_, closedGeneration, processID, _ := sess.RuntimeSnapshot()
-	if closedGeneration <= generation {
-		t.Fatalf("generation after close = %d, want > %d", closedGeneration, generation)
+	if closedGeneration != generation {
+		t.Fatalf("generation after close = %d, want %d", closedGeneration, generation)
 	}
 	if processID != 0 {
 		t.Fatalf("process ID after close = %d, want 0", processID)

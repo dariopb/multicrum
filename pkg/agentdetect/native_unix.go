@@ -52,7 +52,7 @@ func ListenNativeUpdates(publish func(Update)) (*NativeServer, error) {
 	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("agent-%d-%d.sock", os.Getpid(), nativeSocketCounter.Add(1)))
+	path := filepath.Join(dir, fmt.Sprintf("native-agent-%d-%d.sock", os.Getpid(), nativeSocketCounter.Add(1)))
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}

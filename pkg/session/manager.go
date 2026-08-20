@@ -54,7 +54,7 @@ func (m *SessionManager) SetSendOutput(fn func(OutputMsg)) {
 	defer m.mu.Unlock()
 	m.SendOutput = fn
 	for _, s := range m.sessions {
-		s.SendOutput = fn
+		s.setSendOutput(fn)
 	}
 }
 
@@ -63,7 +63,7 @@ func (m *SessionManager) SetSendExit(fn func(ExitMsg)) {
 	defer m.mu.Unlock()
 	m.SendExit = fn
 	for _, s := range m.sessions {
-		s.SendExit = fn
+		s.setSendExit(fn)
 	}
 }
 
@@ -87,6 +87,44 @@ func (m *SessionManager) New(cmd []string) (*Session, error) {
 // directory is ignored so stale saved layouts never prevent session startup.
 func (m *SessionManager) NewInDir(cmd []string, workDir string) (*Session, error) {
 	return m.newWithOptions(cmd, m.sshClient, workDir)
+}
+
+// NewConfigured starts a session with explicit backend, directory, and
+// environment settings.
+func (m *SessionManager) NewConfigured(cmd []string, sshClient *ssh_client.Client, workDir string, env []string) (*Session, error) {
+	m.mu.Lock()
+	idx := len(m.sessions)
+	s, err := newSession(idx, cmd, m.cols, m.rows, sshClient)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("new session: %w", err)
+	}
+	s.workDir = workDir
+	s.extraEnv = append([]string(nil), env...)
+	s.agentEndpoint = m.agentEndpoint
+	s.setCallbacks(m.SendOutput, m.SendExit)
+	m.sessions = append(m.sessions, s)
+	m.updateTerminalRepliesLocked()
+	cols, rows := m.cols, m.rows
+	m.mu.Unlock()
+
+	if err := s.Start(cols, rows); err != nil {
+		m.mu.Lock()
+		for i, existing := range m.sessions {
+			if existing == s {
+				m.sessions = append(m.sessions[:i], m.sessions[i+1:]...)
+				break
+			}
+		}
+		for i, existing := range m.sessions {
+			existing.setIndex(i)
+		}
+		m.updateTerminalRepliesLocked()
+		m.mu.Unlock()
+		_ = s.Close()
+		return nil, fmt.Errorf("start session: %w", err)
+	}
+	return s, nil
 }
 
 // NewWithSSH creates, starts, and appends a new session using sshClient when
@@ -193,6 +231,72 @@ func (m *SessionManager) Kill(index int) {
 	m.updateTerminalRepliesLocked()
 	m.mu.Unlock()
 	_ = killed.Close()
+}
+
+// Remove stops and removes a session, including the final session. Automation
+// callers use this explicit operation; interactive UI safeguards remain in Kill.
+func (m *SessionManager) Remove(index int) bool {
+	m.mu.Lock()
+	if index < 0 || index >= len(m.sessions) {
+		m.mu.Unlock()
+		return false
+	}
+	removed := m.sessions[index]
+	m.sessions = append(m.sessions[:index], m.sessions[index+1:]...)
+	for i, s := range m.sessions {
+		s.setIndex(i)
+	}
+	if len(m.sessions) == 0 {
+		m.focused = 0
+	} else if m.focused >= len(m.sessions) {
+		m.focused = len(m.sessions) - 1
+	}
+	m.updateTerminalRepliesLocked()
+	m.mu.Unlock()
+	_ = removed.Close()
+	return true
+}
+
+// Detach removes a session from this manager without stopping its PTY.
+func (m *SessionManager) Detach(index int) *Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if index < 0 || index >= len(m.sessions) {
+		return nil
+	}
+	detached := m.sessions[index]
+	m.sessions = append(m.sessions[:index], m.sessions[index+1:]...)
+	for i, s := range m.sessions {
+		s.setIndex(i)
+	}
+	if len(m.sessions) == 0 {
+		m.focused = 0
+	} else if m.focused >= len(m.sessions) {
+		m.focused = len(m.sessions) - 1
+	}
+	m.updateTerminalRepliesLocked()
+	return detached
+}
+
+// Adopt inserts a running detached session into this manager.
+func (m *SessionManager) Adopt(s *Session, position int) {
+	if s == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if position < 0 || position > len(m.sessions) {
+		position = len(m.sessions)
+	}
+	s.SendOutput = m.SendOutput
+	s.SendExit = m.SendExit
+	m.sessions = append(m.sessions, nil)
+	copy(m.sessions[position+1:], m.sessions[position:])
+	m.sessions[position] = s
+	for i, existing := range m.sessions {
+		existing.setIndex(i)
+	}
+	m.updateTerminalRepliesLocked()
 }
 
 // Sessions returns a snapshot of all sessions.

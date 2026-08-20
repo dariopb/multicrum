@@ -865,6 +865,13 @@ func (s *VTScreen) RawSnapshot() []byte {
 	return s.rawHistory.bytes()
 }
 
+// Dimensions returns the current terminal grid size.
+func (s *VTScreen) Dimensions() (cols, rows int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cols, s.rows
+}
+
 // Dirty reports whether the screen has changed since the last Render.
 func (s *VTScreen) Dirty() bool {
 	s.mu.Lock()

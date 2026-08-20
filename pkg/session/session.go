@@ -1,13 +1,14 @@
 package session
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"multicrum/pkg/agentdetect"
 	"multicrum/pkg/ssh_client"
@@ -15,31 +16,37 @@ import (
 
 // OutputMsg is sent to the Bubble Tea program whenever the session produces output.
 type OutputMsg struct {
-	Index int
-	Data  []byte
+	Index      int
+	SessionID  string
+	Generation uint64
+	Sequence   uint64
+	Data       []byte
 }
 
 // ExitMsg is sent once when the child process inside a session exits.
 type ExitMsg struct {
-	Index int
+	Index      int
+	SessionID  string
+	Generation uint64
 }
-
-var nextRuntimeSessionID atomic.Uint64
 
 // Session owns a PTY/ConPTY and the process running inside it.
 type Session struct {
-	mu            sync.Mutex
-	runtimeID     string
-	index         int
-	cmd           []string
-	cmdLine       string
-	workDir       string
-	title         string
-	screen        *VTScreen
-	exited        bool
-	processID     int
-	generation    uint64
-	agentEndpoint string
+	mu             sync.Mutex
+	runtimeID      string
+	index          int
+	cmd            []string
+	cmdLine        string
+	workDir        string
+	title          string
+	screen         *VTScreen
+	exited         bool
+	processID      int
+	generation     uint64
+	runToken       uint64
+	outputSequence uint64
+	agentEndpoint  string
+	extraEnv       []string
 
 	// rw is the bidirectional channel to the child process (unix pty master,
 	// Windows ConPTY pipe pair, or SSH remote PTY). Set by Start().
@@ -56,7 +63,7 @@ type Session struct {
 
 func newSession(index int, cmd []string, cols, rows int, sshClient *ssh_client.Client) (*Session, error) {
 	s := &Session{
-		runtimeID: fmt.Sprintf("%d-%d", os.Getpid(), nextRuntimeSessionID.Add(1)),
+		runtimeID: newRuntimeID(),
 		index:     index,
 		cmd:       cmd,
 		screen:    NewVTScreen(cols, rows),
@@ -65,7 +72,15 @@ func newSession(index int, cmd []string, cols, rows int, sshClient *ssh_client.C
 	return s, nil
 }
 
-func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation uint64) {
+func newRuntimeID() string {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		panic(err)
+	}
+	return "ses_" + hex.EncodeToString(value[:])
+}
+
+func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation, runToken uint64) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := rw.Read(buf)
@@ -74,20 +89,26 @@ func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation uint64) {
 			copy(chunk, buf[:n])
 			screen.Write(chunk)
 			s.mu.Lock()
-			if s.generation != generation {
+			if s.runToken != runToken {
 				s.mu.Unlock()
 				return
 			}
 			sendOutput := s.SendOutput
 			index := s.index
+			sessionID := s.runtimeID
+			sequence := s.outputSequence
+			s.outputSequence += uint64(len(chunk))
 			s.mu.Unlock()
 			if sendOutput != nil {
-				sendOutput(OutputMsg{Index: index, Data: chunk})
+				sendOutput(OutputMsg{
+					Index: index, SessionID: sessionID, Generation: generation,
+					Sequence: sequence, Data: chunk,
+				})
 			}
 		}
 		if err != nil {
 			s.mu.Lock()
-			if s.generation != generation {
+			if s.runToken != runToken {
 				s.mu.Unlock()
 				return
 			}
@@ -96,9 +117,10 @@ func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation uint64) {
 			s.processID = 0
 			sendExit := s.SendExit
 			index := s.index
+			sessionID := s.runtimeID
 			s.mu.Unlock()
 			if !already && sendExit != nil {
-				sendExit(ExitMsg{Index: index})
+				sendExit(ExitMsg{Index: index, SessionID: sessionID, Generation: generation})
 			}
 			return
 		}
@@ -133,7 +155,7 @@ func (s *Session) Resize(cols, rows int) error {
 func (s *Session) Close() error {
 	s.mu.Lock()
 	s.exited = true
-	s.generation++
+	s.runToken++
 	s.processID = 0
 	rw := s.rw
 	s.rw = nil
@@ -160,27 +182,57 @@ func (s *Session) RuntimeSnapshot() (runtimeID string, generation uint64, proces
 	return s.runtimeID, s.generation, s.processID, s.sshClient == nil
 }
 
+// OutputSequence returns the next raw PTY byte offset for the current generation.
+func (s *Session) OutputSequence() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.outputSequence
+}
+
 func (s *Session) agentEnvironment() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.agentEndpoint == "" || s.sshClient != nil {
+	if s.sshClient != nil {
 		return nil
+	}
+	env := append([]string(nil), s.extraEnv...)
+	if s.agentEndpoint == "" {
+		return env
 	}
 	target := agentdetect.NativeTarget(s.runtimeID, s.generation+1)
 	if target == "" {
-		return nil
+		return env
 	}
-	return []string{
+	return append(env,
 		"HERDR_ENV=1",
-		"HERDR_SOCKET_PATH=" + s.agentEndpoint,
-		"HERDR_PANE_ID=" + target,
-	}
+		"HERDR_SOCKET_PATH="+s.agentEndpoint,
+		"HERDR_PANE_ID="+target,
+	)
 }
 
 func (s *Session) setIndex(index int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.index = index
+}
+
+func (s *Session) setCallbacks(sendOutput func(OutputMsg), sendExit func(ExitMsg)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SendOutput = sendOutput
+	s.SendExit = sendExit
+}
+
+func (s *Session) setSendOutput(sendOutput func(OutputMsg)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SendOutput = sendOutput
+}
+
+func (s *Session) setSendExit(sendExit func(ExitMsg)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SendExit = sendExit
 }
 
 // Title returns a short label for the tab bar.
@@ -278,6 +330,14 @@ func (s *Session) ConfiguredWorkingDirectory() string {
 	return s.workDir
 }
 
+// SetEnvironment replaces additional child environment entries used on the
+// next start or respawn. Entries must be in KEY=VALUE form.
+func (s *Session) SetEnvironment(env []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extraEnv = append([]string(nil), env...)
+}
+
 func (s *Session) SSHConfig() (ssh_client.ResolvedConfig, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -302,11 +362,12 @@ func (s *Session) SetCmdLine(line string) {
 func (s *Session) Respawn(cols, rows int) error {
 	s.mu.Lock()
 	rw := s.rw
-	s.generation++
+	s.runToken++
 	s.processID = 0
 	s.rw = nil
 	s.resizeFn = nil
 	s.exited = false
+	s.outputSequence = 0
 	s.screen = NewVTScreen(cols, rows)
 	s.mu.Unlock()
 	if rw != nil {
@@ -324,6 +385,8 @@ func (s *Session) startSSH(cols, rows int) error {
 	s.rw = rs
 	s.generation++
 	generation := s.generation
+	s.runToken++
+	runToken := s.runToken
 	screen := s.screen
 	s.resizeFn = func(cols, rows int) error {
 		return rs.Resize(cols, rows)
@@ -331,6 +394,6 @@ func (s *Session) startSSH(cols, rows int) error {
 	s.mu.Unlock()
 	s.screen.SetReplyWriter(rs)
 	s.screen.SetTerminalReplies(true)
-	go s.readLoop(rs, screen, generation)
+	go s.readLoop(rs, screen, generation, runToken)
 	return nil
 }

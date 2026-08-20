@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"github.com/charmbracelet/colorprofile"
 	"github.com/urfave/cli/v3"
 	"multicrum/pkg/config"
+	"multicrum/pkg/control"
 	"multicrum/pkg/localserver"
 	"multicrum/pkg/ssh_client"
 	"multicrum/pkg/ui"
@@ -66,6 +69,10 @@ func main() {
 				Usage: "optional auth token for the WebSocket endpoint",
 			},
 			&cli.StringFlag{
+				Name:  "control-token",
+				Usage: "full-control automation token (random token file when omitted)",
+			},
+			&cli.StringFlag{
 				Name:    "server",
 				Aliases: []string{"srv", "S"},
 				Value:   "default",
@@ -102,6 +109,27 @@ func main() {
 				Usage:  "stop a local multicrum server and its sessions",
 				Action: stopServer,
 			},
+			{
+				Name:  "call",
+				Usage: "call a control protocol method",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "method",
+						Usage: "control protocol method",
+					},
+					&cli.StringFlag{
+						Name:  "params",
+						Value: "{}",
+						Usage: "JSON request parameters",
+					},
+					&cli.DurationFlag{
+						Name:  "timeout",
+						Value: 2 * time.Minute,
+						Usage: "request timeout",
+					},
+				},
+				Action: callControl,
+			},
 		},
 		Action: run,
 	}
@@ -110,6 +138,45 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func callControl(ctx context.Context, c *cli.Command) error {
+	method := strings.TrimSpace(c.String("method"))
+	if method == "" {
+		return fmt.Errorf("--method is required")
+	}
+	var params any
+	if err := json.Unmarshal([]byte(c.String("params")), &params); err != nil {
+		return fmt.Errorf("invalid --params JSON: %w", err)
+	}
+	server := ""
+	if c.IsSet("server") {
+		server = normalizedServerName(c)
+	}
+	client, err := control.Dial(control.Options{
+		Server: server, ClientName: "multicrum-call",
+	})
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	callCtx, cancel := context.WithTimeout(ctx, c.Duration("timeout"))
+	defer cancel()
+	var result json.RawMessage
+	if err := client.Call(callCtx, method, params, &result); err != nil {
+		return err
+	}
+	if len(result) == 0 {
+		fmt.Fprintln(os.Stdout, "null")
+		return nil
+	}
+	var formatted bytes.Buffer
+	if err := json.Indent(&formatted, result, "", "  "); err != nil {
+		return fmt.Errorf("format control response: %w", err)
+	}
+	fmt.Fprintln(os.Stdout, formatted.String())
+	return nil
 }
 
 func run(ctx context.Context, c *cli.Command) error {
@@ -217,6 +284,26 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 		tea.WithOutput(ui.NewKeyboardStripWriter(output)),
 	)
 	model.SetProgram(p)
+
+	controlEndpoint, err := control.Endpoint(serverName)
+	if err != nil {
+		return fmt.Errorf("control endpoint: %w", err)
+	}
+	controlToken := c.String("control-token")
+	if controlToken == "" {
+		controlToken = control.NewToken()
+	}
+	tokenPath := control.TokenPath(controlEndpoint)
+	if err := os.WriteFile(tokenPath, []byte(controlToken+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write control token: %w", err)
+	}
+	defer os.Remove(tokenPath)
+	controlService := control.NewService(serverName, controlEndpoint, controlToken, model)
+	model.SetControlService(controlService)
+	if err := controlService.Start(); err != nil {
+		return fmt.Errorf("control service: %w", err)
+	}
+	defer controlService.Close()
 	owner.SetCallbacks(func(n int) {
 		if p != nil {
 			go p.Send(ui.LocalClientCountMsg(n))

@@ -43,3 +43,19 @@ func TestSocketDirRejectsSymlink(t *testing.T) {
 		t.Fatal("SocketDir accepted a symlink")
 	}
 }
+
+func TestAttachSocketNameExcludesAuxiliarySockets(t *testing.T) {
+	tests := map[string]bool{
+		"default.sock":                true,
+		"work.sock":                   true,
+		"agent.control.sock":          false,
+		"agent-1112412-1.sock":        false,
+		"native-agent-3474029-1.sock": false,
+		"not-a-socket.txt":            false,
+	}
+	for name, want := range tests {
+		if got := isAttachSocketName(name); got != want {
+			t.Errorf("isAttachSocketName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

@@ -12,6 +12,24 @@ It provides:
 
 The child program or remote shell is treated as a black-box terminal: the app forwards terminal bytes and renders output through a virtual terminal screen model.
 
+Applications embedding multicrum should use `pkg/app.Start`. It owns terminal
+size discovery, layout-before-command ordering, Bubble Tea initialization,
+local attach, control service startup, and cleanup:
+
+```go
+owner, err := app.Start(ctx, app.Options{
+    Server:           "my-app",
+    Command:          []string{"copilot", "--no-mouse"},
+    ConnectionLayout: "left",
+    Terminal:         os.Stdout,
+})
+if err != nil {
+    return err
+}
+defer owner.Close()
+return owner.Attach(os.Stdin, os.Stdout)
+```
+
 ## Features
 
 - Long-running named local servers: the first `multicrum --server NAME` auto-starts a detached owner daemon, and later processes attach to it over a Unix socket.
@@ -27,6 +45,8 @@ The child program or remote shell is treated as a black-box terminal: the app fo
 - Session rename, kill, respawn/remove on exit, and filtered session picker.
 - Layout save/load for local sessions and SSH sessions, including remote commands and the live working directory of interactive local shells.
 - Optional xterm.js browser UI over WebSocket.
+- Authenticated `multicrum-control` automation over a separate per-user socket,
+  with stable IDs, raw PTY subscriptions, snapshots, waits, and scoped delegation.
 - Mouse selection/copy mode that preserves logical lines across scrollback wraps, terminal-grid wraps, and narrower live viewport wraps. Right-click copies the current selection, including through tmux/byobu attach clients.
 - Right-click a session or connection tab for a modal-styled context menu with focus, rename, move, and remove actions.
 - In the left layout, clicking the `Multicrum` title opens global actions including Help, session/connection controls, mouse mode, save, client-only Detach, and server-wide Quit.
@@ -145,6 +165,66 @@ http://localhost:9999/?token=mytoken
 | `--ssh-insecure-ignore-host-key` | Disable host key verification. Unsafe; testing only. |
 | `--ws` | Start WebSocket/xterm.js UI on the given address, e.g. `:9999`. |
 | `--token` | Optional token for `/ws?token=...`. |
+| `--control-token` | Full-control automation token. When omitted, the owner creates a random mode-0600 token file beside the control socket. |
+
+## Automation control
+
+Every owner exposes a separate `multicrum-control` v1 endpoint at:
+
+```text
+/tmp/multicrum-$UID/<server>.control.sock
+```
+
+Full-control clients owned by the same user discover the random credential in
+the adjacent mode-0600 token file. Child agents receive short-lived scoped
+credentials through `capability.delegate`; tokens are never placed in process
+arguments, saved layouts, or UI metadata. The Go SDK is in `pkg/control`.
+
+The sample controller starts a visible `copilot --no-mouse`, delegates a
+restricted capability, points it at the bundled multicrum-control skill, and
+attaches the terminal to the ordinary multicrum TUI:
+
+```bash
+go run ./samples/agents --server default --cwd "$PWD"
+```
+
+For a directory Copilot has not previously trusted, review it and explicitly
+approve one-session folder trust:
+
+```bash
+go run ./samples/agents --server default --connection agent \
+  --cwd /tmp/temp --trust-cwd
+```
+
+If the named server is not running, the sample hosts an owner directly through
+the multicrum Go packages. No separate `multicrum` executable is required.
+Other terminals can attach while the sample is running; an owner embedded by
+the sample and its sessions are closed when the sample exits. The embedded TUI
+starts with the connection switcher on the left.
+
+The controlling Copilot can create additional named agent or command sessions
+that immediately appear as ordinary tabs. Type requests directly into the
+focused Copilot tab. Another terminal can attach at any time:
+
+The sample capability is intentionally scoped to the selected connection.
+Child Copilot sessions use `copilot --no-mouse` in that connection; they cannot
+create another connection or recursively start the `agents` host application.
+
+```bash
+multicrum --server default
+```
+
+Inside a delegated session, the multicrum CLI uses the injected endpoint and
+token automatically:
+
+```bash
+multicrum call \
+  --method connection.list \
+  --params '{}'
+```
+
+See `spec-control-protocol.md` for the wire protocol and
+`skills/multicrum-control/SKILL.md` for the agent workflow.
 
 ## TUI shortcuts
 

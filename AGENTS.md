@@ -81,6 +81,7 @@ ui.Model Update loop
 
 | Package | Role |
 |---|---|
+| `pkg/app/` | Reusable embedded-owner lifecycle: terminal sizing, layout-first startup, TUI attach, control service, and cleanup |
 | `cmd/multicrum/` | CLI entry point, flags, Bubble Tea program, optional WS startup |
 | `cmd/ptyrec/` | Diagnostic PTY recorder/replay tool |
 | `pkg/ui/` | Bubble Tea model, connection/session dialogs, global shortcuts, viewport lifecycle, layout save, input mux |

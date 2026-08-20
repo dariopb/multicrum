@@ -47,6 +47,19 @@ func TestLayoutGeometry(t *testing.T) {
 	}
 }
 
+func TestLeftLayoutRowsIsolateANSIStyles(t *testing.T) {
+	m, _ := mouseTestModel(t, 1)
+	m.SetConnectionLayout("left")
+	for i, row := range strings.Split(m.viewString(), "\n") {
+		if !strings.HasPrefix(row, ansi.ResetStyle) {
+			t.Errorf("row %d does not reset inherited style at start", i)
+		}
+		if !strings.HasSuffix(row, ansi.ResetStyle) {
+			t.Errorf("row %d does not reset style at end", i)
+		}
+	}
+}
+
 func TestLeftRailRenderingAndHitboxes(t *testing.T) {
 	m := NewModel([]string{"bash"}, 80, 10)
 	m.SetConnectionLayout("left")

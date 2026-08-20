@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/vt"
 	"multicrum/pkg/agentdetect"
 	"multicrum/pkg/config"
+	"multicrum/pkg/control"
 	"multicrum/pkg/session"
 	"multicrum/pkg/ssh_client"
 	"multicrum/pkg/transport"
@@ -45,7 +48,10 @@ const (
 )
 
 type connectionState struct {
+	id              string
 	name            string
+	labels          map[string]string
+	createdBy       string
 	manager         *session.SessionManager
 	viewports       map[int]*viewport.Model
 	altScreens      map[int]bool
@@ -69,25 +75,20 @@ type detectedAgent struct {
 	generation uint64
 }
 
-func (m Model) localAttachSnapshot() string {
-	frame := strings.ReplaceAll(m.viewString(), "\n", "\r\n")
-	snapshot := ansi.SetModeAltScreenSaveCursor +
-		ansi.EraseEntireScreen +
-		ansi.CursorHomePosition +
-		frame +
+func (m Model) localAttachTerminalState() string {
+	state := ansi.SetModeAltScreenSaveCursor +
 		ansi.SetModeBracketedPaste +
 		m.s.mouseEnableSequence()
 	cursor := m.cursor()
 	if cursor == nil {
-		return snapshot + ansi.HideCursor
+		return state + ansi.HideCursor
 	}
 	style := (int(cursor.Shape) * 2) + 1
 	if !cursor.Blink {
 		style++
 	}
-	return snapshot +
+	return state +
 		ansi.SetCursorStyle(style) +
-		ansi.CursorPosition(cursor.X+1, cursor.Y+1) +
 		ansi.ShowCursor
 }
 
@@ -181,6 +182,12 @@ type state struct {
 	agentSpinnerStyle      string
 	agentSpinnerRunning    bool
 	agentSpinnerFrame      int
+	controlService         *control.Service
+	controlSessions        map[string]controlSessionMeta
+	suppressedExits        sync.Map
+	ready                  chan struct{}
+	readyOnce              sync.Once
+	repaintEpoch           bool
 }
 
 // paneCache memoizes the output of renderPaneContent, which is a pure function
@@ -239,6 +246,7 @@ func NewModel(agentCmd []string, cols, rows int) *Model {
 // sshClient is non-nil.
 func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Client) *Model {
 	conn := &connectionState{
+		id:              control.NewID("con"),
 		name:            "default",
 		viewports:       make(map[int]*viewport.Model),
 		altScreens:      make(map[int]bool),
@@ -264,6 +272,8 @@ func NewModelWithSSH(agentCmd []string, cols, rows int, sshClient *ssh_client.Cl
 		agentStatuses:          make(map[string]detectedAgent),
 		agentSpinnerEnabled:    true,
 		agentSpinnerStyle:      config.AgentSpinnerStyleRectangle,
+		controlSessions:        make(map[string]controlSessionMeta),
+		ready:                  make(chan struct{}),
 	}
 	return &Model{agentCmd: agentCmd, s: st}
 }
@@ -281,6 +291,32 @@ func (m *Model) SetServerName(name string) {
 }
 
 func (m *Model) SetInputMux(input *InputMux) { m.s.inputMux = input }
+
+// Ready is closed after initial connections and sessions have been started.
+func (m *Model) Ready() <-chan struct{} { return m.s.ready }
+
+type modelSyncMsg chan struct{}
+
+type exitEventKey struct {
+	sessionID  string
+	generation uint64
+}
+
+// Sync waits until all messages already sent to the Bubble Tea program have
+// been applied.
+func (m *Model) Sync(ctx context.Context) error {
+	if m.s.program == nil {
+		return fmt.Errorf("model program is not running")
+	}
+	done := make(modelSyncMsg)
+	m.s.program.Send(done)
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (m *Model) SetLocalClientCount(n int) { m.s.localClients = n }
 
@@ -380,6 +416,11 @@ func (m *Model) SetProgram(p *tea.Program) {
 	m.s.agentMonitor.Start()
 }
 
+// SetControlService connects protocol publication to the owner model.
+func (m *Model) SetControlService(service *control.Service) {
+	m.s.controlService = service
+}
+
 func (m *Model) CloseAgentDetection() {
 	if m.s.agentMonitor != nil {
 		m.s.agentMonitor.Close()
@@ -387,6 +428,19 @@ func (m *Model) CloseAgentDetection() {
 	if m.s.agentNativeServer != nil {
 		m.s.agentNativeServer.Close()
 	}
+}
+
+// CloseSessions stops every PTY owned by the model.
+func (m *Model) CloseSessions() error {
+	var errs []error
+	for _, conn := range m.s.connections {
+		if conn != nil && conn.manager != nil {
+			if err := conn.manager.CloseAll(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // StartWSTransport starts the WebSocket transport wired to the session manager.
@@ -503,6 +557,8 @@ type connectionExitMsg struct {
 type LocalClientCountMsg int
 
 type localClientCountMsg = LocalClientCountMsg
+
+type localRepaintMsg struct{}
 
 // renderTickMsg refreshes the visible viewport. The first output after an idle
 // period is rendered immediately for responsive command echo; sustained output
@@ -636,13 +692,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		s.ensureViewport(s.manager.FocusedIndex(), s.width, s.height)
 		s.notifyMeta()
+		s.readyOnce.Do(func() { close(s.ready) })
+		return m, nil
+
+	case modelSyncMsg:
+		close(msg)
 		return m, nil
 
 	case agentStatusMsg:
 		if s.applyAgentUpdate(agentdetect.Update(msg)) {
+			if service := s.controlService; service != nil {
+				update := agentdetect.Update(msg)
+				data := map[string]any{}
+				if update.Status != nil {
+					data["provider"] = update.Status.Provider
+					data["state"] = update.Status.State
+					data["source"] = update.Status.Source
+					data["confidence"] = update.Status.Confidence
+				}
+				service.PublishEvent("agent.state", control.Event{
+					Event: "agent.state", SessionID: update.ID,
+					Generation: update.Generation, Data: data,
+				})
+			}
 			s.notifyMeta()
 		}
 		return m, s.startAgentSpinner()
+
+	case controlRequestMsg:
+		result, controlErr := s.handleControlRequest(m, msg.method, msg.params, msg.controllerID)
+		msg.response <- controlRequestResult{result: result, err: controlErr}
+		return m, nil
 
 	case agentSpinnerTickMsg:
 		if !s.agentSpinnerEnabled || !s.hasWorkingAgent() {
@@ -657,15 +737,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		attached := int(msg) > s.localClients
 		s.localClients = int(msg)
 		if attached {
-			// The detached owner's renderer already believes the current frame
-			// is painted, but a newly attached terminal has never received it.
-			// Send the complete frame, input modes, and cursor state explicitly
-			// so the new terminal matches the renderer's existing bookkeeping.
-			snapshot := m.localAttachSnapshot()
-			return m, func() tea.Msg {
-				return tea.RawMsg{Msg: snapshot}
-			}
+			// A new terminal has not received the renderer's existing frame.
+			// Initialize terminal modes, then make Bubble Tea repaint from its
+			// own cell buffer; manually painting a frame here desynchronizes
+			// the renderer's differential state from the physical terminal.
+			state := m.localAttachTerminalState()
+			return m, tea.Sequence(
+				func() tea.Msg { return tea.RawMsg{Msg: state} },
+				tea.ClearScreen,
+				func() tea.Msg { return localRepaintMsg{} },
+			)
 		}
+		return m, nil
+
+	case localRepaintMsg:
+		// clearScreen marks the terminal renderer for repaint, but Bubble Tea
+		// skips its flush when the View string is unchanged. Alternate between
+		// equivalent SGR resets so the repaint reaches a newly attached client.
+		s.repaintEpoch = !s.repaintEpoch
 		return m, nil
 
 	case tea.WindowSizeMsg:
@@ -891,14 +980,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, s.startAgentSpinner()
 
 	case connectionExitMsg:
+		if s.consumeSuppressedExit(msg.Msg) {
+			s.notifyMeta()
+			return m, nil
+		}
 		connIndex := connectionIndex(s.connections, msg.Conn)
 		if connIndex < 0 || connIndex != s.activeConn {
 			s.notifyMeta()
 			return m, nil
 		}
-		if s.mode == modeNormal && msg.Msg.Index == s.manager.FocusedIndex() {
+		exitIndex, exists := currentExitIndex(msg.Conn, msg.Msg)
+		if !exists {
+			s.notifyMeta()
+			return m, nil
+		}
+		if s.mode == modeNormal && exitIndex == s.manager.FocusedIndex() {
 			s.mode = modeExitPrompt
-			s.exitPromptID = msg.Msg.Index
+			s.exitPromptID = exitIndex
 			s.exitChoice = 0
 			s.exitError = ""
 			if s.usingLeftRail() {
@@ -910,6 +1008,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ExitMsg:
+		if s.consumeSuppressedExit(msg) {
+			s.notifyMeta()
+			return m, nil
+		}
 		// Only prompt for the focused session; other exits still mark the tab
 		// as exited but don't yank the user away from what they're doing.
 		if s.mode == modeNormal && msg.Index == s.manager.FocusedIndex() {
@@ -921,6 +1023,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.notifyMeta()
 				return m, tea.ClearScreen
 			}
+
 		}
 		s.notifyMeta()
 		return m, nil
@@ -1179,6 +1282,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (s *state) suppressExit(sessionID string, generation uint64) {
+	if sessionID == "" {
+		return
+	}
+	key := exitEventKey{sessionID: sessionID, generation: generation}
+	s.suppressedExits.Store(key, struct{}{})
+	time.AfterFunc(10*time.Second, func() {
+		s.suppressedExits.Delete(key)
+	})
+}
+
+func (s *state) consumeSuppressedExit(msg session.ExitMsg) bool {
+	if msg.SessionID == "" {
+		return false
+	}
+	_, suppressed := s.suppressedExits.LoadAndDelete(exitEventKey{
+		sessionID: msg.SessionID, generation: msg.Generation,
+	})
+	return suppressed
+}
+
+func currentExitIndex(conn *connectionState, msg session.ExitMsg) (int, bool) {
+	if msg.SessionID == "" {
+		return msg.Index, true
+	}
+	if conn == nil || conn.manager == nil {
+		return 0, false
+	}
+	for _, sess := range conn.manager.Sessions() {
+		sessionID, generation, _, _ := sess.RuntimeSnapshot()
+		if sessionID == msg.SessionID && generation == msg.Generation {
+			return sess.Index(), true
+		}
+	}
+	return 0, false
+}
+
 // View renders the full TUI.
 func (m Model) View() tea.View {
 	view := tea.NewView(m.viewString())
@@ -1279,14 +1419,21 @@ func (m Model) viewString() string {
 			if y < len(mainRows) {
 				main = padLine(mainRows[y], geom.TabBar.Width)
 			}
-			rows[y] = padLine(rail[y], geom.ConnectionRail.Width) + divider + main
+			rows[y] = ansi.ResetStyle +
+				padLine(rail[y], geom.ConnectionRail.Width) +
+				divider +
+				main +
+				ansi.ResetStyle
 		}
 		frame = strings.Join(rows, "\n")
 	}
 	if s.mode == modeContextMenu {
 		frame = m.overlayContextMenu(frame)
 	}
-	return frame
+	if s.repaintEpoch {
+		return "\x1b[0m" + frame
+	}
+	return ansi.ResetStyle + frame
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

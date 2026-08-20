@@ -238,9 +238,10 @@ func TestBlockedWriteDoesNotBlockExitDetectionOrClose(t *testing.T) {
 		screen:     NewVTScreen(80, 24),
 		rw:         rw,
 		generation: 1,
+		runToken:   1,
 		SendExit:   func(msg ExitMsg) { exit <- msg },
 	}
-	go sess.readLoop(rw, sess.screen, 1)
+	go sess.readLoop(rw, sess.screen, 1, 1)
 	go func() {
 		_, _ = sess.Write([]byte("blocked"))
 	}()

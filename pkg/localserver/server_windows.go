@@ -495,6 +495,19 @@ func (o *Owner) Close() error {
 		return nil
 	}
 	_ = o.ln.Close()
+	o.mu.Lock()
+	clients := make([]*client, 0, len(o.clients))
+	for c := range o.clients {
+		clients = append(clients, c)
+	}
+	o.clients = make(map[*client]struct{})
+	o.activeClient = nil
+	o.mu.Unlock()
+	for _, c := range clients {
+		c.mu.Lock()
+		_ = c.conn.Close()
+		c.mu.Unlock()
+	}
 	_ = os.Remove(o.path)
 	return nil
 }
