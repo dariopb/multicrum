@@ -21,6 +21,7 @@ type OutputMsg struct {
 	Generation uint64
 	Sequence   uint64
 	Data       []byte
+	Clipboard  []string
 }
 
 // ExitMsg is sent once when the child process inside a session exits.
@@ -82,11 +83,13 @@ func newRuntimeID() string {
 
 func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation, runToken uint64) {
 	buf := make([]byte, 4096)
+	var clipboard osc52Decoder
 	for {
 		n, err := rw.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
+			clipboardText := clipboard.Write(chunk)
 			screen.Write(chunk)
 			s.mu.Lock()
 			if s.runToken != runToken {
@@ -102,7 +105,7 @@ func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation, runToken 
 			if sendOutput != nil {
 				sendOutput(OutputMsg{
 					Index: index, SessionID: sessionID, Generation: generation,
-					Sequence: sequence, Data: chunk,
+					Sequence: sequence, Data: chunk, Clipboard: clipboardText,
 				})
 			}
 		}

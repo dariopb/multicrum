@@ -156,6 +156,8 @@ Config files now save `connections[].sessions[]` plus `connectionLayout` (`botto
 
 Attach clients stream raw terminal input to the owner through length-prefixed frames and receive mirrored owner TUI output. `SIGWINCH` from Unix attach clients is forwarded as resize frames. Windows attach/server uses loopback TCP with the same frame protocol.
 
+Unix daemonization uses two spawns: only the bootstrap calls `setsid`; the final owner inherits that session without becoming its leader, so it cannot acquire a controlling terminal again. Do not set `Setsid` on both spawns. The bootstrap ignores SIGHUP before spawning the owner. Owner logs include PID, attach counts, explicit stop requests, SIGINT/SIGTERM, and program termination; an abrupt SIGKILL/OOM kill cannot emit a shutdown record.
+
 ## Session Naming
 
 `Session.Title()` returns a user override when set, otherwise the process command name. Rename support is implemented via:

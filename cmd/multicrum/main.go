@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -282,6 +283,7 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 		tea.WithColorProfile(colorprofile.TrueColor),
 		tea.WithInput(inputMux),
 		tea.WithOutput(ui.NewKeyboardStripWriter(output)),
+		tea.WithoutSignalHandler(),
 	)
 	model.SetProgram(p)
 
@@ -305,6 +307,7 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 	}
 	defer controlService.Close()
 	owner.SetCallbacks(func(n int) {
+		log.Printf("owner clients: server=%q pid=%d attached=%d", serverName, os.Getpid(), n)
 		if p != nil {
 			go p.Send(ui.LocalClientCountMsg(n))
 		}
@@ -314,6 +317,7 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 		}
 	}, func(action string) {
 		if action == "stop" && p != nil {
+			log.Printf("owner stop requested: server=%q pid=%d source=local-control", serverName, os.Getpid())
 			go p.Kill()
 		}
 	})
@@ -328,7 +332,7 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 		fmt.Fprintf(os.Stderr, "xterm.js UI on http://%s/\n", wsAddr)
 	}
 
-	_, err = p.Run()
+	err = runOwnerProgram(p, serverName)
 	_, _ = io.WriteString(output, ui.TerminalCleanupSequence)
 	return err
 }

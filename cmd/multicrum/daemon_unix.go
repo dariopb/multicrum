@@ -42,7 +42,10 @@ func startDetachedProcess(args []string, serverName string, wait bool) error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Env = os.Environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// Only the bootstrap creates a new session. Its child must inherit that
+	// session without becoming its leader, otherwise opening a terminal can
+	// give the final owner a controlling terminal again.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: wait}
 	if wait {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("daemon bootstrap: %w", err)

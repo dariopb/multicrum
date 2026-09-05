@@ -147,6 +147,13 @@ Then open:
 http://localhost:9999/?token=mytoken
 ```
 
+On Unix, owner lifecycle diagnostics are appended to
+`${TMPDIR:-/tmp}/multicrum-$UID/<server>.log`. They record the owner PID,
+attach-client counts, explicit stop requests, SIGINT/SIGTERM, and program
+termination. If an owner disappears unexpectedly, preserve this log before
+restarting it. SIGKILL (including an OOM kill) cannot be logged by the owner;
+check the system journal when the log ends without an `owner stopped` entry.
+
 ## CLI flags
 
 | Flag | Purpose |

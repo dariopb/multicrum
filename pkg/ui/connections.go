@@ -127,6 +127,11 @@ func (s *state) bindConnectionCallbacks(conn *connectionState) {
 		if s.controlService != nil {
 			s.controlService.PublishOutput(msg.SessionID, msg.Generation, msg.Sequence, msg.Data)
 		}
+		if conn.webActive.Load() && msg.Index == conn.manager.FocusedIndex() && s.clipboardWrite != nil {
+			for _, text := range msg.Clipboard {
+				s.clipboardWrite(text)
+			}
+		}
 		// Browsers need every chunk of raw PTY bytes for a faithful replay,
 		// so forward those unconditionally (cheap byte copy to the socket).
 		if s.wsTransport != nil && conn.webActive.Load() {
