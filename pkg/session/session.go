@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"multicrum/pkg/agentdetect"
+	"multicrum/pkg/diagnostics"
 	"multicrum/pkg/ssh_client"
 )
 
@@ -48,6 +49,7 @@ type Session struct {
 	outputSequence uint64
 	agentEndpoint  string
 	extraEnv       []string
+	trace          *diagnostics.Recorder
 
 	// rw is the bidirectional channel to the child process (unix pty master,
 	// Windows ConPTY pipe pair, or SSH remote PTY). Set by Start().
@@ -82,6 +84,14 @@ func newRuntimeID() string {
 }
 
 func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation, runToken uint64) {
+	s.mu.Lock()
+	trace, sessionID, pid := s.trace, s.runtimeID, s.processID
+	local := s.sshClient == nil
+	s.mu.Unlock()
+	trace.Record("session.started session=%s generation=%d pid=%d local=%t", sessionID, generation, pid, local)
+	if trace != nil {
+		defer trace.Repanic(fmt.Sprintf("session.readLoop/%s/generation-%d", sessionID, generation))
+	}
 	buf := make([]byte, 4096)
 	var clipboard osc52Decoder
 	for {
@@ -121,7 +131,10 @@ func (s *Session) readLoop(rw io.Reader, screen *VTScreen, generation, runToken 
 			sendExit := s.SendExit
 			index := s.index
 			sessionID := s.runtimeID
+			sequence := s.outputSequence
 			s.mu.Unlock()
+			trace.Record("session.output-ended session=%s generation=%d pid=%d sequence=%d error_type=%T",
+				sessionID, generation, pid, sequence, err)
 			if !already && sendExit != nil {
 				sendExit(ExitMsg{Index: index, SessionID: sessionID, Generation: generation})
 			}
@@ -146,10 +159,14 @@ func (s *Session) Resize(cols, rows int) error {
 	s.mu.Lock()
 	screen := s.screen
 	resizeFn := s.resizeFn
+	trace, sessionID, generation := s.trace, s.runtimeID, s.generation
 	s.mu.Unlock()
 	screen.Resize(cols, rows)
 	if resizeFn != nil {
-		return resizeFn(cols, rows)
+		err := resizeFn(cols, rows)
+		trace.Record("pty.resize.end session=%s generation=%d size=%dx%d ok=%t error_type=%T",
+			sessionID, generation, cols, rows, err == nil, err)
+		return err
 	}
 	return nil
 }
@@ -157,6 +174,7 @@ func (s *Session) Resize(cols, rows int) error {
 // Close kills the child process.
 func (s *Session) Close() error {
 	s.mu.Lock()
+	trace, sessionID, generation, pid := s.trace, s.runtimeID, s.generation, s.processID
 	s.exited = true
 	s.runToken++
 	s.processID = 0
@@ -164,6 +182,7 @@ func (s *Session) Close() error {
 	s.rw = nil
 	s.resizeFn = nil
 	s.mu.Unlock()
+	trace.Record("session.close session=%s generation=%d pid=%d", sessionID, generation, pid)
 	if rw != nil {
 		return rw.Close()
 	}
@@ -364,6 +383,8 @@ func (s *Session) SetCmdLine(line string) {
 // existing index, title, and screen size. The old VT screen is cleared.
 func (s *Session) Respawn(cols, rows int) error {
 	s.mu.Lock()
+	trace, sessionID, generation := s.trace, s.runtimeID, s.generation
+	trace.Record("session.respawn.begin session=%s generation=%d size=%dx%d", sessionID, generation, cols, rows)
 	rw := s.rw
 	s.runToken++
 	s.processID = 0
@@ -372,11 +393,15 @@ func (s *Session) Respawn(cols, rows int) error {
 	s.exited = false
 	s.outputSequence = 0
 	s.screen = NewVTScreen(cols, rows)
+	s.screen.setDiagnostics(trace, sessionID, generation)
 	s.mu.Unlock()
 	if rw != nil {
 		_ = rw.Close()
 	}
-	return s.Start(cols, rows)
+	err := s.Start(cols, rows)
+	trace.Record("session.respawn.end session=%s previous_generation=%d ok=%t error_type=%T",
+		sessionID, generation, err == nil, err)
+	return err
 }
 
 func (s *Session) startSSH(cols, rows int) error {
@@ -391,10 +416,12 @@ func (s *Session) startSSH(cols, rows int) error {
 	s.runToken++
 	runToken := s.runToken
 	screen := s.screen
+	trace, sessionID := s.trace, s.runtimeID
 	s.resizeFn = func(cols, rows int) error {
 		return rs.Resize(cols, rows)
 	}
 	s.mu.Unlock()
+	screen.setDiagnostics(trace, sessionID, generation)
 	s.screen.SetReplyWriter(rs)
 	s.screen.SetTerminalReplies(true)
 	go s.readLoop(rs, screen, generation, runToken)

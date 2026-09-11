@@ -21,7 +21,7 @@ func DetectCopilotScreen(lines []string) (State, bool) {
 			footerLines = append([]string{lines[i]}, footerLines...)
 		}
 	}
-	footer := strings.ToLower(strings.Join(footerLines, "\n"))
+	footer := strings.ToLower(strings.Join(strings.Fields(strings.Join(footerLines, " ")), " "))
 	for _, line := range footerLines {
 		line = strings.ToLower(strings.TrimSpace(line))
 		if hasCopilotWorkingMarker(line) &&

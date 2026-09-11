@@ -158,6 +158,8 @@ Attach clients stream raw terminal input to the owner through length-prefixed fr
 
 Unix daemonization uses two spawns: only the bootstrap calls `setsid`; the final owner inherits that session without becoming its leader, so it cannot acquire a controlling terminal again. Do not set `Setsid` on both spawns. The bootstrap ignores SIGHUP before spawning the owner. Owner logs include PID, attach counts, explicit stop requests, SIGINT/SIGTERM, and program termination; an abrupt SIGKILL/OOM kill cannot emit a shutdown record.
 
+CLI owners install a per-owner `pkg/diagnostics.Recorder` via `Model.SetDiagnostics` before `Program.Run`. New connection managers and respawned screens must retain that recorder and their session ID/generation tags. It keeps 256 metadata-only events (768 bytes each), checkpoints atomically to `<server>.trace.log` every five seconds, and preserves the prior run at `<server>.trace.log.previous`. UI failures dump the ring into the main owner log; the session read-loop panic boundary dumps and rethrows rather than swallowing the failure. Never record PTY bytes, keystrokes, command lines, environments, tokens, or session titles. Resize/replay begin and end events deliberately bracket the risky work so a missing end identifies the last incomplete operation.
+
 ## Session Naming
 
 `Session.Title()` returns a user override when set, otherwise the process command name. Rename support is implemented via:
@@ -220,6 +222,8 @@ Crucially, **the client that performs a switch (session or connection) is the "a
 - Server (`wsControlMsg` `"focus"`) only calls `refreshFocused()` (which re-pushes the local TUI pane size) when the focus **actually changes**. A browser that is merely *adopting* a focus another client initiated sends a `focus` control to update its `client.sessionID` + get a snapshot, but since `msg.ID` is already focused, the server skips the resize so it can't clobber the initiator's dimensions.
 - Browser (`indexHTML` metadata-adopt block) only calls `sendResize()` when **this** client initiated the switch. Session focus is initiated locally via `focusSession()` (which resizes directly and never reaches the adopt block), so a session-only change in the adopt block is always an adopter and must not resize. A connection switch does not know the new `focusedId` until the broadcast arrives, so its initiator resizes in the adopt block — gated by the `weInitiatedSwitch` flag (set in `control()` for `focusConnection`/`prevConnection`/`nextConnection`/`newConnection`/`removeConnection`).
 
+On initial browser connection/reconnection, defer resize sends until metadata identifies an existing focused session; the remembered/default ID may be wrong. This initial adoption claims the browser's size even when focus has not changed. Later passive metadata adoption must still not resize. Browser fitting computes the final hidden-scrollbar-adjusted dimensions with `FitAddon.proposeDimensions()` and resizes xterm at most once: calling `fit()` and then adding columns transiently narrows the cursor row, damaging footers even when the final dimensions and PTY size are unchanged. Session switches reset both xterm state and the queued UTF-8 decoder state before replay.
+
 `SessionManager` caches a `cols/rows` pair updated by `ResizeAll` and used by `New`/`Respawn`. `ResizeOne` (used for browser-driven resizes) does **not** update that cache, so it is intentionally per-session. To keep the active viewer consistent across focus/respawn boundaries:
 
 - `tea.WindowSizeMsg` calls `ResizeAll(cols,rows)` on **every** connection's manager (not just the active one), so background connections don't drift to stale init sizes when later focused or when `New`/`Respawn` runs there.
@@ -229,6 +233,8 @@ Crucially, **the client that performs a switch (session or connection) is the "a
 When adding new code paths that mutate the session set (focus change, new session, respawn, move, connection switch), always re-push the active viewer's pane size to the affected session. Otherwise viewers will diverge into "two/three buffer representations" — different layouts in TUI vs. browser, broken popup placement, and offset cursors.
 
 ## VTScreen Rendering and Replay
+
+Screen-based agent detection joins `VisibleLines()` rows only where `SoftWrap` is set, so footer words split by a narrow terminal remain recognizable. Preserve hard line breaks and existing provider-specific confidence markers; do not concatenate arbitrary screen text or use stale raw history for state detection. Copilot footer controls may span whitespace-separated rows.
 
 `VTScreen` maintains separate representations:
 
@@ -254,6 +260,8 @@ The underlying emulator does **not** reflow: shrinking width crops the right edg
 
 ### Scrollback pane soft-wrap alignment
 
+Semantic capture tracks alternate-screen switches at escape-sequence boundaries, independently of the emulator's state before/after a PTY read. While DEC 1047/1049 alternate-screen mode is active, neither logical scrollback nor observed wrap-matching lines consume editor output or clears. Main-screen partial lines, SGR, and pending CR state remain intact until exit. Do not gate an entire read with `IsAltScreen()`; a single read can contain shell output, editor entry/redraws, editor exit, and more shell output. Raw browser history and emulator input remain unfiltered.
+
 The TUI scrollback pane's viewport `YOffset` is measured in **soft-wrapped** row space. `RenderWithScrollback()` returns full logical lines, so `setScrollbackContent` expands and caches matching ANSI/plain fixed-width rows before loading the viewport, then sets `SoftWrap=false`. This keeps wheel/keyboard offset changes constant-time and ensures selection/search use the exact displayed rows. Do not restore viewport-managed wrapping for scrollback; it recalculates and rejoins the full history on every offset change. The live/alt-screen source remains the cell-accurate VT grid, with selection separately expanding rows only when a narrower local pane displays virtual wraps.
 
 ### Mouse reporting must survive the startup input-mode reset and client attach
@@ -275,6 +283,8 @@ Live selection must expand each painted VT row to the current pane width because
 ### Emulator quirks worked around in `VTScreen.Write`
 
 Inbound PTY bytes pass through `translateSCORC` before reaching the emulator. Any future emulator workaround should be added to the same helper (or alongside it) and documented in this section.
+
+- **Out-of-bounds scroll margins in `github.com/charmbracelet/x/vt`**. The pinned emulator accepts DECSTBM/DECSLRM margins beyond the screen dimensions; Ultraviolet's line/cell edits then index outside their buffers. Reconnecting at a smaller size can replay an old scroll region and crash the owner in `DeleteLineArea`. `registerMarginGuards` in `pkg/session/vtscreen_margins.go` consumes out-of-bounds margin commands before the default CSI handlers, leaving the existing valid region unchanged. It runs for both live output and resize replay, including fragmented sequences. Horizontal guards apply only while DECLRMM (`?69`) is enabled, preserving CSI `s` cursor-save behavior otherwise. Raw PTY/browser history remains unchanged. Do not replace this with panic recovery or a replay-only filter.
 
 - **Missing SCORC handler in `github.com/charmbracelet/x/vt`**. The emulator registers a handler for **DECRC** (`ESC 8`, Restore Cursor) but **not for SCORC** (`ESC[u`, the CSI form). Apps that draw popups with the `ESC[s` / `ESC[u` pair — notably **btop's kill/signal confirmation dialog** — would silently no-op on every restore, so each subsequent dialog line drifted right and down from where the previous one ended. `VTScreen.Write` translates the canonical 3-byte `ESC[u` to `ESC 8` before feeding the emulator (`translateSCORC` in `pkg/session/vtscreen.go`). The browser `rawHistory` keeps the original bytes because xterm.js handles SCORC natively. **Only the bare 3-byte form is rewritten** — `ESC[<params>u` is the kitty keyboard protocol report and must not be touched, or it will corrupt input replies.
 

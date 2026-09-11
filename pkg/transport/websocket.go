@@ -461,7 +461,7 @@ body.rail-resizing{cursor:col-resize;user-select:none}
 #main-shell{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0}
 body.rail-collapsed #connection-rail{width:34px!important;min-width:34px;max-width:34px}
 body.rail-collapsed #rail-header #menu-wrap,body.rail-collapsed #rail-server,body.rail-collapsed #rail-connections,body.rail-collapsed #rail-footer{display:none}
-body.rail-collapsed #rail-header{height:100%;border-bottom:0}
+body.rail-collapsed #rail-header{height:100%;border-bottom:0;background:var(--row-hover)}
 body.rail-collapsed #rail-collapse{width:34px;border-left:0}
 body.rail-collapsed #rail-resizer{display:none}
 #tabbar{display:flex;align-items:stretch;height:var(--topbar-height);min-height:var(--topbar-height);background:linear-gradient(90deg,var(--panel-strong),color-mix(in srgb,var(--accent-violet) 48%,var(--panel)) 45%,var(--accent-pink));border-bottom:1px solid var(--border);box-shadow:0 4px 18px #0008;padding:4px 8px;gap:4px;flex-shrink:0;font-family:var(--topbar-font);font-size:var(--topbar-font-size);position:relative}
@@ -736,6 +736,7 @@ term.open(document.getElementById('terminal'));
 let ws;
 let reconnectTimer = null;
 let connected = false;
+let awaitingInitialMeta = true;
 let sessions = [];
 let connections = [];
 let activeConnection = '';
@@ -969,7 +970,7 @@ const terminalWriter = (() => {
 
   return {
     write(data){ processText(decoder.decode(data, {stream:true})); },
-    reset(){ queue = []; queuedBytes = 0; syncDepth = 0; syncText = ''; scheduled = false; }
+    reset(){ decoder.decode(); queue = []; queuedBytes = 0; syncDepth = 0; syncText = ''; scheduled = false; }
   };
 })();
 
@@ -983,8 +984,8 @@ function startWebSocket(){
   const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
   ws = new WebSocket(scheme+location.host+'/ws__WS_QUERY__');
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; } setConnectionState('connected'); sendResize(); };
-  ws.onclose = () => { setConnectionState('disconnected'); scheduleReconnect(); };
+  ws.onopen = () => { if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; } awaitingInitialMeta = true; setConnectionState('connected'); };
+  ws.onclose = () => { awaitingInitialMeta = true; setConnectionState('disconnected'); scheduleReconnect(); };
   ws.onerror = () => { setConnectionState('disconnected'); scheduleReconnect(); };
   setConnectionState('connecting');
 
@@ -995,6 +996,14 @@ function startWebSocket(){
     const meta = JSON.parse(new TextDecoder().decode(buf.slice(1)));
     if(Array.isArray(meta)){
       sessions = meta;
+      if(awaitingInitialMeta && sessions.length){
+        if(!sessions.some(s => s.id === focusedID)) focusedID = sessions[0].id;
+        awaitingInitialMeta = false;
+        terminalWriter.reset();
+        term.reset();
+        control({action:'focus',id:focusedID});
+        sendResize();
+      }
     } else {
       sessions = meta.sessions || [];
       connections = meta.connections || [];
@@ -1005,7 +1014,11 @@ function startWebSocket(){
         serverSettings = Object.assign({}, serverSettings, meta.settings);
         syncAppSettingsForm();
       }
-      if(typeof meta.focusedId === 'number' && (focusedID !== meta.focusedId || prevConnection !== activeConnection)){
+      if(typeof meta.focusedId === 'number' &&
+          (!awaitingInitialMeta || sessions.some(s => s.id === meta.focusedId)) &&
+          (awaitingInitialMeta || focusedID !== meta.focusedId || prevConnection !== activeConnection)){
+        const initial = awaitingInitialMeta;
+        awaitingInitialMeta = false;
         const connChanged = (prevConnection !== activeConnection);
         const initiated = weInitiatedSwitch;
         weInitiatedSwitch = false;
@@ -1022,7 +1035,9 @@ function startWebSocket(){
         // adopter catching up and must not resize. A connection switch does
         // not know the new focusedId until this broadcast, so its initiator
         // resizes here — but only if it was the one that asked for it.
-        if(connChanged && initiated){
+        // A fresh connection is also an initiating viewer. Wait for metadata
+        // to identify its actual session rather than resizing a stale ID on open.
+        if(initial || (connChanged && initiated)){
           sendResize();
         }
         term.focus();
@@ -1143,7 +1158,8 @@ function renderConnectionRail(){
 function focusSession(id){
   if(!connected) return;
   focusedID = id;
-  term.clear();
+  terminalWriter.reset();
+  term.reset();
   control({action:'focus',id});
   sendResize();
   updateLabel();
@@ -1911,26 +1927,28 @@ window.addEventListener('resize', handleViewportResize);
 if(window.visualViewport) window.visualViewport.addEventListener('resize', handleViewportResize);
 
 function fitAndResize(){
-  fitAddon.fit();
-  // FitAddon reserves space for xterm's scrollbar, but we hide it with
-  // overflow-y:hidden, so an extra column often fits. Bump cols when the
-  // leftover width can hold another full cell.
-  try {
-    const core = term._core;
-    const cell = core && core._renderService && core._renderService.dimensions && core._renderService.dimensions.css && core._renderService.dimensions.css.cell;
-    const host = document.getElementById('terminal');
-    if (cell && cell.width > 0 && host) {
-      const style = getComputedStyle(host);
-      const padL = parseFloat(style.paddingLeft)||0, padR = parseFloat(style.paddingRight)||0;
-      const avail = host.clientWidth - padL - padR;
-      const extra = Math.floor((avail - term.cols * cell.width) / cell.width);
-      if (extra > 0) term.resize(term.cols + extra, term.rows);
-    }
-  } catch(e) {}
+  const size = fitAddon.proposeDimensions();
+  if(!size || !Number.isFinite(size.cols) || !Number.isFinite(size.rows)) return;
+  let cols = size.cols;
+  // Compute the final width before resizing. fit() followed by a width bump
+  // transiently shrinks the cursor row on every refit, even at an unchanged
+  // final size. No PTY resize/redraw follows to repair that damaged row.
+  const core = term._core;
+  const cell = core && core._renderService && core._renderService.dimensions && core._renderService.dimensions.css && core._renderService.dimensions.css.cell;
+  const host = document.getElementById('terminal');
+  if(cell && cell.width > 0 && host){
+    const style = getComputedStyle(host);
+    const avail = host.clientWidth - (parseFloat(style.paddingLeft)||0) - (parseFloat(style.paddingRight)||0);
+    if(avail <= 0) return;
+    // The scrollbar is hidden by CSS, so all available columns can be used.
+    cols = Math.max(2, Math.floor(avail / cell.width));
+  }
+  if(term.cols !== cols || term.rows !== size.rows) term.resize(cols, size.rows);
   sendResize();
 }
 
 function sendResize(){
+  if(awaitingInitialMeta) return;
   const b=new TextEncoder().encode(JSON.stringify({id:focusedID,cols:term.cols,rows:term.rows}));
   const m=new Uint8Array(1+b.length);
   m[0]=0x02; m.set(b,1); send(m);

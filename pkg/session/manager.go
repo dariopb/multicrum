@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"multicrum/pkg/diagnostics"
 	"multicrum/pkg/ssh_client"
 )
 
@@ -22,6 +23,7 @@ type SessionManager struct {
 
 	sshClient     *ssh_client.Client
 	agentEndpoint string
+	trace         *diagnostics.Recorder
 }
 
 // NewManager creates a SessionManager with initial terminal dimensions.
@@ -102,6 +104,7 @@ func (m *SessionManager) NewConfigured(cmd []string, sshClient *ssh_client.Clien
 	s.workDir = workDir
 	s.extraEnv = append([]string(nil), env...)
 	s.agentEndpoint = m.agentEndpoint
+	s.setDiagnostics(m.trace)
 	s.setCallbacks(m.SendOutput, m.SendExit)
 	m.sessions = append(m.sessions, s)
 	m.updateTerminalRepliesLocked()
@@ -143,6 +146,7 @@ func (m *SessionManager) newWithOptions(cmd []string, sshClient *ssh_client.Clie
 	}
 	s.workDir = workDir
 	s.agentEndpoint = m.agentEndpoint
+	s.setDiagnostics(m.trace)
 	s.SendOutput = m.SendOutput
 	s.SendExit = m.SendExit
 	m.sessions = append(m.sessions, s)

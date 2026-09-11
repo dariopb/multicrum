@@ -18,6 +18,7 @@ import (
 	"multicrum/pkg/agentdetect"
 	"multicrum/pkg/config"
 	"multicrum/pkg/control"
+	"multicrum/pkg/diagnostics"
 	"multicrum/pkg/session"
 	"multicrum/pkg/ssh_client"
 	"multicrum/pkg/transport"
@@ -104,6 +105,7 @@ type state struct {
 	localClients           int
 	inputMux               *InputMux
 	program                *tea.Program
+	trace                  *diagnostics.Recorder
 	width                  int
 	height                 int
 	connectionLayout       connectionLayout
@@ -734,6 +736,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, agentSpinnerTick()
 
 	case localClientCountMsg:
+		s.trace.Record("ui.clients old=%d new=%d", s.localClients, int(msg))
 		attached := int(msg) > s.localClients
 		s.localClients = int(msg)
 		if attached {
@@ -758,12 +761,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.WindowSizeMsg:
+		s.trace.Record("resize.request source=tui old=%dx%d new=%dx%d",
+			s.width, s.height, msg.Width, msg.Height)
 		s.width = msg.Width
 		s.height = msg.Height
 		s.applyGeometry()
 		return m, nil
 
 	case wsResizeMsg:
+		s.trace.Record("resize.request source=browser connection=%s index=%d new=%dx%d",
+			s.activeConnection().id, msg.ID, msg.Cols, msg.Rows)
 		// Last resizer wins: the surface actively viewing the session is
 		// authoritative. The other renderer simply shows whatever fits.
 		s.manager.ResizeOne(msg.ID, msg.Cols, msg.Rows)
@@ -980,6 +987,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, s.startAgentSpinner()
 
 	case connectionExitMsg:
+		s.trace.Record("ui.session-exit connection=%s session=%s generation=%d index=%d",
+			msg.Conn.id, msg.Msg.SessionID, msg.Msg.Generation, msg.Msg.Index)
 		if s.consumeSuppressedExit(msg.Msg) {
 			s.notifyMeta()
 			return m, nil
@@ -1590,6 +1599,8 @@ func (s *state) refreshFocused() {
 	// browser fit() override us right after; this just guarantees the
 	// active viewer at the moment of focus is consistent.
 	geom := s.geometry()
+	s.trace.Record("resize.request source=tui-focus connection=%s index=%d new=%dx%d",
+		s.activeConnection().id, idx, geom.Pane.Width, geom.Pane.Height)
 	s.manager.ResizeOne(idx, geom.Pane.Width, geom.Pane.Height)
 	for _, sess := range s.manager.Sessions() {
 		if sess.Index() == idx {

@@ -67,6 +67,16 @@ func TestDetectCopilotScreen(t *testing.T) {
 			state: StateWorking, ok: true,
 		},
 		{
+			name:  "working controls on separate lines",
+			lines: []string{"○ Working · 26.1 KiB", "esc", "interrupt   GPT"},
+			state: StateWorking, ok: true,
+		},
+		{
+			name:  "idle controls on separate lines",
+			lines: []string{"← open", "sidebar · /", "commands · ?", "help · tab", "next tab GPT"},
+			state: StateIdle, ok: true,
+		},
+		{
 			name:  "blocked",
 			lines: []string{"Permission required", "────────────────", "enter to select  esc to cancel"},
 			state: StateBlocked, ok: true,

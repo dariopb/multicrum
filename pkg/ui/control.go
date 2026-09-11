@@ -53,6 +53,11 @@ func (m *Model) HandleControl(ctx context.Context, method string, params json.Ra
 
 func (s *state) handleControlRequest(m Model, method string, raw json.RawMessage, controllerID string) (any, *control.Error) {
 	switch method {
+	case "session.create", "session.focus", "session.move", "session.respawn", "session.close",
+		"connection.create", "connection.remove":
+		s.trace.Record("control.operation method=%s", method)
+	}
+	switch method {
 	case "server.get":
 		return map[string]any{
 			"serverName": s.serverName, "capabilities": control.Capabilities,
@@ -164,6 +169,9 @@ func (s *state) handleControlRequest(m Model, method string, raw json.RawMessage
 		if p.Cols < 1 || p.Rows < 1 {
 			return nil, control.NewError("invalid_argument", "cols and rows must be positive")
 		}
+		sessionID, generation, _, _ := sess.RuntimeSnapshot()
+		s.trace.Record("resize.request source=control connection=%s session=%s generation=%d new=%dx%d",
+			conn.id, sessionID, generation, p.Cols, p.Rows)
 		conn.manager.ResizeOne(sess.Index(), p.Cols, p.Rows)
 		s.publishSessionEvent("session.metadata", "session.resized", sess, map[string]any{"cols": p.Cols, "rows": p.Rows})
 		return map[string]any{"session": s.controlSession(conn, sess)}, nil

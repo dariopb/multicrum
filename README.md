@@ -147,12 +147,26 @@ Then open:
 http://localhost:9999/?token=mytoken
 ```
 
-On Unix, owner lifecycle diagnostics are appended to
-`${TMPDIR:-/tmp}/multicrum-$UID/<server>.log`. They record the owner PID,
-attach-client counts, explicit stop requests, SIGINT/SIGTERM, and program
-termination. If an owner disappears unexpectedly, preserve this log before
-restarting it. SIGKILL (including an OOM kill) cannot be logged by the owner;
-check the system journal when the log ends without an `owner stopped` entry.
+On Unix, owner diagnostics live under `${TMPDIR:-/tmp}/multicrum-$UID/`:
+
+| File | Contents |
+|---|---|
+| `<server>.log` | Lifecycle messages, panic stacks, and automatic recent-event dumps when the owner UI fails or a session reader panics. |
+| `<server>.trace.log` | Latest 256 metadata events, atomically checkpointed every five seconds and at shutdown/failure. |
+| `<server>.trace.log.previous` | Previous run's checkpoint, retained when a new owner starts. |
+
+The trace includes build/runtime identifiers, attach counts, resize sources,
+old/new screen dimensions, session IDs/generations/PIDs, alternate-screen
+transitions, replay byte counts/timing, session output ending, respawns, and
+shutdown signals. It never records terminal contents, keystrokes, command
+arguments, environment variables, or authentication tokens. Individual events
+are capped at 768 bytes, keeping the checkpoint bounded.
+
+After an unexpected failure, preserve all three files. SIGKILL (including an
+OOM kill) cannot produce a final dump, so its checkpoint may be missing the
+last five seconds; check the system journal when the log ends without an
+`owner stopped` entry. These diagnostics require a newly started owner using
+the updated binary.
 
 ## CLI flags
 

@@ -16,6 +16,7 @@ import (
 	"github.com/urfave/cli/v3"
 	"multicrum/pkg/config"
 	"multicrum/pkg/control"
+	"multicrum/pkg/diagnostics"
 	"multicrum/pkg/localserver"
 	"multicrum/pkg/ssh_client"
 	"multicrum/pkg/ui"
@@ -267,6 +268,19 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 		return err
 	}
 	defer owner.Close()
+	logPath, err := localserver.LogPath(serverName)
+	if err != nil {
+		return err
+	}
+	tracePath := strings.TrimSuffix(logPath, ".log") + ".trace.log"
+	trace, err := diagnostics.New(tracePath, log.Default())
+	if err != nil {
+		return fmt.Errorf("owner diagnostics: %w", err)
+	}
+	defer trace.Close()
+	model.SetDiagnostics(trace)
+	trace.Record("owner.init server=%q pid=%d detached=%t terminal=%dx%d", serverName, os.Getpid(), detachedOwner, cols, rows)
+	log.Printf("owner diagnostics: server=%q pid=%d checkpoint=%q", serverName, os.Getpid(), tracePath)
 
 	var output io.Writer = owner
 	if !detachedOwner {
@@ -308,16 +322,19 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 	defer controlService.Close()
 	owner.SetCallbacks(func(n int) {
 		log.Printf("owner clients: server=%q pid=%d attached=%d", serverName, os.Getpid(), n)
+		trace.Record("client.count source=local-attach attached=%d", n)
 		if p != nil {
 			go p.Send(ui.LocalClientCountMsg(n))
 		}
 	}, func(cols, rows int) {
+		trace.Record("resize.request source=local-attach terminal=%dx%d", cols, rows)
 		if p != nil {
 			go p.Send(tea.WindowSizeMsg{Width: cols, Height: rows})
 		}
 	}, func(action string) {
 		if action == "stop" && p != nil {
 			log.Printf("owner stop requested: server=%q pid=%d source=local-control", serverName, os.Getpid())
+			trace.Record("owner.stop-request source=local-control")
 			go p.Kill()
 		}
 	})
@@ -332,7 +349,7 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 		fmt.Fprintf(os.Stderr, "xterm.js UI on http://%s/\n", wsAddr)
 	}
 
-	err = runOwnerProgram(p, serverName)
+	err = runOwnerProgram(p, serverName, trace)
 	_, _ = io.WriteString(output, ui.TerminalCleanupSequence)
 	return err
 }

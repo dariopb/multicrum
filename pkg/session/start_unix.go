@@ -27,10 +27,12 @@ func (s *Session) Start(cols, rows int) error {
 	s.runToken++
 	runToken := s.runToken
 	screen := s.screen
+	trace, sessionID := s.trace, s.runtimeID
 	s.resizeFn = func(cols, rows int) error {
 		return uc.Resize(cols, rows)
 	}
 	s.mu.Unlock()
+	screen.setDiagnostics(trace, sessionID, generation)
 	s.screen.SetReplyWriter(uc)
 	s.screen.SetTerminalReplies(true)
 

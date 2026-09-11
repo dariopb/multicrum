@@ -71,6 +71,7 @@ func (s *state) focusConnection(index int) {
 	}
 	s.activeConn = index
 	s.syncActiveConnectionFields()
+	s.trace.Record("ui.connection-focus connection=%s index=%d", s.activeConnection().id, index)
 	s.clearSelection()
 	s.refreshFocused()
 	s.notifyMeta()
@@ -123,6 +124,8 @@ func (s *state) bindConnectionCallbacks(conn *connectionState) {
 		return
 	}
 	conn.callbacksBound = true
+	conn.manager.SetDiagnostics(s.trace)
+	s.trace.Record("connection.bind connection=%s", conn.id)
 	conn.manager.SetSendOutput(func(msg session.OutputMsg) {
 		if s.controlService != nil {
 			s.controlService.PublishOutput(msg.SessionID, msg.Generation, msg.Sequence, msg.Data)
@@ -288,6 +291,8 @@ func (s *state) toggleConnectionLayout() {
 // viewports, cache, and hit targets in one coordinate system.
 func (s *state) applyGeometry() {
 	geom := s.geometry()
+	s.trace.Record("geometry.apply terminal=%dx%d pane=%dx%d layout=%s connections=%d",
+		s.width, s.height, geom.Pane.Width, geom.Pane.Height, s.connectionLayout, len(s.connections))
 	s.layoutFallback = s.connectionLayout == connectionLayoutLeft && geom.ConnectionRail.Width == 0
 	s.paneCache.valid = false
 	s.sessionHitboxes = nil
@@ -299,6 +304,8 @@ func (s *state) applyGeometry() {
 	s.hasConnectionsHitbox = false
 	for _, conn := range s.connections {
 		if conn.manager != nil {
+			s.trace.Record("resize.group source=tui-geometry connection=%s sessions=%d new=%dx%d",
+				conn.id, conn.manager.Len(), geom.Pane.Width, geom.Pane.Height)
 			conn.manager.ResizeAll(geom.Pane.Width, geom.Pane.Height)
 		}
 		for idx, vp := range conn.viewports {

@@ -143,9 +143,17 @@ func (s *state) evaluateAgentSession(sess *session.Session) {
 		return
 	}
 	lines := sess.Screen().VisibleLines()
-	text := make([]string, len(lines))
+	text := make([]string, 0, len(lines))
+	var logical strings.Builder
 	for i, line := range lines {
-		text[i] = line.Text
+		logical.WriteString(line.Text)
+		// Only terminal soft wraps may join words. Real line breaks must
+		// remain boundaries so unrelated output cannot form footer markers.
+		if line.SoftWrap && i+1 < len(lines) {
+			continue
+		}
+		text = append(text, logical.String())
+		logical.Reset()
 	}
 	var nextState agentdetect.State
 	var matched bool

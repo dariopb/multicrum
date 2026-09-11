@@ -2,13 +2,16 @@ package session
 
 import (
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
+	"multicrum/pkg/diagnostics"
 )
 
 const (
@@ -18,12 +21,16 @@ const (
 
 // VTScreen maintains a virtual terminal screen buffer using charmbracelet/x/vt.
 type VTScreen struct {
-	mu         sync.Mutex
-	term       *vt.Emulator
-	cols       int
-	rows       int
-	dirty      bool
-	rawHistory byteRing // raw PTY bytes capped at maxScrollback, for WS replay
+	mu              sync.Mutex
+	term            *vt.Emulator
+	cols            int
+	rows            int
+	dirty           bool
+	trace           *diagnostics.Recorder
+	traceID         string
+	traceGeneration uint64
+	replaying       bool
+	rawHistory      byteRing // raw PTY bytes capped at maxScrollback, for WS replay
 
 	logicalScrollback []logicalLine
 	pendingLines      []logicalLine
@@ -31,6 +38,7 @@ type VTScreen struct {
 	linePlain         strings.Builder
 	lineANSI          strings.Builder
 	pendingControl    []byte
+	captureAltScreen  bool
 	pendingCR         bool
 	pendingCRANSI     []byte
 	observedLines     []string
@@ -42,16 +50,17 @@ type VTScreen struct {
 	replyOnce sync.Once
 	replies   atomic.Bool
 
-	appCursor     bool
-	mouseX10      bool
-	mouseNormal   bool
-	mouseButton   bool
-	mouseAny      bool
-	mouseSGR      bool
-	bracketPaste  bool
-	cursorVisible bool
-	cursorShape   vt.CursorStyle
-	cursorBlink   bool
+	appCursor       bool
+	mouseX10        bool
+	mouseNormal     bool
+	mouseButton     bool
+	mouseAny        bool
+	mouseSGR        bool
+	bracketPaste    bool
+	leftRightMargin bool
+	cursorVisible   bool
+	cursorShape     vt.CursorStyle
+	cursorBlink     bool
 }
 
 type CursorInfo struct {
@@ -145,8 +154,19 @@ func NewVTScreen(cols, rows int) *VTScreen {
 		DisableMode:      func(mode ansi.Mode) { s.setModeLocked(mode, false) },
 		CursorVisibility: func(visible bool) { s.cursorVisible = visible },
 		CursorStyle:      func(style vt.CursorStyle, blink bool) { s.setCursorStyleLocked(style, blink) },
+		AltScreen: func(enabled bool) {
+			s.trace.Record("screen.alt session=%s generation=%d enabled=%t replay=%t",
+				s.traceID, s.traceGeneration, enabled, s.replaying)
+		},
 	})
+	s.registerMarginGuards()
 	return s
+}
+
+func (s *VTScreen) setDiagnostics(trace *diagnostics.Recorder, sessionID string, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trace, s.traceID, s.traceGeneration = trace, sessionID, generation
 }
 
 func (s *VTScreen) setModeLocked(mode ansi.Mode, enabled bool) {
@@ -165,6 +185,8 @@ func (s *VTScreen) setModeLocked(mode ansi.Mode, enabled bool) {
 		s.mouseSGR = enabled
 	case ansi.ModeBracketedPaste:
 		s.bracketPaste = enabled
+	case ansi.ModeLeftRightMargin:
+		s.leftRightMargin = enabled
 	}
 }
 
@@ -211,7 +233,6 @@ func (s *VTScreen) Write(p []byte) {
 
 	s.rawHistory.append(p)
 
-	s.captureObservedLines(p)
 	s.captureLogicalLines(p)
 	_, _ = s.term.Write(translateSCORC(p))
 	s.dirty = true
@@ -312,10 +333,15 @@ func (s *VTScreen) finishObservedLine() {
 }
 
 func (s *VTScreen) captureLogicalLines(p []byte) {
-	for _, b := range p {
+	for i, b := range p {
 		if len(s.pendingControl) > 0 {
 			s.pendingControl = append(s.pendingControl, b)
 			if ansiSequenceComplete(s.pendingControl) {
+				if s.captureScreenSwitch(s.pendingControl) || s.captureAltScreen {
+					s.pendingControl = nil
+					continue
+				}
+				s.captureObservedLines(s.pendingControl)
 				if s.pendingCR && isSGR(s.pendingControl) {
 					s.pendingCRANSI = append(s.pendingCRANSI, s.pendingControl...)
 				} else {
@@ -330,6 +356,15 @@ func (s *VTScreen) captureLogicalLines(p []byte) {
 				s.pendingControl = nil
 			}
 			continue
+		}
+		if s.captureAltScreen {
+			if b == 0x1b {
+				s.pendingControl = append(s.pendingControl, b)
+			}
+			continue
+		}
+		if b != 0x1b {
+			s.captureObservedLines(p[i : i+1])
 		}
 		// Resolve a deferred carriage return. A CR immediately followed by LF
 		// is a single CRLF line break (the common PTY line ending produced by
@@ -382,6 +417,36 @@ func (s *VTScreen) captureLogicalLines(p []byte) {
 			}
 		}
 	}
+}
+
+// Capture runs ahead of the emulator, so its screen state must follow stream
+// boundaries rather than IsAltScreen() before/after a whole PTY read. Preserve
+// the main screen's partial lines and CR state while an alternate app runs.
+func (s *VTScreen) captureScreenSwitch(seq []byte) bool {
+	if isRIS(seq) {
+		s.captureAltScreen = false
+		return false
+	}
+	if len(seq) < 5 || string(seq[:3]) != "\x1b[?" {
+		return false
+	}
+	final := seq[len(seq)-1]
+	if final != 'h' && final != 'l' {
+		return false
+	}
+	switched := false
+	for _, param := range strings.Split(string(seq[3:len(seq)-1]), ";") {
+		mode, err := strconv.Atoi(param)
+		if err != nil {
+			continue
+		}
+		switch ansi.DECMode(mode) {
+		case ansi.ModeAltScreen, ansi.ModeAltScreenSaveCursor:
+			s.captureAltScreen = final == 'h'
+			switched = true
+		}
+	}
+	return switched
 }
 
 func ansiSequenceComplete(seq []byte) bool {
@@ -540,7 +605,11 @@ func (s *VTScreen) writeLogicalRender(b *strings.Builder, includeScrollback bool
 func (s *VTScreen) Resize(cols, rows int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	started := time.Now()
+	s.trace.Record("screen.resize.begin session=%s generation=%d old=%dx%d new=%dx%d alt=%t history_bytes=%d",
+		s.traceID, s.traceGeneration, s.cols, s.rows, cols, rows, s.term.IsAltScreen(), s.rawHistory.len())
 	if cols <= 0 || rows <= 0 {
+		s.trace.Record("screen.resize.rejected session=%s generation=%d reason=nonpositive-size", s.traceID, s.traceGeneration)
 		return
 	}
 	changed := cols != s.cols || rows != s.rows
@@ -553,6 +622,8 @@ func (s *VTScreen) Resize(cols, rows int) {
 		s.reflowEmulatorLocked(cols, rows)
 	}
 	s.dirty = true
+	s.trace.Record("screen.resize.end session=%s generation=%d changed=%t elapsed=%s",
+		s.traceID, s.traceGeneration, changed, time.Since(started))
 }
 
 // reflowEmulatorLocked rebuilds the visible emulator screen by replaying the
@@ -571,6 +642,8 @@ func (s *VTScreen) Resize(cols, rows int) {
 // drawing at a new width would only flash a garbage frame before their redraw.
 func (s *VTScreen) reflowEmulatorLocked(cols, rows int) {
 	if s.rawHistory.len() == 0 || s.term.IsAltScreen() {
+		s.trace.Record("replay.skipped session=%s generation=%d alt=%t history_bytes=%d",
+			s.traceID, s.traceGeneration, s.term.IsAltScreen(), s.rawHistory.len())
 		return
 	}
 	// Render() only shows the visible rows x cols screen, so we only need to
@@ -581,6 +654,11 @@ func (s *VTScreen) reflowEmulatorLocked(cols, rows int) {
 	// so rows+pad newlines guarantee the visible screen fills without leaving
 	// blank ghost rows at the top.
 	tail := reflowTail(s.rawHistory.bytes(), rows)
+	started := time.Now()
+	s.trace.Record("replay.begin session=%s generation=%d size=%dx%d history_bytes=%d tail_bytes=%d",
+		s.traceID, s.traceGeneration, cols, rows, s.rawHistory.len(), len(tail))
+	s.replaying = true
+	defer func() { s.replaying = false }()
 
 	// Suppress terminal replies while replaying: the history may contain DSR/CPR
 	// queries whose responses would otherwise be forwarded to the child as if it
@@ -593,6 +671,8 @@ func (s *VTScreen) reflowEmulatorLocked(cols, rows int) {
 	s.term.Resize(cols, rows)
 	_, _ = s.term.Write(translateSCORC(tail))
 	s.replies.Store(prevReplies)
+	s.trace.Record("replay.end session=%s generation=%d elapsed=%s",
+		s.traceID, s.traceGeneration, time.Since(started))
 }
 
 // reflowTail returns the suffix of raw history to replay so the visible screen

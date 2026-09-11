@@ -54,6 +54,25 @@ func TestDaemonLifecycle(t *testing.T) {
 				t.Logf("daemon log:\n%s", data)
 			}
 		}
+		if t.Failed() {
+			return
+		}
+		tracePath := strings.TrimSuffix(logPath, ".log") + ".trace.log"
+		data, err := os.ReadFile(tracePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			"source=local-attach", "old=100x28 new=80x18", "replay.begin", "replay.end",
+			"session.output-ended", "session.respawn.begin", "generation=2",
+		} {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("daemon trace missing %q:\n%s", want, data)
+			}
+		}
+		if strings.Contains(string(data), "reflow-ready") {
+			t.Fatal("terminal contents leaked into diagnostics")
+		}
 	})
 
 	attach := func(cols, rows uint16) func() {
@@ -141,13 +160,34 @@ func TestDaemonLifecycle(t *testing.T) {
 		return sess.Cols == 100 && sess.Rows == 28
 	})
 	original := currentSession()
-	for i := 0; i < 3; i++ {
+	// Record valid full-height margins followed by DL. Reconnecting with a
+	// shorter terminal replays those now-oversized margins in the owner loop.
+	reflowCtx, reflowCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer reflowCancel()
+	if err := client.Call(reflowCtx, "session.sendText", map[string]any{
+		"sessionId": original.SessionID, "generation": original.Generation,
+		"text": `printf '\033[1;28r\033[H\033[13Mreflow-ready\033[r'`, "submit": true,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForDaemonCondition(t, func() bool {
+		var snapshot struct {
+			Data []byte `json:"data"`
+		}
+		if err := client.Call(reflowCtx, "session.snapshot", map[string]any{
+			"sessionId": original.SessionID, "generation": original.Generation,
+		}, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(string(snapshot.Data), "\x1b[13Mreflow-ready")
+	})
+	for _, size := range [][2]uint16{{80, 20}, {110, 35}, {130, 45}} {
 		closeTerminal()
 		hello, err := localserver.ServerStatus(socket, server)
 		if err != nil || hello.ServerPID != ownerPID {
 			t.Fatalf("owner did not survive terminal close: hello=%+v err=%v", hello, err)
 		}
-		cols, rows := uint16(110+i*10), uint16(35+i*5)
+		cols, rows := size[0], size[1]
 		closeTerminal = attach(cols, rows)
 		waitForDaemonCondition(t, func() bool {
 			sess := currentSession()
