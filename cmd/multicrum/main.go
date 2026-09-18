@@ -8,11 +8,15 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
+	tunnel "github.com/dariopb/goreverselb/pkg"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 	"multicrum/pkg/config"
 	"multicrum/pkg/control"
@@ -22,68 +26,78 @@ import (
 	"multicrum/pkg/ui"
 )
 
-func main() {
-	cmd := &cli.Command{
+func newCLICommand() *cli.Command {
+	return &cli.Command{
 		Name:  "multicrum",
 		Usage: "run multiple persistent agent sessions in a terminal UI",
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
-				Name:  "cmd",
-				Value: "bash",
-				Usage: "command to run in each session (space-separated)",
+				Name:    "log-level",
+				Aliases: []string{"loglevel", "lb-log-level"},
+				Sources: cli.EnvVars("MULTICRUM_LOG_LEVEL", "MULTICRUM_LB_LOG_LEVEL"),
+				Value:   "info",
+				Usage:   "application and library log level (e.g. info, debug, trace)",
 			},
 			&cli.StringFlag{
-				Name:  "ssh",
-				Usage: "SSH target for remote sessions, e.g. user@host or user@host:2222",
+				Name:    "cmd",
+				Sources: cli.EnvVars("MULTICRUM_CMD"),
+				Value:   "bash",
+				Usage:   "command to run in each session (space-separated)",
+			},
+			&cli.StringFlag{
+				Name:    "ssh",
+				Sources: cli.EnvVars("MULTICRUM_SSH"),
+				Usage:   "SSH target for remote sessions, e.g. user@host or user@host:2222",
 			},
 			&cli.StringFlag{
 				Name:    "ssh-key",
+				Sources: cli.EnvVars("MULTICRUM_SSH_KEY"),
 				Aliases: []string{"i"},
 				Usage:   "SSH identity file (OpenSSH -i equivalent)",
 			},
 			&cli.StringFlag{
-				Name:  "ssh-passwd",
-				Usage: "SSH password for password/keyboard-interactive authentication",
+				Name:    "ssh-passwd",
+				Sources: cli.EnvVars("MULTICRUM_SSH_PASSWD"),
+				Usage:   "SSH password for password/keyboard-interactive authentication",
 			},
 			&cli.BoolFlag{
-				Name:  "ssh-use-default-keys",
-				Usage: "try standard keys from ~/.ssh (id_ed25519, id_ecdsa, id_rsa, id_dsa)",
+				Name:    "ssh-use-default-keys",
+				Sources: cli.EnvVars("MULTICRUM_SSH_USE_DEFAULT_KEYS"),
+				Usage:   "try standard keys from ~/.ssh (id_ed25519, id_ecdsa, id_rsa, id_dsa)",
 			},
 			&cli.BoolFlag{
-				Name:  "ssh-agent",
-				Usage: "use SSH agent authentication when SSH_AUTH_SOCK is available",
-				Value: true,
+				Name:    "ssh-agent",
+				Sources: cli.EnvVars("MULTICRUM_SSH_AGENT"),
+				Usage:   "use SSH agent authentication when SSH_AUTH_SOCK is available",
+				Value:   true,
 			},
 			&cli.StringFlag{
-				Name:  "ssh-known-hosts",
-				Usage: "known_hosts file path override",
+				Name:    "ssh-known-hosts",
+				Sources: cli.EnvVars("MULTICRUM_SSH_KNOWN_HOSTS"),
+				Usage:   "known_hosts file path override",
 			},
 			&cli.BoolFlag{
-				Name:  "ssh-insecure-ignore-host-key",
-				Usage: "disable SSH host key verification (unsafe; testing only)",
+				Name:    "ssh-insecure-ignore-host-key",
+				Sources: cli.EnvVars("MULTICRUM_SSH_INSECURE_IGNORE_HOST_KEY"),
+				Usage:   "disable SSH host key verification (unsafe; testing only)",
 			},
 			&cli.StringFlag{
-				Name:  "ws",
-				Usage: "if set, serve xterm.js WebSocket on this address, e.g. :9999",
-			},
-			&cli.StringFlag{
-				Name:  "token",
-				Usage: "optional auth token for the WebSocket endpoint",
-			},
-			&cli.StringFlag{
-				Name:  "control-token",
-				Usage: "full-control automation token (random token file when omitted)",
+				Name:    "control-token",
+				Sources: cli.EnvVars("MULTICRUM_CONTROL_TOKEN"),
+				Usage:   "full-control automation token (random token file when omitted)",
 			},
 			&cli.StringFlag{
 				Name:    "server",
+				Sources: cli.EnvVars("MULTICRUM_SERVER"),
 				Aliases: []string{"srv", "S"},
 				Value:   "default",
 				Usage:   "named local multicrum server to attach/create",
 			},
 			&cli.StringFlag{
-				Name:  "config",
-				Value: "multicrum.yaml",
-				Usage: "path to layout YAML file; loaded on startup if it exists, saved with Ctrl+Alt+P",
+				Name:    "config",
+				Sources: cli.EnvVars("MULTICRUM_CONFIG"),
+				Value:   "multicrum.yaml",
+				Usage:   "path to layout YAML file; loaded on startup if it exists, saved with Ctrl+Alt+P",
 			},
 			&cli.BoolFlag{
 				Name:   "owner",
@@ -93,7 +107,7 @@ func main() {
 				Name:   "daemon-bootstrap",
 				Hidden: true,
 			},
-		},
+		}, webFlags()...),
 		Commands: []*cli.Command{
 			{
 				Name:    "list",
@@ -116,27 +130,40 @@ func main() {
 				Usage: "call a control protocol method",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
-						Name:  "method",
-						Usage: "control protocol method",
+						Name:    "method",
+						Sources: cli.EnvVars("MULTICRUM_CALL_METHOD"),
+						Usage:   "control protocol method",
 					},
 					&cli.StringFlag{
-						Name:  "params",
-						Value: "{}",
-						Usage: "JSON request parameters",
+						Name:    "params",
+						Sources: cli.EnvVars("MULTICRUM_CALL_PARAMS"),
+						Value:   "{}",
+						Usage:   "JSON request parameters",
 					},
 					&cli.DurationFlag{
-						Name:  "timeout",
-						Value: 2 * time.Minute,
-						Usage: "request timeout",
+						Name:    "timeout",
+						Sources: cli.EnvVars("MULTICRUM_CALL_TIMEOUT"),
+						Value:   2 * time.Minute,
+						Usage:   "request timeout",
 					},
 				},
 				Action: callControl,
 			},
 		},
+		Before: func(ctx context.Context, c *cli.Command) (context.Context, error) {
+			level, err := resolveLogLevel(c, nil)
+			if err != nil {
+				return ctx, err
+			}
+			configureAppLogging(level)
+			return ctx, nil
+		},
 		Action: run,
 	}
+}
 
-	if err := cmd.Run(context.Background(), os.Args); err != nil {
+func main() {
+	if err := newCLICommand().Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -202,6 +229,9 @@ func run(ctx context.Context, c *cli.Command) error {
 	if err := waitForServer(socketPath, serverName, 5*time.Second); err != nil {
 		return err
 	}
+	if err := announceNewOwnerLB(ctx, socketPath, serverName, os.Stdin, os.Stdout); err != nil {
+		return err
+	}
 	if attached, attachErr := localserver.TryAttach(socketPath, serverName, os.Stdin, os.Stdout); attached {
 		return attachErr
 	}
@@ -209,6 +239,28 @@ func run(ctx context.Context, c *cli.Command) error {
 }
 
 func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string, detachedOwner bool) error {
+	configPath := c.String("config")
+	var cfg *config.Config
+	var configErr error
+	if configPath != "" {
+		cfg, configErr = config.Load(configPath)
+		if configErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", configErr)
+		}
+	}
+	level, err := resolveLogLevel(c, cfg)
+	if err != nil {
+		return err
+	}
+	configureAppLogging(level)
+	logrus.Debugf("owner startup: server=%q pid=%d detached=%t", serverName, os.Getpid(), detachedOwner)
+	effectiveConfig := config.Config{Server: serverName}
+	if cfg != nil {
+		effectiveConfig = *cfg
+	}
+	effectiveConfig.LogLevel = level.String()
+	cfg = &effectiveConfig
+
 	agentCmdLine := c.String("cmd")
 	agentCmd := ui.ParseCmdLine(agentCmdLine)
 	if len(agentCmd) == 0 {
@@ -246,16 +298,20 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 	model.SetAgentCmdLine(agentCmdLine)
 	model.SetServerName(serverName)
 
-	configPath := c.String("config")
 	model.SetConfigPath(configPath)
-	if configPath != "" {
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-		} else if cfg != nil {
-			model.SetConfigConnections(cfg)
-		}
+	if configErr == nil {
+		model.SetConfigConnections(cfg)
 	}
+	model.SetLogLevel(level.String())
+	webOptions, err := resolveWebOptions(c, cfg, serverName)
+	if err != nil {
+		return err
+	}
+	if webOptions.lbEnabled() && configErr != nil {
+		return fmt.Errorf("reverse LB configuration: %w", configErr)
+	}
+	startupCtx, cancelStartup := context.WithCancel(ctx)
+	defer cancelStartup()
 
 	var input io.Reader
 	if !detachedOwner {
@@ -263,7 +319,13 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 	}
 	inputMux := ui.NewInputMux(input)
 	model.SetInputMux(inputMux)
-	owner, err := localserver.ListenWithSettings(socketPath, serverName, inputMux, serverSettings(c, agentCmdLine))
+	settings := serverSettings(c, agentCmdLine)
+	settings.WS = webOptions.config.Address
+	settings.TokenSet = webOptions.token != ""
+	if webOptions.lbEnabled() {
+		settings.ReverseLB = &localserver.LBStatus{}
+	}
+	owner, err := localserver.ListenWithSettings(socketPath, serverName, inputMux, settings)
 	if err != nil {
 		return err
 	}
@@ -335,18 +397,43 @@ func runOwner(ctx context.Context, c *cli.Command, serverName, socketPath string
 		if action == "stop" && p != nil {
 			log.Printf("owner stop requested: server=%q pid=%d source=local-control", serverName, os.Getpid())
 			trace.Record("owner.stop-request source=local-control")
+			cancelStartup()
 			go p.Kill()
 		}
 	})
 
-	wsAddr := c.String("ws")
-	if wsAddr != "" {
-		wst, err := ui.StartWSTransport(wsAddr, c.String("token"), model)
+	if webOptions.config.Address != "" || webOptions.config.ReverseLB != nil || cfg != nil && cfg.Web != nil {
+		model.SetWebConfig(&webOptions.config)
+	}
+	if wsAddr := webOptions.config.Address; wsAddr != "" {
+		wst, err := ui.StartWSTransport(wsAddr, webOptions.token, model)
 		if err != nil {
 			return fmt.Errorf("ws transport: %w", err)
 		}
-		_ = wst
-		fmt.Fprintf(os.Stderr, "xterm.js UI on http://%s/\n", wsAddr)
+		defer wst.Close()
+		if webOptions.lbEnabled() {
+			data, err := reverseLBTunnelData(wst.Addr().String(), webOptions)
+			if err != nil {
+				return err
+			}
+			lb, err := tunnel.NewMuxTunnelClient(webOptions.config.ReverseLB.APIEndpoint, data)
+			if err != nil {
+				return fmt.Errorf("reverse LB client: %w", err)
+			}
+			defer lb.Close()
+			waitCtx, stopSignals := signal.NotifyContext(startupCtx, syscall.SIGINT, syscall.SIGTERM)
+			ready, err := waitReverseLBReady(waitCtx, lb)
+			stopSignals()
+			if err != nil {
+				return err
+			}
+			if err := persistWebConfig(configPath, cfg, webOptions.config, serverName); err != nil {
+				return err
+			}
+			owner.SetLBStatus(ready)
+			log.Printf("reverse LB ready: frontend=%q port=%d publication=%q", ready.FrontendAddress, ready.FrontendPort, ready.PublicationMode)
+		}
+		fmt.Fprintf(os.Stderr, "xterm.js UI on http://%s/\n", wst.Addr())
 	}
 
 	err = runOwnerProgram(p, serverName, trace)
@@ -424,6 +511,15 @@ func formatSettings(settings localserver.ServerSettings) string {
 	}
 	if settings.TokenSet {
 		parts = append(parts, "token=set")
+	}
+	if lb := settings.ReverseLB; lb != nil {
+		if !lb.Ready {
+			parts = append(parts, "lb=connecting")
+		} else if lb.FrontendPort > 0 {
+			parts = append(parts, fmt.Sprintf("lb-port=%d", lb.FrontendPort))
+		} else {
+			parts = append(parts, "lb=bindings-only")
+		}
 	}
 	if settings.SSH != "" {
 		parts = append(parts, "ssh="+settings.SSH)

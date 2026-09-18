@@ -223,6 +223,9 @@ func ServerStatus(path, server string) (*ServerHello, error) {
 		return nil, err
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		return nil, err
+	}
 	return clientHandshake(conn, server, "status", 0, 0)
 }
 
@@ -375,7 +378,7 @@ func (o *Owner) handle(conn net.Conn) {
 	if json.Unmarshal(body, &hello) != nil || hello.Protocol != Protocol || hello.Version != Version {
 		return
 	}
-	sh, _ := json.Marshal(ServerHello{Protocol: Protocol, Version: Version, Server: o.server, ServerPID: os.Getpid(), Settings: o.settings})
+	sh, _ := json.Marshal(ServerHello{Protocol: Protocol, Version: Version, Server: o.server, ServerPID: os.Getpid(), Settings: o.settingsSnapshot()})
 	if WriteFrame(conn, FrameServerHello, sh) != nil {
 		return
 	}

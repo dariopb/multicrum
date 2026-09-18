@@ -3,6 +3,9 @@ package transport
 import (
 	"embed"
 	"encoding/json"
+	"errors"
+	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -118,11 +121,12 @@ func (c *wsClient) sendSnapshot(sessionID int) {
 //
 //	0x01 + JSON ControlMsg
 type WSTransport struct {
-	mu      sync.Mutex
-	clients []*wsClient
-	echo    *echo.Echo
-	server  *http.Server
-	token   string
+	mu       sync.Mutex
+	clients  []*wsClient
+	echo     *echo.Echo
+	server   *http.Server
+	listener net.Listener
+	token    string
 
 	// Callbacks wired by the UI layer.
 	OnInput          func(sessionID int, data []byte) // keystroke from browser
@@ -148,9 +152,21 @@ func NewWSTransport(addr, token string) (*WSTransport, error) {
 	e.GET("/static/xterm/:name", t.serveXTermAsset)
 	e.GET("/", t.serveIndex)
 	t.server = &http.Server{Addr: addr, Handler: e}
-	go func() { _ = t.server.ListenAndServe() }()
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	t.listener = listener
+	go func() {
+		if err := t.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("web server failed: %v", err)
+		}
+	}()
 	return t, nil
 }
+
+// Addr returns the bound web address, including an automatically allocated port.
+func (t *WSTransport) Addr() net.Addr { return t.listener.Addr() }
 
 // SendPTY broadcasts raw PTY output for sessionID to all clients watching it.
 func (t *WSTransport) SendPTY(sessionID int, data []byte) {
@@ -273,7 +289,16 @@ func (t *WSTransport) handleWS(ctx echo.Context) error {
 	}
 }
 
-func (t *WSTransport) Close() error { return t.server.Close() }
+func (t *WSTransport) Close() error {
+	err := t.server.Close()
+	// Close can race the Serve goroutine before http.Server tracks the listener.
+	if t.listener != nil {
+		if closeErr := t.listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			err = errors.Join(err, closeErr)
+		}
+	}
+	return err
+}
 
 func (t *WSTransport) serveFont(c echo.Context) error {
 	name := c.Param("name")

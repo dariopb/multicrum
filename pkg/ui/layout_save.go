@@ -49,6 +49,7 @@ func (s *state) saveLayout() {
 	spinnerAnimation := s.agentSpinnerEnabled
 	copyOnRelease := s.copySelectionOnRelease
 	cfg := &config.Config{
+		LogLevel:            s.logLevel,
 		Server:              s.serverName,
 		ActiveConnection:    active,
 		ConnectionLayout:    string(s.connectionLayout),
@@ -58,6 +59,7 @@ func (s *state) saveLayout() {
 			SpinnerStyle:     s.agentSpinnerStyle,
 		},
 		Selection:   &config.SelectionConfig{CopyOnRelease: &copyOnRelease},
+		Web:         s.webConfig,
 		Connections: connections,
 	}
 	if err := config.Save(s.configPath, cfg); err != nil {

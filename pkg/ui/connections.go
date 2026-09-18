@@ -253,6 +253,8 @@ func (m *Model) SetConfigConnections(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
+	m.SetWebConfig(cfg.Web)
+	m.SetLogLevel(cfg.LogLevel)
 	m.s.agentSpinnerEnabled = cfg.AgentSpinnerAnimationEnabled()
 	m.s.agentSpinnerStyle = cfg.AgentSpinnerStyle()
 	m.s.agentSpinnerFrame = 0

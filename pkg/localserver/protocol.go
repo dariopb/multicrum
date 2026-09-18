@@ -28,16 +28,24 @@ type ServerHello struct {
 }
 
 type ServerSettings struct {
-	Command                  string `json:"command,omitempty"`
-	SSH                      string `json:"ssh,omitempty"`
-	SSHKey                   string `json:"sshKey,omitempty"`
-	SSHUseDefaultKeys        bool   `json:"sshUseDefaultKeys,omitempty"`
-	SSHAgent                 bool   `json:"sshAgent,omitempty"`
-	SSHKnownHosts            string `json:"sshKnownHosts,omitempty"`
-	SSHInsecureIgnoreHostKey bool   `json:"sshInsecureIgnoreHostKey,omitempty"`
-	WS                       string `json:"ws,omitempty"`
-	TokenSet                 bool   `json:"tokenSet,omitempty"`
-	Config                   string `json:"config,omitempty"`
+	Command                  string    `json:"command,omitempty"`
+	SSH                      string    `json:"ssh,omitempty"`
+	SSHKey                   string    `json:"sshKey,omitempty"`
+	SSHUseDefaultKeys        bool      `json:"sshUseDefaultKeys,omitempty"`
+	SSHAgent                 bool      `json:"sshAgent,omitempty"`
+	SSHKnownHosts            string    `json:"sshKnownHosts,omitempty"`
+	SSHInsecureIgnoreHostKey bool      `json:"sshInsecureIgnoreHostKey,omitempty"`
+	WS                       string    `json:"ws,omitempty"`
+	TokenSet                 bool      `json:"tokenSet,omitempty"`
+	Config                   string    `json:"config,omitempty"`
+	ReverseLB                *LBStatus `json:"reverseLB,omitempty"`
+}
+
+type LBStatus struct {
+	Ready           bool   `json:"ready"`
+	FrontendPort    int    `json:"frontendPort,omitempty"`
+	FrontendAddress string `json:"frontendAddress,omitempty"`
+	PublicationMode string `json:"publicationMode,omitempty"`
 }
 
 type Resize struct {

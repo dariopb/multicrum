@@ -56,7 +56,8 @@ return owner.Attach(os.Stdin, os.Stdout)
 
 ## Build
 
-Go is expected to be available in `PATH`.
+Go 1.26 or newer is required (including by the current goreverselb dependency)
+and is expected to be available in `PATH`.
 
 ```bash
 go build -v ./cmd/multicrum/
@@ -168,11 +169,128 @@ last five seconds; check the system journal when the log ends without an
 `owner stopped` entry. These diagnostics require a newly started owner using
 the updated binary.
 
+## Reverse load balancer
+
+The browser endpoint can be published through
+[goreverselb](https://github.com/dariopb/goreverselb), using its
+`NewMuxTunnelClient` directly, as in pinger. The API endpoint is a **TLS tunnel
+address (`host:port`), not an HTTP URL**. HTTP and WebSocket traffic share the
+outbound tunnel to multicrum's local web listener.
+
+Set `MULTICRUM_LB_TOKEN` to the LB registration token and
+`MULTICRUM_WEB_TOKEN` to a separate browser authentication token, then start a
+new owner:
+
+```bash
+./multicrum --server work --config work.yaml \
+  --ws 127.0.0.1:9998 \
+  --lb-api ingress.example.com:9999 \
+  --lb-service multicrum-myhost-work
+```
+
+The public frontend port defaults to automatic allocation (`--lb-port auto`
+or `0`). The owner uses goreverselb's `WaitReady` to wait for an accepted
+registration and obtain the confirmed frontend port/address. Only then does
+multicrum save the requested LB settings and web listen address to YAML,
+preserving existing layout and session settings. The configured `auto`/fixed
+port remains unchanged; the assigned port is reported separately.
+Startup reloads settings; explicit flags override environment
+variables, which override saved values.
+An empty API endpoint disables LB integration (`--lb-api ""` overrides YAML).
+The LB is only started when the web endpoint is enabled; `--ws ""` disables
+both. Restart an existing owner to apply startup changes.
+
+When starting a new owner, the launching terminal waits for registration,
+prints the assigned frontend address/port, and prompts for a key before
+attaching the TUI. **Only that terminal pauses**: the owner, sessions, and web
+UI run once registration succeeds. The keypress is consumed, not sent to the
+session. Existing-owner attaches do not pause; noninteractive stdin also skips
+the keypress without consuming input. Ctrl+C cancels this attach attempt,
+not the owner; use `multicrum stop --server NAME` to stop the owner as well.
+Bindings-only publication is reported explicitly as having no dedicated port.
+`status`/`list` show the startup-confirmed port (not continuous tunnel health).
+
+Example saved settings:
+
+```yaml
+logLevel: info
+web:
+  address: 127.0.0.1:9998
+  tokenRequired: true
+  reverseLB:
+    apiEndpoint: ingress.example.com:9999
+    frontendPort: 0
+    serviceName: multicrum-myhost-work
+```
+
+Tokens are **never saved to YAML**. Restart with the same environment variables
+or `--token` / `--lb-token`. A saved authenticated web endpoint requires its
+token on restart. The LB token authenticates registration, not browser users.
+Keep service names unique to avoid load balancing between separate owners.
+
+`--lb-instance-name` (alias `--lb-instance`, environment
+`MULTICRUM_LB_INSTANCE_NAME`) is persisted as `web.reverseLB.instanceName`.
+Multicrum passes `serviceName:instanceName` to the upstream client, just as
+goreverselb's CLI does. Leave it empty to register without an instance.
+
+`--lb-wrap-tls` enables public HTTPS termination at the LB and is persisted as
+`web.reverseLB.wrapTLS: true`. It defaults to false; `--lb-wrap-tls=false`
+overrides a saved true value. For DNS-based HTTPS, goreverselb selects the
+backend by SNI: use `--lb-service multicrum-myhost-work
+--lb-instance-name ingress.example.com`, matching the browser hostname.
+Use a bare service name when specifying the instance separately. Existing
+`service:instance` names remain supported when the separate instance is empty.
+The public certificate is supplied by the LB.
+
+`--lb-wrap-ssh` passes SSH wrapping directly to the LB and is persisted as
+`web.reverseLB.wrapSSH: true`. It defaults to false; `--lb-wrap-ssh=false`
+overrides a saved true value. An SSH-wrapped frontend requires SSH access
+rather than a direct browser HTTP connection.
+
+Use the application-wide `--log-level debug` (alias `--loglevel`, environment
+`MULTICRUM_LOG_LEVEL=debug`) for verbose diagnostics. Logging is initialized
+before command execution and owner startup, including when web/LB is disabled.
+It also sets the upstream client's shared Logrus level. The default is `info`;
+the setting is saved as top-level `logLevel` and retained by layout saves.
+Use `--log-level info` to turn debug logging back off.
+The old `--lb-log-level` alias, `MULTICRUM_LB_LOG_LEVEL` fallback environment
+variable, and `web.reverseLB.logLevel` YAML fallback remain accepted.
+The top-level setting takes precedence over the legacy YAML setting.
+
+Owner debug output goes to `<server>.log`, including an
+`application debug logging enabled` message at startup.
+**Attaching does not reconfigure an existing owner.** Restart that owner to
+change its logging; changing flags on an attach client only affects that client.
+Existing lifecycle/diagnostic messages remain available at all log levels.
+
+The library constructor remains asynchronous; multicrum now waits on its
+readiness API rather than treating constructor success as registration.
+Initial network/authentication failures are logged and retried, with startup
+waiting until registration succeeds or the owner is stopped. Stopping an
+owner during this wait cancels it and does not save unconfirmed settings.
+After startup, reconnection remains the library's responsibility.
+Owner shutdown closes the library client. The legacy constructor still skips
+tunnel certificate verification; use a trusted LB.
+
 ## CLI flags
+
+Every public configuration option has an environment equivalent, shown in
+`--help` (or `call --help`). Names use `MULTICRUM_` plus the canonical flag
+name in uppercase with hyphens replaced by underscores, such as
+`MULTICRUM_CONFIG`, `MULTICRUM_WS`, `MULTICRUM_LB_API_ENDPOINT`,
+`MULTICRUM_LB_FRONTEND_PORT`, `MULTICRUM_LB_SERVICE_NAME`, and
+`MULTICRUM_LB_WRAP_TLS`. The existing `--token` variable remains
+`MULTICRUM_WEB_TOKEN`. The `call` options use `MULTICRUM_CALL_METHOD`,
+`MULTICRUM_CALL_PARAMS`, and `MULTICRUM_CALL_TIMEOUT`.
+Boolean variables accept `true`/`false`; timeouts accept durations such as
+`30s`. Explicit CLI values take precedence over environment values, then
+YAML where supported, then defaults. Internal daemon flags have no environment
+equivalents.
 
 | Flag | Purpose |
 |---|---|
 | `--cmd` | Local command, or remote command when `--ssh` is set. Default: `bash`. |
+| `--log-level`, `--loglevel` | Application and library logging level, e.g. `info`, `debug`, or `trace`. Default: `info`; persisted as top-level `logLevel`. |
 | `--server`, `--srv`, `-S` | Named local long-running server to attach/create. Default: `default`. |
 | `list`, `ls` | List local servers, status, PID, socket path, and startup settings. |
 | `status` | Show status and startup settings for one server. |
@@ -184,8 +302,15 @@ the updated binary.
 | `--ssh-agent` | Use `SSH_AUTH_SOCK` when no explicit password/key is supplied. Default: true. |
 | `--ssh-known-hosts` | Override known_hosts path. |
 | `--ssh-insecure-ignore-host-key` | Disable host key verification. Unsafe; testing only. |
-| `--ws` | Start WebSocket/xterm.js UI on the given address, e.g. `:9999`. |
-| `--token` | Optional token for `/ws?token=...`. |
+| `--ws` | WebSocket/xterm.js listen address, overriding YAML; e.g. `:9999`, or `127.0.0.1:0` for an automatic local port. Empty disables web. |
+| `--token` | Optional token for `/ws?token=...`; also reads `MULTICRUM_WEB_TOKEN`. Never saved. |
+| `--lb-api-endpoint`, `--lb-api` | goreverselb TLS tunnel address (`host:port`). Empty disables the integration. |
+| `--lb-frontend-port`, `--lb-port` | Public port; default `auto` (`0`). The requested setting is saved. |
+| `--lb-service-name`, `--lb-service` | Unique service name; default `multicrum-HOST-SERVER`. |
+| `--lb-instance-name`, `--lb-instance` | Optional instance name; persisted as `instanceName`. |
+| `--lb-wrap-tls` | Enable TLS termination on the LB frontend. Default: false; persisted as `wrapTLS`. |
+| `--lb-wrap-ssh` | Enable SSH wrapping on the LB frontend. Default: false; persisted as `wrapSSH`. |
+| `--lb-token` | Registration token, also read from `MULTICRUM_LB_TOKEN`; never saved to YAML. |
 | `--control-token` | Full-control automation token. When omitted, the owner creates a random mode-0600 token file beside the control socket. |
 
 ## Automation control

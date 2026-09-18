@@ -237,6 +237,7 @@ func waitForDaemonCondition(t *testing.T, condition func() bool) {
 }
 
 func TestOwnerSignalLogging(t *testing.T) {
+	clearCLIEnvironment(t)
 	t.Setenv("TMPDIR", t.TempDir())
 	const server = "signal"
 	socket, err := localserver.SocketPath(server)
@@ -253,7 +254,7 @@ func TestOwnerSignalLogging(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer output.Close()
-	cmd := exec.Command(executable, "--owner", "--server", server, "--config", "", "--cmd", "sh")
+	cmd := exec.Command(executable, "--owner", "--server", server, "--config", "", "--cmd", "sh", "--log-level", "debug")
 	cmd.Env = append(os.Environ(), "MULTICRUM_TEST_DAEMON=1")
 	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Start(); err != nil {
@@ -295,6 +296,9 @@ func TestOwnerSignalLogging(t *testing.T) {
 		fmt.Sprintf("pid=%d", cmd.Process.Pid),
 		"signal=terminated",
 		"owner stopped",
+		"application debug logging enabled",
+		"level=debug",
+		"owner startup:",
 	} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("owner log missing %q:\n%s", want, data)

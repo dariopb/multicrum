@@ -165,7 +165,9 @@ type state struct {
 	sshClient              *ssh_client.Client // non-nil starts SSH-backed sessions
 	onMetaChange           func()             // called when sessions are added/removed/focused
 	wsTransport            *transport.WSTransport
-	configPath             string           // path used by save/load layout shortcut
+	configPath             string // path used by save/load layout shortcut
+	webConfig              *config.WebConfig
+	logLevel               string
 	initialCfg             []startupSession // sessions to spawn on Init (instead of agentCmd)
 	statusMsg              string           // transient status line (e.g. config save result)
 	clipboardWrite         func(string)
@@ -351,6 +353,15 @@ func (m *Model) SetDetachHandler(handler func()) {
 // with an error status.
 func (m *Model) SetConfigPath(path string) {
 	m.s.configPath = path
+}
+
+// SetWebConfig preserves startup settings when the UI saves a layout.
+func (m *Model) SetWebConfig(cfg *config.WebConfig) {
+	m.s.webConfig = cfg
+}
+
+func (m *Model) SetLogLevel(level string) {
+	m.s.logLevel = level
 }
 
 // SetConnectionLayout selects the local TUI connection switcher placement.

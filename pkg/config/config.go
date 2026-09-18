@@ -46,13 +46,31 @@ type SelectionConfig struct {
 	CopyOnRelease *bool `yaml:"copyOnRelease,omitempty" json:"copyOnRelease,omitempty"`
 }
 
+type WebConfig struct {
+	Address       string           `yaml:"address,omitempty"`
+	TokenRequired bool             `yaml:"tokenRequired,omitempty"`
+	ReverseLB     *ReverseLBConfig `yaml:"reverseLB,omitempty"`
+}
+
+type ReverseLBConfig struct {
+	APIEndpoint  string `yaml:"apiEndpoint"`
+	FrontendPort int    `yaml:"frontendPort"`
+	ServiceName  string `yaml:"serviceName"`
+	InstanceName string `yaml:"instanceName,omitempty"`
+	WrapTLS      bool   `yaml:"wrapTLS,omitempty"`
+	WrapSSH      bool   `yaml:"wrapSSH,omitempty"`
+	LogLevel     string `yaml:"logLevel,omitempty"`
+}
+
 type Config struct {
+	LogLevel            string                `yaml:"logLevel,omitempty"`
 	Server              string                `yaml:"server,omitempty"`
 	ActiveConnection    string                `yaml:"activeConnection,omitempty"`
 	ConnectionLayout    string                `yaml:"connectionLayout,omitempty" json:"connectionLayout,omitempty"`
 	ConnectionRailWidth int                   `yaml:"connectionRailWidth,omitempty" json:"connectionRailWidth,omitempty"`
 	AgentDetection      *AgentDetectionConfig `yaml:"agentDetection,omitempty" json:"agentDetection,omitempty"`
 	Selection           *SelectionConfig      `yaml:"selection,omitempty" json:"selection,omitempty"`
+	Web                 *WebConfig            `yaml:"web,omitempty"`
 	Connections         []ConnectionEntry     `yaml:"connections,omitempty"`
 	Sessions            []SessionEntry        `yaml:"sessions,omitempty"`
 }

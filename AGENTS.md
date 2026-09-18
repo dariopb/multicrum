@@ -173,6 +173,33 @@ Metadata broadcasts are required after rename so both TUI and browser labels sta
 
 ## WebSocket Protocol
 
+### Optional reverse load balancer
+
+`cmd/multicrum/reverse_lb.go` resolves `--ws` and `--lb-*` against
+`config.Config.Web`. Explicit flags override YAML; an empty API endpoint or
+disabled web listener prevents LB startup. Use goreverselb's
+`NewMuxTunnelClient` directly, not a custom tunnel implementation.
+Wait for `MuxTunnelClient.WaitReady(ctx)` before saving requested settings or
+publishing the assigned frontend port; `FrontendPort()` alone is not a readiness
+signal. The launching attach client retrieves the initial ready snapshot through
+local server status, prints it, and waits for a key before attaching. The owner
+and web sessions do not wait for this key. Noninteractive and existing-owner
+attaches do not pause. Bindings-only readiness has no dedicated frontend port.
+Cancel readiness on an owner stop; the owner closes the client on exit.
+The updated client uses `net.JoinHostPort`, so pass unbracketed IPv6 backend hosts.
+`state.webConfig` must survive ordinary
+layout/settings saves. Tokens come from runtime flags/environment, never YAML;
+`web.tokenRequired` prevents unauthenticated restarts of a protected endpoint.
+Public CLI options have `MULTICRUM_*` environment sources; explicit CLI values
+override environment, then YAML/defaults. Keep `IsSet` checks when resolving
+persisted options so environment booleans and CLI false overrides work.
+`--log-level` is application-wide and configures the shared Logrus logger before
+command execution and owner initialization, independently of LB startup.
+Preserve top-level `logLevel` during layout saves; the old LB-specific flag,
+environment, and YAML level remain compatibility fallbacks. `--lb-instance-name`
+is passed as the upstream `serviceName:instanceName` pair. No custom tunnel
+logging or protocol implementation is needed.
+
 Every WebSocket binary message uses byte 0 as a type tag.
 
 | Direction | Tag | Payload |
