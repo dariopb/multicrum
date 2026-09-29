@@ -119,7 +119,7 @@ var (
 				Background(lipgloss.Color("214"))
 
 	// scrollIndicatorStyle paints the "current/total" indicator shown
-	// in the top-right of the pane while scrolled into the scrollback
+	// in the top-right tab bar while scrolled into the scrollback
 	// buffer. Bright white on the same hot-pink as the tab bar.
 	scrollIndicatorStyle = lipgloss.NewStyle().
 				Bold(true).

@@ -772,6 +772,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.WindowSizeMsg:
+		s.clearSelection()
 		s.trace.Record("resize.request source=tui old=%dx%d new=%dx%d",
 			s.width, s.height, msg.Width, msg.Height)
 		s.width = msg.Width
@@ -900,25 +901,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case connectionOutputMsg:
-		s.evaluateAgentScreen(msg.Conn, msg.Msg.Index)
-		spinnerCmd := s.startAgentSpinner()
 		connIndex := connectionIndex(s.connections, msg.Conn)
 		if connIndex < 0 {
 			msg.Conn.outputPending.Store(false)
-			return m, spinnerCmd
+			return m, nil
 		}
-		if connIndex != s.activeConn {
-			// Not visible: re-arm this connection's coalescing flag so its
-			// next output still notifies (we just don't render it).
+		if connIndex != s.activeConn || msg.Msg.Index != s.manager.FocusedIndex() {
+			// Re-arm before scanning so a redraw arriving during detection
+			// queues another notification. A connection-wide notification may
+			// include output from agents other than the first sender.
 			msg.Conn.outputPending.Store(false)
-			return m, spinnerCmd
+			s.evaluateConnectionAgentScreens(msg.Conn)
+			return m, s.startAgentSpinner()
 		}
-		if msg.Msg.Index != s.manager.FocusedIndex() {
-			// Active connection but a background session produced the output;
-			// re-arm so that session keeps notifying, but don't render it.
-			msg.Conn.outputPending.Store(false)
-			return m, spinnerCmd
-		}
+		s.evaluateAgentScreen(msg.Conn, msg.Msg.Index)
+		spinnerCmd := s.startAgentSpinner()
 		s.ensureViewport(msg.Msg.Index, s.width, s.height)
 		if cmd := s.scheduleRender(time.Now()); cmd == nil {
 			// A frame is already scheduled; leave outputPending set so every
@@ -938,6 +935,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.ensureViewport(msg.Index, s.width, s.height)
 		return m, tea.Batch(s.scheduleRender(time.Now()), spinnerCmd)
 
+	case selectionScrollMsg:
+		if msg.scroll == nil || msg.scroll != s.sel.scroll || !s.sel.active {
+			return m, nil
+		}
+		if s.mode != modeNormal || s.mouseCapture {
+			s.sel.scroll = nil
+			return m, nil
+		}
+		scroll := msg.scroll
+		if !s.scrollSelection(scroll.delta, scroll.x, scroll.y) {
+			s.sel.scroll = nil
+			return m, nil
+		}
+		return m, selectionScrollTick(scroll)
+
 	case renderTickMsg:
 		s.renderPending = false
 		if msg.at.IsZero() {
@@ -950,8 +962,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// connection then joins the same frame window, so re-arming only the
 		// connection active at tick time can leave another connection stuck
 		// pending forever. Re-arm every connection covered by the shared tick.
+		focusedAgentEvaluated := false
 		for _, conn := range s.connections {
-			conn.outputPending.Store(false)
+			if conn.outputPending.Swap(false) {
+				s.evaluateConnectionAgentScreens(conn)
+				if conn == s.activeConnection() {
+					focusedAgentEvaluated = true
+				}
+			}
 		}
 		idx := s.manager.FocusedIndex()
 		s.ensureViewport(idx, s.width, s.height)
@@ -969,12 +987,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					vp.GotoBottom()
 					s.clearSelection()
 					s.clearSearch()
+				} else if s.sel.active || s.sel.hasRange {
+					// Keep selection coordinates stable while output arrives,
+					// including when the drag reaches the scrollback tail.
 				} else if s.scrollbackMode[idx] && !alt {
 					// User is browsing scrollback: keep the full content so
 					// YOffset stays meaningful relative to it.
 					wasAtBottom := vp.AtBottom()
 					s.setScrollbackContent(idx, vp, sess.Screen().RenderWithScrollback())
-					if wasAtBottom {
+					if wasAtBottom && s.mode != modeScrollSearch {
 						// Caught back up to live tail — drop the heavy
 						// scrollback content and resume cheap rendering.
 						s.scrollbackMode[idx] = false
@@ -991,7 +1012,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					anchorViewportToCursor(vp, sess)
 				}
 				s.viewports[idx] = vp
-				s.evaluateAgentSession(sess)
+				if !focusedAgentEvaluated {
+					s.evaluateAgentSession(sess)
+				}
 				break
 			}
 		}
@@ -1077,8 +1100,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.selectFilter, s.selectFilterCursor = insertAt(s.selectFilter, s.selectFilterCursor, text)
 			s.selectCursor = 0
 			return m, nil
+		case modeScrollSearch:
+			s.search.input += text
+			return m, nil
 		case modeNormal:
-			// fall through to PTY forwarding below
+			if s.sel.active || s.sel.hasRange {
+				s.clearSelection()
+				s.bottomFocused()
+			}
 		default:
 			return m, nil
 		}
@@ -1172,14 +1201,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			clampY = geom.Pane.Height - 1
 		}
 		switch ev.Button {
-		case tea.MouseWheelUp:
-			if inPane {
-				s.scrollFocused(-3)
+		case tea.MouseWheelUp, tea.MouseWheelDown:
+			delta := 3
+			if ev.Button == tea.MouseWheelUp {
+				delta = -3
 			}
-			return m, nil
-		case tea.MouseWheelDown:
-			if inPane {
-				s.scrollFocused(3)
+			if s.sel.active {
+				s.scrollSelection(delta, clampX, clampY)
+			} else if inPane {
+				s.scrollFocused(delta)
 			}
 			return m, nil
 		}
@@ -1211,7 +1241,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case mouseMotion:
 			if s.sel.active {
-				s.updateSelection(clampX, clampY)
+				delta := 0
+				if ev.Y <= geom.Pane.Y {
+					delta = -1
+				} else if ev.Y >= geom.Pane.Y+geom.Pane.Height-1 {
+					delta = 1
+				}
+				return m, s.dragSelection(clampX, clampY, delta)
 			}
 		case mouseRelease:
 			if s.sel.active {
@@ -1283,6 +1319,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Any other keypress clears a stale transient status toast.
 		s.statusMsg = ""
+		if s.sel.active || s.sel.hasRange {
+			s.clearSelection()
+			s.bottomFocused()
+		}
 		if msg.Key().Code == tea.KeyEnter {
 			idx := s.manager.FocusedIndex()
 			if vp, ok := s.viewports[idx]; ok && !vp.AtBottom() {
@@ -1585,20 +1625,18 @@ func (s *state) bottomFocused() {
 	if s.scrollbackMode[idx] {
 		// Drop the heavy scrollback content now that we're back at the tail.
 		delete(s.scrollbackCache, idx)
-		vp.SoftWrap = true
-		for _, sess := range s.manager.Sessions() {
-			if sess.Index() == idx {
-				s.setLiveContent(idx, vp, sess)
-				break
-			}
-		}
 		s.scrollbackMode[idx] = false
 		s.clearSearch()
+	}
+	if sess := s.manager.Focused(); sess != nil {
+		s.setLiveContent(idx, vp, sess)
+		anchorViewportToCursor(vp, sess)
 	}
 	s.viewports[idx] = vp
 }
 
 func (s *state) refreshFocused() {
+	s.clearSelection()
 	idx := s.manager.FocusedIndex()
 	s.ensureViewport(idx, s.width, s.height)
 	// Re-push the current TUI pane size to whichever session just became
@@ -2326,7 +2364,28 @@ func (s *state) selectorPageStep() int {
 func (m Model) renderTabBar() string {
 	s := m.s
 	geom := s.geometry()
-	cols := geom.TabBar.Width
+	status := s.scrollbackStatus(geom.TabBar.Width)
+	available := geom.TabBar.Width - ansi.StringWidth(status)
+	s.sessionHitboxes = nil
+	s.hasNewSessionHitbox = false
+	bar := ""
+	if available > 0 {
+		bar = padLine(m.renderSessionTabBar(available), available)
+	}
+	// Tabs covered by the scrollback status must not remain clickable.
+	right := geom.TabBar.X + available
+	for i := range s.sessionHitboxes {
+		box := &s.sessionHitboxes[i].Bounds
+		box.Width = max(0, min(box.Width, right-box.X))
+	}
+	s.newSessionHitbox.Bounds.Width = max(0, min(s.newSessionHitbox.Bounds.Width, right-s.newSessionHitbox.Bounds.X))
+	s.hasNewSessionHitbox = s.hasNewSessionHitbox && s.newSessionHitbox.Bounds.Width > 0
+	return bar + status
+}
+
+func (m Model) renderSessionTabBar(cols int) string {
+	s := m.s
+	geom := s.geometry()
 	focused := s.manager.FocusedIndex()
 	sessions := s.manager.Sessions()
 
@@ -2525,9 +2584,6 @@ func (m Model) renderPane() string {
 			pane = s.overlaySelection(pane, paneCols, paneRows)
 		}
 		pane = s.overlaySearch(pane, paneCols, paneRows)
-		if s.scrollbackMode[idx] && !vp.AtBottom() {
-			pane = overlayScrollIndicator(pane, vp, paneCols, paneRows)
-		}
 	} else {
 		pane = blankPane(paneCols, paneRows)
 	}
@@ -2881,16 +2937,17 @@ func (m Model) renderHelpModal() string {
 	return padBox(rows, 0)
 }
 
-// overlayScrollIndicator paints a "current/total" badge into the top-right
-// of pane while the user is scrolled into the scrollback buffer. The
-// "current" line number reflects the bottom-most visible line.
-func overlayScrollIndicator(pane string, vp *viewport.Model, paneCols, paneRows int) string {
-	if paneRows <= 0 || paneCols <= 0 {
-		return pane
+// scrollbackStatus reserves the right of the tab bar for the prompt and the
+// bottom-most visible row number, independently of the connection layout.
+func (s *state) scrollbackStatus(cols int) string {
+	idx := s.manager.FocusedIndex()
+	vp, ok := s.viewports[idx]
+	if !ok || !s.scrollbackMode[idx] || (vp.AtBottom() && s.mode != modeScrollSearch) || cols <= 0 {
+		return ""
 	}
 	total := vp.TotalLineCount()
 	if total <= 0 {
-		return pane
+		return ""
 	}
 	cur := vp.YOffset() + vp.Height()
 	if cur > total {
@@ -2900,17 +2957,22 @@ func overlayScrollIndicator(pane string, vp *viewport.Model, paneCols, paneRows 
 		cur = 1
 	}
 	badge := scrollIndicatorStyle.Render(fmt.Sprintf("%d/%d", cur, total))
-	bw := ansi.StringWidth(badge)
-	if bw > paneCols {
-		return pane
+	if s.mode == modeScrollSearch {
+		prefix := "/"
+		if s.search.lineJump {
+			prefix = ":"
+		}
+		available := cols - ansi.StringWidth(badge) - 2
+		if available > 0 {
+			input := s.search.input
+			for len(input) > 0 && ansi.StringWidth(prefix+renderWithCursor(input, len([]rune(input)))) > available {
+				input = string([]rune(input)[1:])
+			}
+			prompt := prefix + renderWithCursor(input, len([]rune(input)))
+			badge = scrollIndicatorStyle.Render(ansi.Truncate(prompt, available, "")) + badge
+		}
 	}
-	lines := strings.Split(pane, "\n")
-	if len(lines) == 0 {
-		return pane
-	}
-	left := paneCols - bw
-	lines[0] = overlayLine(lines[0], badge, left, paneCols)
-	return strings.Join(lines, "\n")
+	return ansi.Truncate(badge, cols, "")
 }
 
 // overlayLine composites overlay over base at horizontal cell offset left,
@@ -3133,18 +3195,6 @@ func (m Model) renderStatusBar() string {
 	}
 	if s.mode == modeExitPrompt {
 		help := helpStyle.Render(" Session exited — choose action in modal")
-		left := status
-		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
-			left += statusBarStyle.Render(strings.Repeat(" ", pad))
-		}
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, help)
-	}
-	if s.mode == modeScrollSearch {
-		prefix := "/"
-		if s.search.lineJump {
-			prefix = ":"
-		}
-		help := helpStyle.Render(" " + prefix + renderWithCursor(s.search.input, len([]rune(s.search.input))) + "  Enter go  Esc cancel")
 		left := status
 		if pad := geom.StatusBar.Width - lipgloss.Width(left) - lipgloss.Width(help); pad > 0 {
 			left += statusBarStyle.Render(strings.Repeat(" ", pad))

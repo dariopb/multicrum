@@ -111,6 +111,7 @@ ui.Model Update loop
 - `Ctrl+PgDown`: page down through local TUI scrollback.
 - `Ctrl+Up` / `Ctrl+Down`: scroll local TUI scrollback one line.
 - `Ctrl+Home` / `Ctrl+End`: jump to top/bottom of local TUI scrollback.
+- In scrollback, `/` opens search and `:` opens a line-number prompt; `n` / `N` navigate matches. The prompt is in the terminal pane's top tab bar, immediately left of the current/total row counter, in both connection layouts. Long input keeps its typed tail visible; Enter/Esc restores the normal tab bar. Search and line jumps use the same prewrapped row cache as the displayed pane.
 - `Ctrl+Alt+Q`: owner TUI opens server quit confirmation; attached clients use `Ctrl+Alt+Q` to detach without killing sessions. Plain `Ctrl+Q` is forwarded.
 - `Ctrl+Alt+Z`: force the focused session PTY to the active TUI pane dimensions.
 - Clicking the left-rail `Multicrum` title opens global actions. `Detach`
@@ -118,7 +119,7 @@ ui.Model Update loop
   the owner/server-wide confirmation.
 - Right-click a session tab or connection tab to open a modal-styled context menu in full-screen coordinates at the pointer. Its focus, rename, move, and remove items must route through `handleSelectKey` / `handleConnectionsKey` with synthetic `Enter`, `R`, `M`, or `Delete` keys after selecting the clicked target; do not add a duplicate action implementation. `View()` uses `AllMotion` while `modeContextMenu` is open so the item beneath the pointer is highlighted with `selectorActiveStyle`; restore select mode by closing the menu. Right-clicking a second tab while a menu is open must replace it with the new tab's menu, not merely dismiss it.
 - Left-click `[+] Ctrl+Alt+T` in the tab bar or the Help label in the status bar to dispatch the existing new-session or help shortcut. Their bounds are recorded as `newSessionHitbox` and `helpHitbox` while rendering; do not create duplicate action paths.
-- In select mouse mode, left-drag performs normal linear selection. The persisted `selection.copyOnRelease` setting defaults to true; when enabled, releasing the left button copies asynchronously, clears the highlight, and returns to the live tail. When disabled, release retains the selection for right-click copying. Holding `Ctrl+Alt` when the left-button press is received starts rectangular/block selection: every selected display row contributes the same inclusive column range, short rows are padded with blank cells, and rows remain newline-separated even across soft wraps.
+- In select mouse mode, left-drag performs normal linear selection. Dragging above/below the pane scrolls repeatedly and extends the selection through newly revealed rows; wheel scrolling during a drag also extends it. Selection keeps a stable snapshot while child output arrives. The persisted `selection.copyOnRelease` setting defaults to true; when enabled, releasing the left button copies asynchronously, clears the highlight, and returns to the live tail. When disabled, release retains the selection for right-click copying. Holding `Ctrl+Alt` when the left-button press is received starts rectangular/block selection: every selected display row contributes the same inclusive column range, short rows are highlighted with blank padding, and copied rows have trailing spaces trimmed while remaining newline-separated even across soft wraps. Linear copies retain their existing whitespace behavior.
 
 Global shortcuts (`Ctrl+Alt+T`, `Ctrl+Alt+Left/Right`, `Ctrl+Alt+[`/`]`, `Ctrl+Alt+Q`) are centralized in `state.handleGlobalShortcut` and run before modal-specific handlers. Do not duplicate these bindings inside individual modal handlers; that caused regressions where exited-session dialogs blocked connection/session switching or quit.
 
@@ -134,6 +135,8 @@ Shortcut keys are consumed before the default key forwarding path. Do not add a 
 - `Alt+P`: save layout.
 - `Alt+M`: toggle web mouse mode.
 - `Alt+,`: settings.
+- In select mouse mode, xterm owns drag-edge scrolling and Ctrl+Alt rectangular selection; wheel scrolling during a drag extends its endpoint. Block copies trim trailing spaces without dropping line breaks; ordinary copies are unchanged. Copy-on-release and right-click copy return to the live tail.
+- `Ctrl+Y` / `Ctrl+PgUp`, `Ctrl+PgDown`, `Ctrl+Up/Down`, and `Ctrl+Home/End` navigate browser scrollback. While scrolled up, `/`, `:`, and `n` / `N` mirror TUI search/line navigation. Search input appears in the right-hand terminal top bar directly left of the current/total row counter; Enter/Esc closes it. These keys must never reach the PTY while consumed locally.
 - `Ctrl+Alt+Z`: refit the browser terminal and force-send its current dimensions for the focused session.
 - Web settings are split into `Browser` (per-browser appearance stored in local storage) and `Settings` (persisted server settings shared with the TUI). The latter exposes agent spinner style/animation and copy-on-selection-release.
 - `Ctrl+Alt+Left` / `Ctrl+Alt+Right`: previous/next session.
@@ -143,6 +146,8 @@ Shortcut keys are consumed before the default key forwarding path. Do not add a 
 - `Ctrl+Alt+C`: new connection prompt.
 
 Web shortcut handling uses both xterm's custom key handler and a capture-phase `window.keydown` listener with `preventDefault()`/`stopPropagation()` where needed.
+
+The pinned xterm selection service's `shouldForceSelection` and `shouldColumnSelect` gates are adapted for select mode. Keep its native drag timer, anchor, column highlighting, and scrollback-trim tracking; do not synthesize Shift-clicks, which can extend an old selection instead of starting a new one. Session/reconnect resets must clear browser search and selection state with the queued terminal decoder.
 
 ## Long-running server and connections
 
@@ -222,9 +227,12 @@ Every WebSocket binary message uses byte 0 as a type tag.
 
 ## Rendering Performance (hot path)
 
+Connection agent summaries count all live, detected agent sessions, not just agents matching the displayed state. Aggregate priority is `blocked > working > unknown > idle`; `done` maps to `idle` only in the connection summary, preserving individual session completion markers. Both the TUI and browser rails use this shared summary. Narrow TUI agent rows must preserve the count suffix when truncating the provider label.
+
 Bubble Tea calls `Model.View()` **after every message** (see bubbletea `eventLoop` → `p.render`), then flushes to the terminal on a separate 60fps ticker. So the cost that matters for perceived lag is not the terminal write but how often/expensively `View()` rebuilds the frame string when a child spews output. Two mechanisms keep this bounded — do not remove either:
 
 - **Output-notification coalescing.** The session read loop applies bytes to the `VTScreen` synchronously, then notifies the program. Each connection carries an `outputPending atomic.Bool`: the read-loop callback only enqueues a `connectionOutputMsg` when it was previously clear (`Swap(true)` was false), so a burst of small child writes collapses into a single Bubble Tea message. The flag is **re-armed in `renderTickMsg`** (after the frame is drawn), not in the output handler, so every write during a frame window coalesces into one notification and output tops out at ~60 `View()` rebuilds/sec regardless of how chatty the child is. Background/non-focused output re-arms immediately in the handler (it isn't rendered) so those connections keep notifying. Nothing is lost by dropping intermediate notifications because the bytes are already in the `VTScreen`.
+- **Agent detection across coalesced output.** Each consumed connection-wide notification can cover redraws from several sessions. Background handlers and pending connections at `renderTickMsg` must re-evaluate all their agent screens, not only the first sender or focused session. Re-arm before evaluating screens so output arriving during detection queues another notification; otherwise a final blocked-to-working redraw can leave the rail and browser metadata stuck until another write.
 - **Pane render memoization.** `renderPaneContent` is a pure function of `(viewport content, YOffset, paneCols, paneRows, wrap)`; `state.paneCache` memoizes its output keyed on exactly those inputs. Between frames the same pane is rebuilt on every redundant `View()` with identical inputs, so the cache turns an ~87µs split/pad pass into a cheap key comparison (measured `View()` ~126µs → ~43µs). The pure worker is `renderPaneContentUncached`; the cache needs no manual invalidation because any change to the inputs misses the key. Overlays (selection/search/scroll indicator) are applied by `renderPane` *after* the cached content, so they are never stale.
 
 Benchmarks live in `pkg/ui/bench_render_test.go` (`BenchmarkView`, `BenchmarkScreenRender`, `BenchmarkRenderPaneContent[Cached]`); the cache-correctness guard is `TestRenderPaneContentCacheMatchesUncached`.
@@ -261,7 +269,7 @@ When adding new code paths that mutate the session set (focus change, new sessio
 
 ## VTScreen Rendering and Replay
 
-Screen-based agent detection joins `VisibleLines()` rows only where `SoftWrap` is set, so footer words split by a narrow terminal remain recognizable. Preserve hard line breaks and existing provider-specific confidence markers; do not concatenate arbitrary screen text or use stale raw history for state detection. Copilot footer controls may span whitespace-separated rows.
+Screen-based agent detection joins `VisibleLines()` rows only where `SoftWrap` is set, so footer words split by a narrow terminal remain recognizable. Preserve hard line breaks and existing provider-specific confidence markers; do not concatenate arbitrary screen text or use stale raw history for state detection. Copilot footer controls may span whitespace-separated rows. Its working state requires a leading activity marker (`●`, `◉`, `◎`, or `○`) plus `esc interrupt` in the footer; the label is arbitrary current-task text, not necessarily the word `Working`.
 
 `VTScreen` maintains separate representations:
 

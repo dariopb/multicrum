@@ -31,8 +31,8 @@ func TestAgentStatusFollowsStableSessionAcrossReindex(t *testing.T) {
 
 	setTestAgentStatus(t, m.s, first, agentdetect.StateWorking)
 	setTestAgentStatus(t, m.s, second, agentdetect.StateBlocked)
-	if got := m.s.connectionAgentLabel(m.s.connections[0]); got != "  blocked Copilot" {
-		t.Fatalf("aggregate label = %q, want %q", got, "  blocked Copilot")
+	if got := m.s.connectionAgentLabel(m.s.connections[0]); got != "  blocked Copilot (2)" {
+		t.Fatalf("aggregate label = %q, want %q", got, "  blocked Copilot (2)")
 	}
 
 	manager.Move(0, 1)
@@ -42,6 +42,131 @@ func TestAgentStatusFollowsStableSessionAcrossReindex(t *testing.T) {
 	manager.Kill(0)
 	if got := m.s.sessionAgentLabel(first); got != "⠋ working Copilot" {
 		t.Fatalf("reindexed session label = %q, want %q", got, "⠋ working Copilot")
+	}
+}
+
+func newAgentSummaryModel(t *testing.T) (*Model, []*session.Session) {
+	t.Helper()
+	m := NewModel([]string{"sh"}, 100, 30)
+	manager := session.NewManager(80, 24, nil, nil)
+	t.Cleanup(func() { manager.CloseAll() })
+	m.s.connections[0].manager = manager
+	m.s.syncActiveConnectionFields()
+	var sessions []*session.Session
+	for i := 0; i < 4; i++ {
+		sess, err := manager.New([]string{"sh", "-c", "sleep 60"})
+		if err != nil {
+			t.Fatalf("start session: %v", err)
+		}
+		sessions = append(sessions, sess)
+	}
+	return m, sessions
+}
+
+func TestConnectionAgentSummaryCountsAllAgentsByActivity(t *testing.T) {
+	m, sessions := newAgentSummaryModel(t)
+	tests := []struct {
+		name   string
+		states []agentdetect.State
+		want   agentdetect.State
+	}{
+		{"blocked wins", []agentdetect.State{agentdetect.StateWorking, agentdetect.StateBlocked, agentdetect.StateIdle}, agentdetect.StateBlocked},
+		{"done cannot hide work", []agentdetect.State{agentdetect.StateDone, agentdetect.StateWorking, agentdetect.StateIdle}, agentdetect.StateWorking},
+		{"work before done", []agentdetect.State{agentdetect.StateWorking, agentdetect.StateDone, agentdetect.StateIdle}, agentdetect.StateWorking},
+		{"unknown prevents idle", []agentdetect.State{agentdetect.StateIdle, agentdetect.StateUnknown, agentdetect.StateDone}, agentdetect.StateUnknown},
+		{"blocked before unknown", []agentdetect.State{agentdetect.StateUnknown, agentdetect.StateBlocked, agentdetect.StateDone}, agentdetect.StateBlocked},
+		{"working before unknown", []agentdetect.State{agentdetect.StateUnknown, agentdetect.StateWorking, agentdetect.StateDone}, agentdetect.StateWorking},
+		{"all idle", []agentdetect.State{agentdetect.StateIdle, agentdetect.StateIdle, agentdetect.StateIdle}, agentdetect.StateIdle},
+		{"completed is idle", []agentdetect.State{agentdetect.StateDone, agentdetect.StateIdle, agentdetect.StateDone}, agentdetect.StateIdle},
+		{"all completed", []agentdetect.State{agentdetect.StateDone, agentdetect.StateDone, agentdetect.StateDone}, agentdetect.StateIdle},
+		{"one agent", []agentdetect.State{agentdetect.StateDone}, agentdetect.StateIdle},
+		{"no agents", nil, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for i, sess := range sessions {
+				id, generation, _, _ := sess.RuntimeSnapshot()
+				update := agentdetect.Update{ID: id, Generation: generation}
+				if i < len(test.states) {
+					provider := agentdetect.ProviderCopilot
+					if i == 1 {
+						provider = agentdetect.ProviderCrush
+					}
+					update.Status = &agentdetect.Status{
+						Provider: provider, State: test.states[i], Source: agentdetect.SourceNative,
+					}
+				}
+				m.s.applyAgentUpdate(update)
+			}
+			// Reordering sessions must not change the count or winning state.
+			for rotation := 0; rotation < len(sessions); rotation++ {
+				status, count, ok := m.s.connectionAgentSummary(m.s.connections[0])
+				if count != len(test.states) || status.State != test.want || ok != (count > 0) {
+					t.Fatalf("summary = %s/%d/%v, want %s/%d", status.State, count, ok, test.want, len(test.states))
+				}
+				info := m.s.connectionAgentInfo(m.s.connections[0])
+				if count == 0 {
+					if info != nil {
+						t.Fatalf("empty connection metadata = %#v", info)
+					}
+				} else if info == nil || info.State != string(test.want) || info.Count != count ||
+					info.Animate != (test.want == agentdetect.StateWorking) {
+					t.Fatalf("browser summary = %#v, want %s/%d", info, test.want, count)
+				}
+				m.s.manager.Move(0, len(sessions)-1)
+			}
+			for i, want := range test.states {
+				if want == agentdetect.StateDone {
+					if info := m.s.sessionAgentInfo(sessions[i]); info == nil || info.State != "done" {
+						t.Fatalf("summary changed individual completion marker: %#v", info)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestConnectionAgentCountTracksSessionLifecycle(t *testing.T) {
+	m, sessions := newAgentSummaryModel(t)
+	for _, sess := range sessions[:3] {
+		setTestAgentStatus(t, m.s, sess, agentdetect.StateWorking)
+	}
+	assertCount := func(want int) {
+		t.Helper()
+		_, count, ok := m.s.connectionAgentSummary(m.s.connections[0])
+		if count != want || ok != (want > 0) {
+			t.Fatalf("summary count = %d/%v, want %d", count, ok, want)
+		}
+	}
+	assertCount(3)
+	id, generation, _, _ := sessions[0].RuntimeSnapshot()
+	m.s.applyAgentUpdate(agentdetect.Update{ID: id, Generation: generation})
+	assertCount(2)
+	m.s.manager.Kill(sessionIndex(m.s.manager, sessions[1]))
+	assertCount(1)
+	if err := sessions[2].Close(); err != nil {
+		t.Fatalf("close agent session: %v", err)
+	}
+	assertCount(0)
+	if err := m.s.manager.Respawn(sessionIndex(m.s.manager, sessions[2])); err != nil {
+		t.Fatalf("respawn agent session: %v", err)
+	}
+	assertCount(0)
+	setTestAgentStatus(t, m.s, sessions[2], agentdetect.StateWorking)
+	assertCount(1)
+}
+
+func TestNarrowConnectionRailKeepsTotalAgentCount(t *testing.T) {
+	m, sessions := newAgentSummaryModel(t)
+	m.s.connectionLayout = connectionLayoutLeft
+	setTestAgentStatus(t, m.s, sessions[0], agentdetect.StateWorking)
+	setTestAgentStatus(t, m.s, sessions[1], agentdetect.StateDone)
+	setTestAgentStatus(t, m.s, sessions[2], agentdetect.StateIdle)
+	rows := m.renderConnectionRail(m.s.geometry())
+	row := ansi.Strip(rows[5])
+	if !strings.Contains(row, "working") || !strings.HasSuffix(row, "(3)") ||
+		ansi.StringWidth(rows[5]) != m.s.geometry().ConnectionRail.Width {
+		t.Fatalf("narrow rail lost total count or active state: %q", row)
 	}
 }
 

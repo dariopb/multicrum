@@ -504,6 +504,11 @@ body.rail-collapsed #rail-resizer{display:none}
 .menu-item .kbd{font-family:var(--font-mono);font-size:11px;color:var(--text-soft)}
 #tab-list{display:flex;align-items:stretch;gap:0;flex:1 1 auto;min-width:0;overflow-x:auto;scrollbar-width:none}
 #tab-list::-webkit-scrollbar{display:none}
+#scroll-status{display:flex;align-items:center;gap:8px;min-width:0;max-width:75%;flex:0 1 auto;background:var(--panel-strong);color:var(--text);padding:0 6px}
+#scroll-status[hidden],#scroll-search[hidden]{display:none}
+#scroll-search{display:flex;align-items:center;min-width:0}
+#scroll-query{min-width:0;width:22ch;max-width:100%;border:0;outline:0;background:transparent;color:inherit;font:inherit}
+#scroll-position{white-space:nowrap}
 .tab-pill{display:inline-flex;align-items:center;height:auto;padding:4px 12px;border:0;border-radius:0;cursor:pointer;font:inherit;color:var(--text-muted);background:transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;flex:0 0 auto}
 .tab-pill:hover{background:color-mix(in srgb,var(--accent-violet) 20%,transparent)}
 .tab-pill.active{background:var(--accent-violet);color:#fff;font-weight:700}
@@ -625,6 +630,10 @@ body.exit-modal-open #tabbar,body.exit-modal-open #connection-rail{position:rela
   </div>
   <div id="tab-list"></div>
   <button id="btn-newtab" class="tab-pill tab-newtab" title="New session (Alt+N)">[+] Alt+N</button>
+  <div id="scroll-status" hidden>
+    <label id="scroll-search" hidden><span id="scroll-prefix">/</span><input id="scroll-query" aria-label="Search scrollback" title="Enter to search, Esc to cancel" autocomplete="off" spellcheck="false"/></label>
+    <span id="scroll-position" role="status" title="/ search, : line, n/N matches, Enter live"></span>
+  </div>
 </div>
 <div id="terminal"></div>
 </main>
@@ -995,7 +1004,7 @@ const terminalWriter = (() => {
 
   return {
     write(data){ processText(decoder.decode(data, {stream:true})); },
-    reset(){ decoder.decode(); queue = []; queuedBytes = 0; syncDepth = 0; syncText = ''; scheduled = false; }
+    reset(){ resetScrollbackUI(); decoder.decode(); queue = []; queuedBytes = 0; syncDepth = 0; syncText = ''; scheduled = false; }
   };
 })();
 
@@ -1815,8 +1824,153 @@ function handleAppShortcut(e){
 term.attachCustomKeyEventHandler(e=>{
   if(e.type!=='keydown') return true;
   if(handleAppShortcut(e)) return false;
+  if(handleScrollbackKey(e)) return false;
   return true;
 });
+
+const scrollSearch = {open:false,lineJump:false,query:'',hits:[],current:-1};
+let selectionDrag = null;
+let rectangularSelection = false;
+function resetScrollbackUI(){
+  scrollSearch.open = false;
+  scrollSearch.query = '';
+  scrollSearch.hits = [];
+  scrollSearch.current = -1;
+  selectionDrag = null;
+  rectangularSelection = false;
+  document.getElementById('scroll-query').value = '';
+  document.getElementById('scroll-status').hidden = true;
+  document.getElementById('scroll-search').hidden = true;
+}
+function updateScrollbackStatus(){
+  const buffer = term.buffer.active;
+  const status = document.getElementById('scroll-status');
+  status.hidden = modalOpen || (buffer.viewportY >= buffer.baseY && !scrollSearch.open);
+  document.getElementById('scroll-search').hidden = !scrollSearch.open;
+  document.getElementById('scroll-position').textContent = Math.min(buffer.length, buffer.viewportY + term.rows)+'/'+buffer.length;
+}
+function openScrollSearch(lineJump){
+  scrollSearch.open = true;
+  scrollSearch.lineJump = lineJump;
+  const input = document.getElementById('scroll-query');
+  input.value = '';
+  input.setCustomValidity('');
+  input.setAttribute('aria-label', lineJump ? 'Go to scrollback line' : 'Search scrollback');
+  document.getElementById('scroll-prefix').textContent = lineJump ? ':' : '/';
+  term.clearSelection();
+  updateScrollbackStatus();
+  input.focus();
+}
+function closeScrollSearch(){
+  scrollSearch.open = false;
+  document.getElementById('scroll-query').value = '';
+  updateScrollbackStatus();
+  term.focus();
+}
+function findScrollbackHits(query){
+  const needle = query.toLowerCase();
+  if(!needle) return [];
+  const buffer = term.buffer.active;
+  const hits = [];
+  for(let row=0;row<buffer.length;row++){
+    const line = buffer.getLine(row);
+    if(!line) continue;
+    let text = '';
+    const columns = [];
+    for(let col=0;col<term.cols;col++){
+      const cell = line.getCell(col);
+      if(!cell || cell.getWidth()===0) continue;
+      const chars = (cell.getChars() || ' ').toLowerCase();
+      for(let i=0;i<chars.length;i++) columns.push({start:col,end:col+cell.getWidth()});
+      text += chars;
+    }
+    for(let start=text.indexOf(needle);start>=0;start=text.indexOf(needle,start+1)){
+      hits.push({row,col:columns[start].start,length:columns[start+needle.length-1].end-columns[start].start});
+    }
+  }
+  return hits;
+}
+function showScrollbackHit(){
+  const hit = scrollSearch.hits[scrollSearch.current];
+  if(!hit) return;
+  rectangularSelection = false;
+  term.select(hit.col,hit.row,hit.length);
+  term.scrollToLine(Math.max(0,hit.row-2));
+  updateScrollbackStatus();
+}
+function commitScrollSearch(){
+  const input = document.getElementById('scroll-query');
+  if(scrollSearch.lineJump){
+    if(!/^[0-9]+$/.test(input.value.trim())){
+      input.setCustomValidity('Enter a line number');
+      input.reportValidity();
+      return;
+    }
+    const row = Math.max(0,Math.min(term.buffer.active.length-1,Number(input.value.trim())-1));
+    term.scrollToLine(Math.max(0,row-2));
+  } else if(input.value.trim()){
+    scrollSearch.query = input.value;
+    scrollSearch.hits = findScrollbackHits(scrollSearch.query);
+    scrollSearch.current = scrollSearch.hits.findIndex(hit => hit.row >= term.buffer.active.viewportY);
+    if(scrollSearch.current<0) scrollSearch.current = 0;
+    if(!scrollSearch.hits.length){
+      input.setCustomValidity('No matches');
+      input.reportValidity();
+      return;
+    }
+    showScrollbackHit();
+  }
+  closeScrollSearch();
+}
+function nextScrollbackHit(delta){
+  scrollSearch.hits = findScrollbackHits(scrollSearch.query);
+  if(!scrollSearch.hits.length) return;
+  scrollSearch.current = (scrollSearch.current+delta+scrollSearch.hits.length)%scrollSearch.hits.length;
+  showScrollbackHit();
+}
+function handleScrollbackKey(e){
+  if(modalOpen || e.isComposing) return false;
+  const input = document.getElementById('scroll-query');
+  if(scrollSearch.open && e.key==='Escape'){
+    e.preventDefault(); e.stopPropagation(); closeScrollSearch(); return true;
+  }
+  if(scrollSearch.open && e.target===input){
+    e.stopPropagation();
+    if(e.key==='Enter'){ e.preventDefault(); commitScrollSearch(); }
+    else if(e.key==='Escape'){ e.preventDefault(); closeScrollSearch(); }
+    else if(e.ctrlKey && e.key.toLowerCase()==='u'){ e.preventDefault(); input.value=''; input.setCustomValidity(''); }
+    return true;
+  }
+  if(!term.element.contains(e.target) || term.buffer.active.type!=='normal') return false;
+  const buffer = term.buffer.active;
+  let handled = true;
+  if(e.ctrlKey && !e.altKey && !e.metaKey){
+    switch(e.key){
+      case 'PageUp': case 'y': term.scrollPages(-1); break;
+      case 'PageDown': term.scrollPages(1); break;
+      case 'ArrowUp': term.scrollLines(-1); break;
+      case 'ArrowDown': term.scrollLines(1); break;
+      case 'Home': term.scrollToTop(); break;
+      case 'End': term.scrollToBottom(); break;
+      default: handled = false;
+    }
+  } else if(!e.ctrlKey && !e.altKey && !e.metaKey && buffer.viewportY<buffer.baseY){
+    switch(e.key){
+      case '/': openScrollSearch(false); break;
+      case ':': openScrollSearch(true); break;
+      case 'n': nextScrollbackHit(1); break;
+      case 'N': nextScrollbackHit(-1); break;
+      case 'Enter': term.scrollToBottom(); break;
+      default: handled = false;
+    }
+  } else handled = false;
+  if(handled){ e.preventDefault(); e.stopPropagation(); updateScrollbackStatus(); }
+  return handled;
+}
+term.onScroll(updateScrollbackStatus);
+term.onWriteParsed(updateScrollbackStatus);
+term.onResize(() => { term.clearSelection(); resetScrollbackUI(); updateScrollbackStatus(); });
+document.getElementById('scroll-query').addEventListener('input', e => e.target.setCustomValidity(''));
 
 // Mouse mode toggle plumbing. xterm.js forwards wheel + click events to the
 // PTY whenever the child enables mouse tracking. Some apps (Edge browser key
@@ -1829,19 +1983,28 @@ term.attachCustomWheelEventHandler(e=>{
     // (which would otherwise forward as a mouse event to the child).
     const lines = e.deltaMode===1 ? e.deltaY : Math.sign(e.deltaY) * 3;
     if(lines) term.scrollLines(lines);
+    if(selectionDrag){
+      selectionDrag = {clientX:e.clientX,clientY:e.clientY};
+      // xterm extends its existing anchor using the newly scrolled viewport.
+      document.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles:true,clientX:e.clientX,clientY:e.clientY,buttons:1,
+      }));
+    }
     e.preventDefault();
     return false;
   }
   return true;
 });
 
-// In 'select' mode, force xterm's selection service to engage even when the
-// child PTY has captured mouse events. xterm's SelectionService only sees a
-// mousedown when shouldForceSelection() is true; on non-Mac that means
-// shiftKey is held. So we intercept the original event in capture phase and
-// re-dispatch a Shift-modified clone at the same point. A WeakSet flag tags
-// the synthesized event so we don't recurse on it.
-const _synthMouse = new WeakSet();
+// The pinned xterm selection service owns drag scrolling and column painting.
+// Override only its gesture gates: synthetic Shift-clicks accidentally extend
+// an old selection (or fail to create one) when tracking is not enabled.
+const selectionService = term._core._selectionService;
+const nativeAltClickMovesCursor = term.options.altClickMovesCursor;
+const nativeForceSelection = selectionService.shouldForceSelection.bind(selectionService);
+const nativeColumnSelection = selectionService.shouldColumnSelect.bind(selectionService);
+selectionService.shouldForceSelection = e => mouseMode==='select' || nativeForceSelection(e);
+selectionService.shouldColumnSelect = e => mouseMode==='select' ? e.ctrlKey && e.altKey : nativeColumnSelection(e);
 let pinchStartDistance = 0;
 let pinchStartScale = viewportScale;
 function pinchDistance(touches){
@@ -1877,22 +2040,9 @@ viewportRoot.addEventListener('touchmove', moveViewportPinch, {capture:true,pass
 viewportRoot.addEventListener('touchend', endViewportPinch, {capture:true,passive:false});
 viewportRoot.addEventListener('touchcancel', endViewportPinch, {capture:true,passive:false});
 function forceSelectMouse(e){
-  if(mouseMode!=='select') return;
-  if(_synthMouse.has(e)) return;
-  if(e.button!==0) return;
-  e.stopImmediatePropagation();
-  e.preventDefault();
-  const clone = new MouseEvent(e.type, {
-    bubbles:true, cancelable:true, composed:true,
-    view:window, detail:e.detail,
-    screenX:e.screenX, screenY:e.screenY,
-    clientX:e.clientX, clientY:e.clientY,
-    ctrlKey:e.ctrlKey, altKey:e.altKey, metaKey:e.metaKey,
-    shiftKey:true, button:e.button, buttons:e.buttons,
-    relatedTarget:e.relatedTarget,
-  });
-  _synthMouse.add(clone);
-  e.target.dispatchEvent(clone);
+  if(e.button!==0 || modalOpen) return;
+  rectangularSelection = selectionService.shouldColumnSelect(e);
+  selectionDrag = {clientX:e.clientX,clientY:e.clientY};
 }
 document.getElementById('terminal').addEventListener('mousedown', forceSelectMouse, {capture:true});
 
@@ -1906,22 +2056,49 @@ function fallbackCopyText(text){
   document.execCommand('copy');
   input.remove();
 }
+function terminalSelectionText(){
+  const text = term.getSelection();
+  return rectangularSelection ? text.replace(/ +(?=\r?$)/gm,'') : text;
+}
+function copyTerminalText(text){
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).catch(() => fallbackCopyText(text));
+  } else {
+    fallbackCopyText(text);
+  }
+}
 function copyTerminalSelectionOnRelease(e){
-  if(e.button !== 0 || serverSettings.copyOnRelease === false || modalOpen) return;
+  if(e.button !== 0) return;
+  const dragged = selectionDrag !== null;
+  selectionDrag = null;
+  if(!dragged || serverSettings.copyOnRelease === false || modalOpen) return;
   queueMicrotask(() => {
-    const text = term.getSelection();
+    const text = terminalSelectionText();
     if(!text) return;
     term.clearSelection();
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(text).catch(() => fallbackCopyText(text));
-    } else {
-      fallbackCopyText(text);
-    }
+    term.scrollToBottom();
+    copyTerminalText(text);
   });
 }
 window.addEventListener('mouseup', copyTerminalSelectionOnRelease, {capture:true});
+document.getElementById('terminal').addEventListener('contextmenu', e => {
+  if(mouseMode!=='select' || !term.hasSelection()) return;
+  e.preventDefault();
+  e.stopPropagation();
+  copyTerminalText(terminalSelectionText());
+  term.clearSelection();
+  term.scrollToBottom();
+}, {capture:true});
+document.getElementById('terminal').addEventListener('copy', e => {
+  if(!rectangularSelection || !term.hasSelection()) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  e.clipboardData.setData('text/plain',terminalSelectionText());
+}, {capture:true});
+window.addEventListener('blur', () => { selectionDrag=null; term.clearSelection(); });
 
 function updateMouseModeUI(){
+  term.options.altClickMovesCursor = mouseMode==='select' ? false : nativeAltClickMovesCursor;
   const label = document.getElementById('m-mouse-mode');
   if(label) label.textContent = mouseMode;
   const root = document.getElementById('terminal');
@@ -1929,6 +2106,8 @@ function updateMouseModeUI(){
 }
 
 function setMouseMode(mode){
+  selectionDrag = null;
+  term.clearSelection();
   mouseMode = (mode==='select') ? 'select' : 'app';
   localStorage.setItem('multicrum-mouse-mode', mouseMode);
   updateMouseModeUI();
@@ -1939,7 +2118,7 @@ function toggleMouseMode(){ setMouseMode(mouseMode==='select' ? 'app' : 'select'
 updateMouseModeUI();
 
 term.onData(d=>keystroke(d));
-window.addEventListener('keydown',e=>{ handleAppShortcut(e); },{capture:true});
+window.addEventListener('keydown',e=>{ if(!handleAppShortcut(e)) handleScrollbackKey(e); },{capture:true});
 let viewportResizeFrame = 0;
 function handleViewportResize(){
   applyViewportScale();

@@ -3,6 +3,7 @@ package ui
 import (
 	"encoding/base64"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -23,6 +24,23 @@ type selection struct {
 	endL        int
 	endC        int
 	hasRange    bool // true once we've moved beyond the press point
+	history     *scrollWrapCache
+	historyBase int
+	scroll      *selectionScroll
+}
+
+type selectionScroll struct {
+	x, y, delta int
+}
+
+type selectionScrollMsg struct {
+	scroll *selectionScroll
+}
+
+func selectionScrollTick(scroll *selectionScroll) tea.Cmd {
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return selectionScrollMsg{scroll: scroll}
+	})
 }
 
 func (sel selection) normalized() (sl, sc, el, ec int) {
@@ -126,9 +144,10 @@ func (s *state) bufferRowFromMouse(yInPane int) int {
 	return s.paneRowBase(idx, vp) + yInPane
 }
 
-// startSelection begins a fresh selection at the given mouse coordinates
-// (pane-relative). Returns true if the click was inside the pane.
+// startSelection begins a fresh selection at pane-relative mouse coordinates.
 func (s *state) startSelection(xInPane, yInPane int, rectangular bool) {
+	idx := s.manager.FocusedIndex()
+	s.ensureViewport(idx, s.width, s.height)
 	line := s.bufferRowFromMouse(yInPane)
 	s.sel = selection{
 		active:      true,
@@ -139,7 +158,88 @@ func (s *state) startSelection(xInPane, yInPane int, rectangular bool) {
 		endC:        xInPane,
 		hasRange:    false,
 	}
+	s.snapshotSelectionHistory(idx, s.viewports[idx])
 	debugLog("startSelection: line=%d col=%d rectangular=%v", line, xInPane, rectangular)
+}
+
+// Keep the painted screen, not the semantic history's potentially redrawn
+// tail, when a live selection first crosses into scrollback.
+func (s *state) snapshotSelectionHistory(idx int, vp *viewport.Model) {
+	sess := s.manager.Focused()
+	if s.scrollbackMode[idx] || sess == nil || sess.Screen().IsAltScreen() {
+		return
+	}
+	cols, rows := sess.Screen().Dimensions()
+	historyRows, historyPlain := softWrapRowsWithPlain(
+		strings.Split(sess.Screen().RenderWithScrollback(), "\n"), cols)
+	n := max(0, len(historyRows)-rows)
+	var history strings.Builder
+	for i := 0; i < n; i++ {
+		history.WriteString(historyRows[i])
+		if !historyPlain[i].SoftWrap {
+			history.WriteByte('\n')
+		}
+	}
+	paneCols := s.geometry().Pane.Width
+	var wrapped []string
+	var plain []session.BufferLine
+	if n > 0 {
+		wrapped, plain = softWrapRowsWithPlain(
+			strings.Split(strings.TrimSuffix(history.String(), "\n"), "\n"), paneCols)
+		plain[len(plain)-1].SoftWrap = historyPlain[n-1].SoftWrap
+	}
+	s.sel.historyBase = len(wrapped)
+	liveRows := softWrapRows(strings.Split(vp.GetContent(), "\n"), paneCols)
+	wrapped = append(wrapped, liveRows...)
+	plain = append(plain, s.selectionLines(idx, vp)...)
+	s.sel.history = &scrollWrapCache{
+		content: strings.Join(wrapped, "\n"), cols: paneCols,
+		rows: wrapped, plain: plain,
+	}
+}
+
+func (s *state) scrollSelection(delta, x, y int) bool {
+	idx := s.manager.FocusedIndex()
+	s.ensureViewport(idx, s.width, s.height)
+	vp := s.viewports[idx]
+	if !s.scrollbackMode[idx] && s.sel.history != nil {
+		offset := vp.YOffset()
+		s.scrollbackCache[idx] = *s.sel.history
+		vp.SoftWrap = false
+		vp.SetContent(s.sel.history.content)
+		vp.SetYOffset(offset + s.sel.historyBase)
+		s.sel.startL += s.sel.historyBase
+		s.sel.endL += s.sel.historyBase
+		s.scrollbackMode[idx] = true
+		s.sel.history = nil
+	}
+	offset := vp.YOffset()
+	// Alternate-screen selection has no main-screen history to enter.
+	if delta < 0 {
+		vp.ScrollUp(-delta)
+	} else {
+		vp.ScrollDown(delta)
+	}
+	s.updateSelection(x, y)
+	return vp.YOffset() != offset
+}
+
+func (s *state) dragSelection(x, y, delta int) tea.Cmd {
+	s.updateSelection(x, y)
+	if delta == 0 {
+		s.sel.scroll = nil
+		return nil
+	}
+	if s.sel.scroll != nil {
+		s.sel.scroll.x, s.sel.scroll.y, s.sel.scroll.delta = x, y, delta
+		return nil
+	}
+	if !s.scrollSelection(delta, x, y) {
+		return nil
+	}
+	scroll := &selectionScroll{x: x, y: y, delta: delta}
+	s.sel.scroll = scroll
+	return selectionScrollTick(scroll)
 }
 
 // updateSelection extends the current selection to the given mouse coords.
@@ -163,9 +263,13 @@ func (s *state) finishSelection() tea.Cmd {
 	wasActive := s.sel.active
 	hadRange := s.sel.hasRange
 	s.sel.active = false
+	s.sel.scroll = nil
 	if !wasActive || !hadRange {
 		// Plain click without drag: clear selection.
 		s.sel = selection{}
+		if wasActive && !s.scrollbackMode[s.manager.FocusedIndex()] {
+			s.bottomFocused()
+		}
 		return nil
 	}
 	text := s.selectionText()
@@ -241,7 +345,7 @@ func (s *state) clearSelection() {
 }
 
 // selectionText returns the selected text from the focused session, with
-// soft-wrapped rows joined without a newline.
+// soft-wrapped rows joined without a newline for linear selections.
 func (s *state) selectionText() string {
 	sess := s.manager.Focused()
 	if sess == nil {
@@ -300,15 +404,11 @@ func rectangularSelectionText(lines []session.BufferLine, sel selection) string 
 	if sl > el {
 		return ""
 	}
-	width := ec - sc + 1
 	var b strings.Builder
 	for row := sl; row <= el; row++ {
 		runes := []rune(lines[row].Text)
-		if len(runes) < ec+1 {
-			runes = append(runes, []rune(strings.Repeat(" ", ec+1-len(runes)))...)
-		}
-		startX, endX := clampRange(sc, sc+width, len(runes))
-		b.WriteString(string(runes[startX:endX]))
+		startX, endX := clampRange(sc, ec+1, len(runes))
+		b.WriteString(strings.TrimRight(string(runes[startX:endX]), " "))
 		if row < el {
 			b.WriteByte('\n')
 		}

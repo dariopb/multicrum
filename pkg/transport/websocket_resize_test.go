@@ -157,6 +157,8 @@ func TestWebWriterResetDiscardsPartialUTF8(t *testing.T) {
 const assert = require('node:assert/strict');
 const written = [], frames = [];
 const term = {write(text){ written.push(text); }};
+let interactionResets = 0;
+function resetScrollbackUI(){ interactionResets++; }
 function requestAnimationFrame(callback){ frames.push(callback); }
 `+writer+`
 terminalWriter.write(new TextEncoder().encode('old session'));
@@ -165,5 +167,6 @@ terminalWriter.reset();
 terminalWriter.write(new TextEncoder().encode('new session'));
 for(const flush of frames) flush();
 assert.equal(written.join(''), 'new session', 'old queued bytes or partial UTF-8 leaked across session reset');
+assert.equal(interactionResets, 1, 'session reset must discard old search and selection state');
 `)
 }

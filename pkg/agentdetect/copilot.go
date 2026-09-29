@@ -24,8 +24,8 @@ func DetectCopilotScreen(lines []string) (State, bool) {
 	footer := strings.ToLower(strings.Join(strings.Fields(strings.Join(footerLines, " ")), " "))
 	for _, line := range footerLines {
 		line = strings.ToLower(strings.TrimSpace(line))
+		// Copilot replaces the activity label with the current task text.
 		if hasCopilotWorkingMarker(line) &&
-			strings.Contains(line, "working") &&
 			strings.Contains(footer, "esc interrupt") {
 			return StateWorking, true
 		}

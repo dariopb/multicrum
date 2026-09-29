@@ -135,6 +135,15 @@ func (s *state) evaluateAgentScreen(conn *connectionState, index int) {
 	s.evaluateAgentSession(conn.manager.ByID(index))
 }
 
+func (s *state) evaluateConnectionAgentScreens(conn *connectionState) {
+	if conn == nil || conn.manager == nil {
+		return
+	}
+	for _, sess := range conn.manager.Sessions() {
+		s.evaluateAgentSession(sess)
+	}
+}
+
 func (s *state) evaluateAgentSession(sess *session.Session) {
 	status, ok := s.agentStatus(sess)
 	if !ok ||
@@ -344,6 +353,13 @@ func (s *state) renderAgentLine(base lipgloss.Style, status agentdetect.Status, 
 	line := s.renderAgentLabel(contentStyle, status, count)
 	lineWidth := lipgloss.Width(line)
 	if lineWidth > width {
+		if count > 1 {
+			suffix := fmt.Sprintf(" (%d)", count)
+			if available := width - lipgloss.Width(suffix); available >= 0 {
+				label := s.renderAgentLabel(contentStyle, status, 1)
+				return padLine(ansi.Truncate(label, available, ""), available) + contentStyle.Render(suffix)
+			}
+		}
 		return ansi.Truncate(line, width, "")
 	}
 	return line + contentStyle.Render(strings.Repeat(" ", width-lineWidth))
@@ -359,25 +375,29 @@ func (s *state) connectionAgentSummary(conn *connectionState) (agentdetect.Statu
 		return agentdetect.Status{}, 0, false
 	}
 	priority := map[agentdetect.State]int{
-		agentdetect.StateBlocked: 5,
-		agentdetect.StateDone:    4,
+		agentdetect.StateBlocked: 4,
 		agentdetect.StateWorking: 3,
-		agentdetect.StateIdle:    2,
-		agentdetect.StateUnknown: 1,
+		agentdetect.StateUnknown: 2,
+		agentdetect.StateIdle:    1,
 	}
 	var selected agentdetect.Status
 	count := 0
 	for _, sess := range conn.manager.Sessions() {
+		if sess.Exited() {
+			continue
+		}
 		status, ok := s.agentStatus(sess)
 		if !ok {
 			continue
 		}
+		// Completion is an unread-session marker, not connection activity.
+		if status.State == agentdetect.StateDone {
+			status.State = agentdetect.StateIdle
+		}
 		if count == 0 || priority[status.State] > priority[selected.State] {
 			selected = status
-			count = 1
-		} else if status.State == selected.State {
-			count++
 		}
+		count++
 	}
 	if count == 0 {
 		return agentdetect.Status{}, 0, false

@@ -41,6 +41,7 @@ func (s *state) clearSearch() {
 
 // openScrollSearch opens the '/' (text) or ':' (line jump) prompt.
 func (s *state) openScrollSearch(lineJump bool) {
+	s.clearSelection()
 	s.search.input = ""
 	s.search.lineJump = lineJump
 	s.mode = modeScrollSearch
@@ -81,7 +82,9 @@ func (s *state) jumpToLine(in string) {
 	if sess == nil {
 		return
 	}
-	total := len(sess.Screen().BufferLines())
+	idx := s.manager.FocusedIndex()
+	s.ensureViewport(idx, s.width, s.height)
+	total := len(s.selectionLines(idx, s.viewports[idx]))
 	if total == 0 {
 		return
 	}
@@ -117,7 +120,9 @@ func (s *state) computeHits(query string) []searchHit {
 	if sess == nil {
 		return nil
 	}
-	bl := sess.Screen().BufferLines()
+	idx := s.manager.FocusedIndex()
+	s.ensureViewport(idx, s.width, s.height)
+	bl := s.selectionLines(idx, s.viewports[idx])
 	texts := make([]string, len(bl))
 	for i := range bl {
 		texts[i] = bl[i].Text

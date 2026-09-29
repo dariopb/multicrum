@@ -72,6 +72,41 @@ func TestDetectCopilotScreen(t *testing.T) {
 			state: StateWorking, ok: true,
 		},
 		{
+			name:  "task-specific activity",
+			lines: []string{" ◉ Validating standalone atectl · 177.5 KiB esc interrupt     "},
+			state: StateWorking, ok: true,
+		},
+		{
+			name:  "task-specific activity with wrapped controls",
+			lines: []string{"◎ Running targeted tests · 177.5 KiB", "esc", "interrupt"},
+			state: StateWorking, ok: true,
+		},
+		{
+			name:  "solid activity marker with arbitrary label",
+			lines: []string{"● Reviewing the results esc interrupt"},
+			state: StateWorking, ok: true,
+		},
+		{
+			name:  "outline activity marker with arbitrary label",
+			lines: []string{"○ Preparing the next step esc interrupt"},
+			state: StateWorking, ok: true,
+		},
+		{
+			name:  "task text without activity marker",
+			lines: []string{"Validating standalone atectl · 177.5 KiB esc interrupt"},
+			state: StateUnknown, ok: false,
+		},
+		{
+			name:  "activity marker without interrupt control",
+			lines: []string{"◉ Validating standalone atectl · 177.5 KiB"},
+			state: StateUnknown, ok: false,
+		},
+		{
+			name:  "hard line break inside interrupt control",
+			lines: []string{"◉ Validating standalone atectl · 177.5 KiB esc inter", "rupt"},
+			state: StateUnknown, ok: false,
+		},
+		{
 			name:  "idle controls on separate lines",
 			lines: []string{"← open", "sidebar · /", "commands · ?", "help · tab", "next tab GPT"},
 			state: StateIdle, ok: true,

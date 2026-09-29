@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +9,283 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"multicrum/pkg/session"
 )
+
+func newSelectionScrollModel(t *testing.T, layout connectionLayout) *Model {
+	t.Helper()
+	m := NewModel([]string{"bash"}, 40, 10)
+	m.s.connectionLayout = layout
+	geom := m.s.geometry()
+	m.s.manager = session.NewManager(geom.Pane.Width, geom.Pane.Height, nil, nil)
+	m.s.connections[0].manager = m.s.manager
+	m.s.syncActiveConnectionFields()
+	if _, err := m.s.manager.New([]string{"sh", "-c", "sleep 60"}); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	t.Cleanup(func() { m.s.manager.CloseAll() })
+	m.s.ensureViewport(0, 40, 10)
+	return m
+}
+
+func TestSelectionDragScrollsAtEdges(t *testing.T) {
+	for _, layout := range []connectionLayout{connectionLayoutBottom, connectionLayoutLeft} {
+		for _, rectangular := range []bool{false, true} {
+			for _, delta := range []int{-1, 1} {
+				t.Run(fmt.Sprintf("%s/block=%v/delta=%d", layout, rectangular, delta), func(t *testing.T) {
+					m := newSelectionScrollModel(t, layout)
+					var rows []string
+					for i := 0; i < 40; i++ {
+						rows = append(rows, fmt.Sprintf("row %02d  ", i))
+					}
+					vp := m.s.viewports[0]
+					m.s.setScrollbackContent(0, vp, strings.Join(rows, "\n"))
+					m.s.scrollbackMode[0] = true
+					vp.SetYOffset(10)
+					geom := m.s.geometry()
+					mod := tea.KeyMod(0)
+					if rectangular {
+						mod = tea.ModCtrl | tea.ModAlt
+					}
+					_, _ = m.Update(tea.MouseClickMsg{
+						X: geom.Pane.X, Y: geom.Pane.Y + 3, Button: tea.MouseLeft, Mod: mod,
+					})
+					anchor := m.s.sel.startL
+					edgeY := geom.Pane.Y
+					if delta > 0 {
+						edgeY += geom.Pane.Height - 1
+					}
+					motion := tea.MouseMotionMsg{
+						X: geom.Pane.X + 8, Y: edgeY, Button: tea.MouseLeft,
+					}
+					_, cmd := m.Update(motion)
+					if cmd == nil || vp.YOffset() != 10+delta {
+						t.Fatalf("edge drag: offset=%d cmd=%v", vp.YOffset(), cmd != nil)
+					}
+					scroll := m.s.sel.scroll
+					for i := 0; i < 3; i++ {
+						_, cmd = m.Update(selectionScrollMsg{scroll: scroll})
+						if cmd == nil {
+							t.Fatal("edge scrolling stopped before the history boundary")
+						}
+					}
+					if vp.YOffset() != 10+4*delta || m.s.sel.startL != anchor {
+						t.Fatalf("scroll lost anchor: offset=%d selection=%#v", vp.YOffset(), m.s.sel)
+					}
+					sl, _, el, _ := m.s.sel.normalized()
+					var wantRows []string
+					for row := sl; row <= el; row++ {
+						text := strings.TrimRight(rows[row], " ")
+						if !rectangular && delta < 0 {
+							if row == sl {
+								text = ""
+							}
+							if row == el {
+								text = "r"
+							}
+						}
+						wantRows = append(wantRows, text)
+					}
+					want := strings.Join(wantRows, "\n")
+					if got := m.s.selectionText(); got != want {
+						t.Fatalf("extended selection = %q, want %q", got, want)
+					}
+					var copied string
+					m.s.clipboardWrite = func(text string) { copied = text }
+					_, cmd = m.Update(tea.MouseReleaseMsg{
+						X: motion.X, Y: motion.Y, Button: tea.MouseLeft,
+					})
+					if cmd == nil {
+						t.Fatal("release did not queue the full selection for copying")
+					}
+					_ = cmd()
+					if copied != want {
+						t.Fatalf("copied = %q, want %q", copied, want)
+					}
+					if _, cmd = m.Update(selectionScrollMsg{scroll: scroll}); cmd != nil {
+						t.Fatal("stale tick continued after release")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSelectionScrollKeepsLiveSnapshotAndAnchor(t *testing.T) {
+	for _, cleared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cleared=%v", cleared), func(t *testing.T) {
+			m := newSelectionScrollModel(t, connectionLayoutBottom)
+			sess := m.s.manager.Focused()
+			for i := 0; i < 30; i++ {
+				sess.Screen().Write([]byte(fmt.Sprintf("history %02d\r\n", i)))
+			}
+			if cleared {
+				sess.Screen().Write([]byte("\x1b[2J\x1b[Hpainted first\r\npainted second"))
+			}
+			vp := m.s.viewports[0]
+			m.s.setLiveContent(0, vp, sess)
+			before := m.s.selectionLines(0, vp)
+			m.s.startSelection(0, 2, false)
+			sess.Screen().Write([]byte("\x1b[2J\x1b[Hnew output"))
+			_, _ = m.Update(renderTickMsg{})
+			if got := m.s.selectionLines(0, vp)[2]; got != before[2] {
+				t.Fatalf("output changed painted selection row: %#v, want %#v", got, before[2])
+			}
+			base := m.s.sel.historyBase
+			if base == 0 {
+				t.Fatal("missing history before live screen")
+			}
+			m.s.scrollSelection(-3, 4, 0)
+			lines := m.s.selectionLines(0, vp)
+			if m.s.sel.startL != base+2 || lines[m.s.sel.startL] != before[2] {
+				t.Fatalf("live anchor moved to different text: %#v", m.s.sel)
+			}
+			for i, line := range before {
+				if lines[base+i] != line {
+					t.Fatalf("painted row %d = %#v, want %#v", i, lines[base+i], line)
+				}
+			}
+			m.s.scrollSelection(100, 4, vp.Height()-1)
+			content := vp.GetContent()
+			_, _ = m.Update(renderTickMsg{})
+			if !m.s.scrollbackMode[0] || vp.GetContent() != content {
+				t.Fatal("render tick discarded selection at scrollback tail")
+			}
+		})
+	}
+}
+
+func TestSelectionWheelExtendsAndEdgeTickStops(t *testing.T) {
+	m := newSelectionScrollModel(t, connectionLayoutBottom)
+	vp := m.s.viewports[0]
+	m.s.setScrollbackContent(0, vp, strings.Repeat("row\n", 40))
+	m.s.scrollbackMode[0] = true
+	vp.SetYOffset(10)
+	geom := m.s.geometry()
+	m.s.startSelection(0, 3, true)
+	anchor := m.s.sel.startL
+	for _, button := range []tea.MouseButton{tea.MouseWheelUp, tea.MouseWheelDown} {
+		offset := vp.YOffset()
+		_, _ = m.Update(tea.MouseWheelMsg{
+			X: geom.Pane.X + 2, Y: geom.Pane.Y + 1, Button: button,
+		})
+		delta := 3
+		if button == tea.MouseWheelUp {
+			delta = -3
+		}
+		if vp.YOffset() != offset+delta || m.s.sel.endL != vp.YOffset()+1 ||
+			m.s.sel.startL != anchor || !m.s.sel.rectangular {
+			t.Fatalf("wheel lost selection: offset=%d selection=%#v", vp.YOffset(), m.s.sel)
+		}
+	}
+	_, _ = m.Update(tea.MouseMotionMsg{X: geom.Pane.X + 2, Y: 0, Button: tea.MouseLeft})
+	scroll := m.s.sel.scroll
+	_, _ = m.Update(tea.MouseMotionMsg{
+		X: geom.Pane.X + 2, Y: geom.Pane.Y + 2, Button: tea.MouseLeft,
+	})
+	offset := vp.YOffset()
+	if _, cmd := m.Update(selectionScrollMsg{scroll: scroll}); cmd != nil || vp.YOffset() != offset {
+		t.Fatal("returning inside the pane did not stop edge scrolling")
+	}
+	_, _ = m.Update(tea.MouseMotionMsg{X: geom.Pane.X + 2, Y: 0, Button: tea.MouseLeft})
+	scroll = m.s.sel.scroll
+	for i := 0; i < 50 && m.s.sel.scroll != nil; i++ {
+		_, _ = m.Update(selectionScrollMsg{scroll: scroll})
+	}
+	if vp.YOffset() != 0 || m.s.sel.scroll != nil || m.s.sel.endL != 0 {
+		t.Fatal("edge scrolling did not stop at the history boundary")
+	}
+}
+
+func TestSelectionScrollCancellation(t *testing.T) {
+	for _, action := range []string{"resize", "focus", "shift", "new-drag", "typing", "paste"} {
+		t.Run(action, func(t *testing.T) {
+			m := newSelectionScrollModel(t, connectionLayoutBottom)
+			vp := m.s.viewports[0]
+			m.s.setScrollbackContent(0, vp, strings.Repeat("row\n", 40))
+			m.s.scrollbackMode[0] = true
+			vp.SetYOffset(10)
+			m.s.startSelection(0, 3, false)
+			_ = m.s.dragSelection(2, 0, -1)
+			scroll := m.s.sel.scroll
+			if scroll == nil {
+				t.Fatal("missing edge-scroll timer")
+			}
+			switch action {
+			case "resize":
+				_, _ = m.Update(tea.WindowSizeMsg{Width: 50, Height: 12})
+			case "focus":
+				m.s.refreshFocused()
+			case "shift":
+				_, _ = m.Update(tea.MouseMotionMsg{X: 2, Y: 2, Button: tea.MouseLeft, Mod: tea.ModShift})
+			case "new-drag":
+				m.s.startSelection(0, 3, false)
+				_ = m.s.dragSelection(2, 0, -1)
+			case "typing":
+				_, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+			case "paste":
+				_, _ = m.Update(tea.PasteMsg{Content: "text"})
+			}
+			offset := vp.YOffset()
+			if _, cmd := m.Update(selectionScrollMsg{scroll: scroll}); cmd != nil || vp.YOffset() != offset {
+				t.Fatal("stale scroll timer changed a cancelled/replaced selection")
+			}
+		})
+	}
+}
+
+func TestSelectionScrollDoesNotEnterAlternateScreenHistory(t *testing.T) {
+	m := newSelectionScrollModel(t, connectionLayoutBottom)
+	sess := m.s.manager.Focused()
+	sess.Screen().Write([]byte(strings.Repeat("history\r\n", 30) + "\x1b[?1049halt screen"))
+	vp := m.s.viewports[0]
+	m.s.setLiveContent(0, vp, sess)
+	m.s.startSelection(0, 2, false)
+	if cmd := m.s.dragSelection(3, 0, -1); cmd != nil || m.s.scrollbackMode[0] {
+		t.Fatal("alternate-screen drag exposed main-screen scrollback")
+	}
+}
+
+func TestSelectionReleaseResumesOutput(t *testing.T) {
+	for _, dragged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dragged=%v", dragged), func(t *testing.T) {
+			m := newSelectionScrollModel(t, connectionLayoutBottom)
+			sess := m.s.manager.Focused()
+			sess.Screen().Write([]byte("old output"))
+			vp := m.s.viewports[0]
+			m.s.setLiveContent(0, vp, sess)
+			m.s.startSelection(0, 0, false)
+			if dragged {
+				m.s.updateSelection(3, 0)
+			}
+			sess.Screen().Write([]byte("\x1b[2J\x1b[Hnew output"))
+			_, _ = m.Update(renderTickMsg{})
+			_ = m.s.finishSelection()
+			if !strings.Contains(vp.GetContent(), "new output") {
+				t.Fatal("release left the terminal frozen on the selection snapshot")
+			}
+		})
+	}
+}
+
+func TestRectangularSelectionTrimsSpacesButPreservesLineBreaks(t *testing.T) {
+	lines := []session.BufferLine{
+		{Text: "  ab   ", SoftWrap: true},
+		{Text: "       "},
+		{Text: "  c d  "},
+		{Text: ""},
+	}
+	sel := selection{rectangular: true, startC: 0, endL: 3, endC: 6}
+	if got := rectangularSelectionText(lines, sel); got != "  ab\n\n  c d\n" {
+		t.Fatalf("block copy = %q, want leading/interior spaces and all row breaks", got)
+	}
+	m := newSelectionScrollModel(t, connectionLayoutBottom)
+	vp := m.s.viewports[0]
+	vp.SetContent("  ab   \n  c d  ")
+	m.s.liveLines[0] = []session.BufferLine{{Text: "  ab   "}, {Text: "  c d  "}}
+	m.s.sel = selection{startC: 0, endL: 1, endC: 6, hasRange: true}
+	if got := m.s.selectionText(); got != "  ab   \n  c d  " {
+		t.Fatalf("linear copy spaces changed: %q", got)
+	}
+}
 
 func TestClampRange(t *testing.T) {
 	cases := []struct {
@@ -407,7 +685,7 @@ func TestRectangularSelectionCopiesFixedBlock(t *testing.T) {
 		endL: 2, endC: 2,
 		hasRange: true,
 	}
-	if got := m.s.selectionText(); got != "23456\ncdefg\nZ    " {
+	if got := m.s.selectionText(); got != "23456\ncdefg\nZ" {
 		t.Fatalf("selectionText() = %q, want rectangular block", got)
 	}
 }
@@ -587,8 +865,8 @@ func TestRectangularSelectionAfterScrollbackPadding(t *testing.T) {
 
 	m.s.startSelection(1, 1, true)
 	m.s.updateSelection(3, 2)
-	if got := m.s.selectionText(); got != "BCD\n2  " {
-		t.Fatalf("rectangular selection after scroll = %q, want %q", got, "BCD\n2  ")
+	if got := m.s.selectionText(); got != "BCD\n2" {
+		t.Fatalf("rectangular selection after scroll = %q, want %q", got, "BCD\n2")
 	}
 }
 

@@ -392,6 +392,10 @@ See `spec-control-protocol.md` for the wire protocol and
 
 In the left layout, click the `Multicrum` title for the global action menu. **Detach** disconnects only the client that opened the menu; **Quit** opens the server-wide shutdown confirmation.
 
+In both the TUI and browser, scrollback navigation supports `Ctrl+PgUp` / `Ctrl+PgDown`, `Ctrl+Up` / `Ctrl+Down`, and `Ctrl+Home` / `Ctrl+End`. While scrolled up, `/` searches, `:` jumps to a line, and `n` / `N` moves through matches. The search prompt appears in the **top bar above the terminal pane**, immediately left of the current-line/total-lines counter. Enter commits and Esc cancels, restoring the normal top bar.
+
+In select mouse mode, dragging to or beyond the terminal edge scrolls and extends the selection; the mouse wheel also extends an active drag. Hold `Ctrl+Alt` when starting a drag for rectangular selection. Block copies trim trailing spaces on each row but retain line breaks and blank rows; ordinary selection copying is unchanged. Copy-on-release follows the shared setting, with right-click copying available for retained selections.
+
 In SSH sessions, OpenSSH-style escapes are supported at line start:
 
 - `~.` disconnects the SSH session.
